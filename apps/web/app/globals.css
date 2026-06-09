@@ -1,0 +1,317 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --background: #07070a;
+  --surface: rgba(255, 255, 255, 0.08);
+  --surface-strong: rgba(255, 255, 255, 0.14);
+  --border: rgba(255, 255, 255, 0.16);
+  --muted: #a8aab6;
+  --text: #f8fbff;
+  --ember: #ff6b35;
+  --mint: #58f0b6;
+  --volt: #d9f85b;
+  --plasma: #ff4db8;
+  --cyan: #25d8ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  overflow-x: hidden;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    radial-gradient(circle at 40% 0%, rgba(37, 216, 255, 0.12), transparent 32rem),
+    #07070a;
+  background-size: 52px 52px, 52px 52px, auto, auto;
+  color: var(--text);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  cursor: pointer;
+}
+
+::selection {
+  background: rgba(88, 240, 182, 0.28);
+  color: #ffffff;
+}
+
+.focus-ring {
+  outline: none;
+}
+
+.focus-ring:focus-visible {
+  outline: 2px solid var(--mint);
+  outline-offset: 4px;
+}
+
+.hero-shell {
+  position: relative;
+  min-height: 88svh;
+  overflow: hidden;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.hero-shell::before {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  content: "";
+  background:
+    linear-gradient(180deg, rgba(7, 7, 10, 0.16), rgba(7, 7, 10, 0.82) 70%),
+    linear-gradient(120deg, rgba(255, 107, 53, 0.2), transparent 30%),
+    linear-gradient(240deg, rgba(88, 240, 182, 0.18), transparent 28%);
+}
+
+.preview-stage {
+  position: absolute;
+  inset: 5.5rem 0 auto 0;
+  z-index: 0;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(9rem, 1fr));
+  gap: clamp(0.75rem, 1.8vw, 1.35rem);
+  width: min(90rem, calc(100% - 2rem));
+  margin: 0 auto;
+  opacity: 0.82;
+  transform: perspective(1200px) rotateX(10deg);
+}
+
+.stage-card {
+  min-height: clamp(10rem, 22vw, 22rem);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 1.4rem;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.38);
+  overflow: hidden;
+}
+
+.stage-card:nth-child(1),
+.stage-card:nth-child(5) {
+  transform: translateY(3.5rem);
+}
+
+.stage-card:nth-child(2),
+.stage-card:nth-child(6) {
+  transform: translateY(1.4rem);
+}
+
+.glass-panel {
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.06));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(18px);
+}
+
+.accent-border {
+  position: relative;
+}
+
+.accent-border::after {
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  content: "";
+  background: linear-gradient(120deg, var(--cyan), var(--plasma), var(--volt), var(--ember));
+  opacity: 0.5;
+}
+
+.gallery-art {
+  position: relative;
+  min-height: 18rem;
+  overflow: hidden;
+  border-radius: 1rem;
+  background: #14151c;
+  isolation: isolate;
+}
+
+.gallery-art::before,
+.gallery-art::after,
+.stage-card::before {
+  position: absolute;
+  inset: 0;
+  content: "";
+}
+
+.art-cinematic,
+.stage-cinematic {
+  background:
+    linear-gradient(165deg, rgba(255, 107, 53, 0.92), transparent 36%),
+    linear-gradient(20deg, rgba(37, 216, 255, 0.5), transparent 38%),
+    radial-gradient(circle at 70% 28%, rgba(255, 255, 255, 0.95) 0 7%, transparent 8%),
+    linear-gradient(180deg, #14151c, #050507);
+}
+
+.art-cinematic::before,
+.stage-cinematic::before {
+  background:
+    linear-gradient(90deg, transparent 0 18%, rgba(0, 0, 0, 0.45) 18% 20%, transparent 20% 44%, rgba(0, 0, 0, 0.38) 44% 46%, transparent 46%),
+    linear-gradient(0deg, rgba(255, 255, 255, 0.18) 0 1px, transparent 1px 14px);
+  opacity: 0.45;
+}
+
+.art-product,
+.stage-product {
+  background:
+    radial-gradient(ellipse at 50% 45%, rgba(255, 255, 255, 0.95) 0 12%, transparent 13%),
+    radial-gradient(ellipse at 50% 55%, rgba(88, 240, 182, 0.85) 0 24%, transparent 25%),
+    conic-gradient(from 120deg, #101116, #25d8ff, #ff4db8, #101116);
+}
+
+.art-product::before,
+.stage-product::before {
+  background:
+    linear-gradient(90deg, transparent 32%, rgba(255, 255, 255, 0.78) 33% 35%, transparent 36%),
+    linear-gradient(180deg, transparent 52%, rgba(0, 0, 0, 0.62) 53% 100%);
+  transform: rotate(-18deg) scale(1.08);
+}
+
+.art-anime,
+.stage-anime {
+  background:
+    radial-gradient(circle at 38% 34%, #ffe9f5 0 7%, transparent 8%),
+    radial-gradient(circle at 62% 34%, #ffe9f5 0 7%, transparent 8%),
+    radial-gradient(circle at 50% 50%, #ff4db8 0 20%, transparent 21%),
+    linear-gradient(135deg, #25d8ff, #5f43ff 52%, #101116);
+}
+
+.art-anime::before,
+.stage-anime::before {
+  background:
+    linear-gradient(135deg, transparent 0 42%, rgba(255, 255, 255, 0.72) 43% 45%, transparent 46%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.14) 0 2px, transparent 2px 16px);
+}
+
+.art-poster,
+.stage-poster {
+  background:
+    linear-gradient(90deg, rgba(217, 248, 91, 0.92) 0 28%, transparent 29%),
+    linear-gradient(160deg, transparent 0 45%, rgba(255, 77, 184, 0.88) 46% 70%, transparent 71%),
+    linear-gradient(24deg, #101116 0 48%, #ff6b35 49% 70%, #25d8ff 71%);
+}
+
+.art-poster::before,
+.stage-poster::before {
+  background:
+    repeating-linear-gradient(0deg, rgba(7, 7, 10, 0.65) 0 8px, transparent 8px 16px),
+    radial-gradient(circle at 76% 24%, rgba(255, 255, 255, 0.8) 0 9%, transparent 10%);
+  mix-blend-mode: soft-light;
+}
+
+.art-architecture,
+.stage-architecture {
+  background:
+    linear-gradient(145deg, transparent 0 32%, rgba(255, 255, 255, 0.8) 33% 34%, transparent 35%),
+    linear-gradient(35deg, transparent 0 46%, rgba(88, 240, 182, 0.82) 47% 64%, transparent 65%),
+    linear-gradient(155deg, #07070a, #2d375f, #ff6b35);
+}
+
+.art-architecture::before,
+.stage-architecture::before {
+  background:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.18) 0 1px, transparent 1px 18px),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.12) 0 1px, transparent 1px 18px);
+  transform: skewY(-8deg) scale(1.08);
+}
+
+.art-isometric,
+.stage-isometric {
+  background:
+    linear-gradient(30deg, transparent 0 38%, rgba(217, 248, 91, 0.88) 39% 58%, transparent 59%),
+    linear-gradient(150deg, transparent 0 38%, rgba(37, 216, 255, 0.82) 39% 58%, transparent 59%),
+    linear-gradient(210deg, #ff4db8, #1d2030 52%, #07070a);
+}
+
+.art-isometric::before,
+.stage-isometric::before {
+  background:
+    repeating-linear-gradient(30deg, rgba(255, 255, 255, 0.2) 0 2px, transparent 2px 26px),
+    repeating-linear-gradient(150deg, rgba(255, 255, 255, 0.14) 0 2px, transparent 2px 26px);
+  opacity: 0.7;
+}
+
+.gallery-art::after {
+  background:
+    linear-gradient(180deg, transparent 48%, rgba(0, 0, 0, 0.58)),
+    linear-gradient(120deg, rgba(255, 255, 255, 0.18), transparent 34%);
+}
+
+.marquee {
+  display: flex;
+  gap: 0.75rem;
+  width: max-content;
+  animation: marquee 34s linear infinite;
+}
+
+.marquee:hover {
+  animation-play-state: paused;
+}
+
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-width: 1024px) {
+  .preview-stage {
+    grid-template-columns: repeat(3, minmax(8rem, 1fr));
+    top: 6.5rem;
+    opacity: 0.42;
+  }
+}
+
+@media (max-width: 640px) {
+  .hero-shell {
+    min-height: 94svh;
+  }
+
+  .preview-stage {
+    grid-template-columns: repeat(2, minmax(7rem, 1fr));
+    width: calc(100% - 1rem);
+    opacity: 0.32;
+  }
+
+  .stage-card {
+    min-height: 11rem;
+    border-radius: 1rem;
+  }
+
+  .gallery-art {
+    min-height: 14rem;
+  }
+}

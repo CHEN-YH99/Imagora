@@ -1,0 +1,19 @@
+{
+  "name": "imagora",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Imagora AI image generation platform",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace apps/web run dev",
+    "build": "npm --workspace apps/web run build",
+    "typecheck": "npm --workspace apps/web run typecheck",
+    "start": "npm --workspace apps/web run start"
+  },
+  "dependencies": {
+    "uipro-cli": "^2.2.3"
+  }
+}
