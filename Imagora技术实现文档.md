@@ -882,8 +882,8 @@ export interface SafetyProvider {
 
 ```text
 NODE_ENV=development
-APP_URL=http://localhost:3000
-API_URL=http://localhost:4000
+APP_URL=http://localhost:3100
+API_URL=http://localhost:4100
 
 DATABASE_URL=postgresql://user:password@localhost:5432/imagora
 REDIS_URL=redis://localhost:6379

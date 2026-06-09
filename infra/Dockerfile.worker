@@ -1,0 +1,23 @@
+FROM node:24-alpine AS builder
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY apps ./apps
+COPY packages ./packages
+RUN npm ci
+RUN npm run build:packages && npm --workspace apps/worker run build
+
+FROM node:24-alpine AS runtime
+
+ENV NODE_ENV=production \
+    IMAGORA_STORE_PATH=/data/imagora-store.json
+
+WORKDIR /app
+COPY --from=builder /app/package.json /app/package-lock.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/apps/worker ./apps/worker
+COPY --from=builder /app/packages ./packages
+RUN mkdir -p /data && chown -R node:node /data /app
+
+USER node
+CMD ["node", "apps/worker/dist/main.js"]

@@ -1,0 +1,29 @@
+FROM node:24-alpine AS builder
+
+ARG NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:4100
+ARG NEXT_PUBLIC_PAYMENT_PROVIDER=mock
+ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+ENV NEXT_PUBLIC_PAYMENT_PROVIDER=${NEXT_PUBLIC_PAYMENT_PROVIDER}
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY apps ./apps
+COPY packages ./packages
+RUN npm ci
+RUN npm run build:packages && npm --workspace apps/web run build
+
+FROM node:24-alpine AS runtime
+
+ENV NODE_ENV=production \
+    NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:4100 \
+    NEXT_PUBLIC_PAYMENT_PROVIDER=mock
+
+WORKDIR /app
+COPY --from=builder /app/package.json /app/package-lock.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/apps/web ./apps/web
+RUN chown -R node:node /app
+
+USER node
+EXPOSE 3100
+CMD ["npm", "--workspace", "apps/web", "run", "start", "--", "-H", "0.0.0.0"]

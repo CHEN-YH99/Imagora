@@ -1,9 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createConnection } from "node:net";
 import cors from "@fastify/cors";
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
-import { createPaymentProvider } from "@imagora/payments";
+import { createPaymentProvider, type VerifiedPaymentEvent } from "@imagora/payments";
 import { createGenerationQueue } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
+import { createObjectStorage } from "@imagora/storage";
 import {
   AppError,
   type AdminAuditLog,
@@ -19,6 +21,7 @@ import {
   type Plan,
   publicUser,
   type Quality,
+  type ReferenceImage,
   type SourceType,
   type StoreData,
   type StyleId,
@@ -32,15 +35,59 @@ const store = createStore();
 const safetyProvider = createSafetyProvider();
 const paymentProvider = createPaymentProvider();
 const generationQueue = createGenerationQueue();
+const storage = createObjectStorage();
 const app = Fastify({ logger: true });
+const serviceStartedAt = Date.now();
+const routeMetrics = new Map<string, RouteMetric>();
+const rateLimitBuckets = new Map<string, RateLimitBucket>();
+const rateLimitWindowMs = envNumber("RATE_LIMIT_WINDOW_MS", 60_000);
+const rateLimitRules: RateLimitRule[] = [
+  { id: "auth-login", method: "POST", pattern: /^\/api\/auth\/login$/, max: envNumber("RATE_LIMIT_AUTH_MAX", 20) },
+  { id: "auth-register", method: "POST", pattern: /^\/api\/auth\/register$/, max: envNumber("RATE_LIMIT_AUTH_MAX", 20) },
+  { id: "generation-create", method: "POST", pattern: /^\/api\/generation\/tasks$/, max: envNumber("RATE_LIMIT_GENERATION_MAX", 30) },
+  {
+    id: "reference-upload",
+    method: "POST",
+    pattern: /^\/api\/uploads\/reference-images$/,
+    max: envNumber("RATE_LIMIT_UPLOAD_MAX", 20)
+  },
+  {
+    id: "download-url",
+    method: "POST",
+    pattern: /^\/api\/images\/[^/]+\/download-url$/,
+    max: envNumber("RATE_LIMIT_DOWNLOAD_MAX", 60)
+  }
+];
+
+app.removeContentTypeParser("application/json");
+app.addContentTypeParser("application/json", { parseAs: "string" }, (request, body, done) => {
+  const rawBody = typeof body === "string" ? body : body.toString("utf8");
+  if (pathOnly(request.url).startsWith("/api/payments/webhooks/")) {
+    done(null, rawBody);
+    return;
+  }
+  try {
+    done(null, rawBody ? JSON.parse(rawBody) : null);
+  } catch (error) {
+    done(error as Error, undefined);
+  }
+});
 
 await app.register(cors, {
   origin: process.env.WEB_ORIGIN ?? true,
   credentials: true
 });
 
-app.addHook("onRequest", async (request) => {
+app.addHook("onRequest", async (request, reply) => {
   request.requestId = request.headers["x-request-id"]?.toString() ?? randomUUID();
+  request.startedAt = Date.now();
+  reply.header("x-request-id", request.requestId);
+  applySecurityHeaders(reply);
+  await enforceRateLimit(request, reply);
+});
+
+app.addHook("onResponse", async (request, reply) => {
+  recordRequestMetric(request, reply.statusCode);
 });
 
 app.setErrorHandler((error, request, reply) => {
@@ -75,8 +122,11 @@ app.setErrorHandler((error, request, reply) => {
 app.get("/health", async () => ({
   status: "ok",
   service: "imagora-api",
-  time: new Date().toISOString()
+  time: new Date().toISOString(),
+  features: featureFlags()
 }));
+
+app.get("/api/features", async (request) => envelope(request, { features: featureFlags() }));
 
 app.post("/api/auth/register", async (request, reply) => {
   const input = registerSchema.parse(request.body);
@@ -114,12 +164,13 @@ app.post("/api/auth/register", async (request, reply) => {
       remark: "Welcome credits",
       createdAt: now
     });
+    setSessionCookie(reply, token, addDays(now, 14));
     reply.status(201);
     return envelope(request, { token, user: publicUser(user) });
   });
 });
 
-app.post("/api/auth/login", async (request) => {
+app.post("/api/auth/login", async (request, reply) => {
   const input = loginSchema.parse(request.body);
   return store.update(async (data) => {
     const user = data.users.find((item) => item.email === input.email.toLowerCase());
@@ -134,15 +185,17 @@ app.post("/api/auth/login", async (request) => {
     user.lastLoginAt = now;
     user.updatedAt = now;
     data.sessions.push({ token, userId: user.id, createdAt: now, expiresAt: addDays(now, 14) });
+    setSessionCookie(reply, token, addDays(now, 14));
     return envelope(request, { token, user: publicUser(user) });
   });
 });
 
-app.post("/api/auth/logout", async (request) => {
-  const token = bearerToken(request);
+app.post("/api/auth/logout", async (request, reply) => {
+  const token = sessionToken(request);
   await store.update((data) => {
     data.sessions = data.sessions.filter((session) => session.token !== token);
   });
+  clearSessionCookie(reply);
   return envelope(request, { ok: true });
 });
 
@@ -185,12 +238,14 @@ app.get("/api/users/me/credit-ledger", async (request) => {
 });
 
 app.post("/api/generation/quote", async (request) => {
+  assertFeatureEnabled("generation");
   await requireAuth(request);
   const input = generationInputSchema.parse(request.body);
   return envelope(request, { creditCost: quote(input), balanceRequired: quote(input) });
 });
 
 app.post("/api/generation/tasks", async (request, reply) => {
+  assertFeatureEnabled("generation");
   const { user } = await requireAuth(request);
   const input = generationInputSchema.parse(request.body);
   const result = await store.update(async (data) => {
@@ -205,6 +260,7 @@ app.post("/api/generation/tasks", async (request, reply) => {
         requestedAt: duplicate.createdAt
       };
     }
+    const referenceImage = input.referenceImageId ? mustFindOwnReferenceImage(data, user.id, input.referenceImageId) : null;
     const safety = await safetyProvider.checkText({
       text: [input.prompt, input.negativePrompt ?? ""].join("\n"),
       blockedTerms: data.safetyRules
@@ -239,6 +295,7 @@ app.post("/api/generation/tasks", async (request, reply) => {
       id: randomUUID(),
       userId: user.id,
       clientRequestId: input.clientRequestId,
+      referenceImageId: referenceImage?.id ?? null,
       prompt: input.prompt,
       negativePrompt: input.negativePrompt ?? null,
       style: input.style,
@@ -272,6 +329,66 @@ app.post("/api/generation/tasks", async (request, reply) => {
     reply.status(201);
   }
   return envelope(request, { task: result.task, balanceAfter: result.balanceAfter });
+});
+
+app.post("/api/uploads/reference-images", async (request, reply) => {
+  assertFeatureEnabled("uploads");
+  const { user } = await requireAuth(request);
+  const input = referenceUploadSchema.parse(request.body);
+  const upload = inspectReferenceUpload(input);
+  const safety = await safetyProvider.checkImage({ mimeType: upload.mimeType, bytes: upload.contentBase64 });
+
+  return store.update(async (data) => {
+    if (safety.status === "BLOCKED") {
+      data.safetyEvents.push({
+        id: randomUUID(),
+        userId: user.id,
+        targetType: "UPLOAD_IMAGE",
+        targetId: upload.contentHash,
+        status: "BLOCKED",
+        reasonCode: safety.reasonCode,
+        reasonMessage: safety.reasonMessage,
+        provider: safety.provider,
+        createdAt: new Date().toISOString()
+      });
+      throw new AppError("CONTENT_BLOCKED", "Reference image was blocked by safety rules", 400, { ...safety });
+    }
+
+    const existing = data.referenceImages.find(
+      (image) => image.userId === user.id && image.contentHash === upload.contentHash && !image.deletedAt
+    );
+    if (existing) {
+      return envelope(request, { referenceImage: existing, duplicate: true });
+    }
+
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    const stored = await storage.putObject({
+      key: `reference/${user.id}/${id}.${extensionForMime(upload.mimeType)}`,
+      body: upload.contentBase64,
+      bodyEncoding: "base64",
+      mimeType: upload.mimeType
+    });
+    const referenceImage: ReferenceImage = {
+      id,
+      userId: user.id,
+      storageKey: stored.key,
+      publicUrl: stored.publicUrl,
+      originalFileName: input.fileName,
+      mimeType: upload.mimeType,
+      fileSize: upload.fileSize,
+      width: upload.width,
+      height: upload.height,
+      contentHash: upload.contentHash,
+      safetyStatus: "PASSED",
+      createdAt: now,
+      expiresAt: addDays(now, envNumber("UPLOAD_REFERENCE_TTL_DAYS", 1)),
+      deletedAt: null
+    };
+    data.referenceImages.push(referenceImage);
+    reply.status(201);
+    return envelope(request, { referenceImage, duplicate: false });
+  });
 });
 
 app.get("/api/generation/tasks", async (request) => {
@@ -374,10 +491,17 @@ app.delete("/api/images/:imageId/favorite", async (request) => {
 });
 
 app.post("/api/images/:imageId/download-url", async (request) => {
+  assertFeatureEnabled("downloads");
   const { user, data } = await requireAuth(request);
   const { imageId } = imageParamSchema.parse(request.params);
   const image = mustFindOwnImage(data, user.id, imageId);
-  return envelope(request, { url: image.publicUrl, expiresAt: addMinutes(new Date().toISOString(), 15) });
+  const expiresAt = addMinutes(new Date().toISOString(), envNumber("DOWNLOAD_URL_TTL_MINUTES", 15));
+  const expiresInSeconds = Math.max(60, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000));
+  return envelope(request, {
+    url: await storage.getSignedUrl(image.storageKey, expiresInSeconds),
+    fileName: `imagora-${image.id}.${extensionForMimeType(image.mimeType)}`,
+    expiresAt
+  });
 });
 
 app.delete("/api/images/:imageId", async (request) => {
@@ -396,9 +520,11 @@ app.get("/api/plans", async (request) => {
 });
 
 app.post("/api/orders", async (request, reply) => {
+  assertFeatureEnabled("payments");
   const { user } = await requireAuth(request);
   const input = createOrderSchema.parse(request.body);
   return store.update(async (data) => {
+    runOrderMaintenance(data);
     const plan = data.plans.find((item) => item.id === input.planId && item.status === "ACTIVE");
     if (!plan) {
       throw new AppError("PLAN_UNAVAILABLE", "Plan is not available", 404);
@@ -418,6 +544,7 @@ app.post("/api/orders", async (request, reply) => {
       createdAt: now,
       updatedAt: now
     };
+    let checkoutUrl: string | null = null;
     if (input.paymentProvider === paymentProvider.name) {
       const payment = await paymentProvider.createPayment({
         orderId: order.id,
@@ -426,82 +553,161 @@ app.post("/api/orders", async (request, reply) => {
         currency: order.currency
       });
       order.paymentIntentId = payment.paymentIntentId;
+      checkoutUrl = payment.checkoutUrl;
+      data.paymentEvents.push({
+        id: randomUUID(),
+        provider: payment.provider,
+        providerEventId: `checkout:${payment.paymentIntentId}`,
+        orderId: order.id,
+        eventType: "checkout.created",
+        payload: { checkoutUrl: payment.checkoutUrl, paymentIntentId: payment.paymentIntentId },
+        processedAt: now,
+        createdAt: now
+      });
     }
     data.orders.push(order);
     reply.status(201);
-    return envelope(request, { order, plan });
+    return envelope(request, { order, plan, checkoutUrl });
   });
 });
 
 app.get("/api/orders", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const orders = data.orders.filter((order) => order.userId === user.id).sort(descCreated);
-  return envelope(request, { orders });
+  const { user } = await requireAuth(request);
+  return store.update((data) => {
+    const maintenance = runOrderMaintenance(data);
+    const orders = data.orders.filter((order) => order.userId === user.id).sort(descCreated);
+    return envelope(request, { orders, maintenance });
+  });
 });
 
 app.get("/api/orders/:orderId", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const { orderId } = orderParamSchema.parse(request.params);
-  const order = mustFindOwnOrder(data, user.id, orderId);
-  const plan = data.plans.find((item) => item.id === order.planId);
-  return envelope(request, { order, plan });
-});
-
-app.post("/api/orders/:orderId/pay", async (request) => {
   const { user } = await requireAuth(request);
   const { orderId } = orderParamSchema.parse(request.params);
   return store.update((data) => {
+    const maintenance = runOrderMaintenance(data);
     const order = mustFindOwnOrder(data, user.id, orderId);
-    if (order.status !== "PENDING") {
+    const plan = data.plans.find((item) => item.id === order.planId);
+    return envelope(request, { order, plan, maintenance });
+  });
+});
+
+app.post("/api/orders/:orderId/pay", async (request) => {
+  assertFeatureEnabled("payments");
+  const { user } = await requireAuth(request);
+  const { orderId } = orderParamSchema.parse(request.params);
+  return store.update((data) => {
+    runOrderMaintenance(data);
+    const order = mustFindOwnOrder(data, user.id, orderId);
+    if (order.status !== "PENDING" && order.status !== "PAID") {
       throw new AppError("ORDER_NOT_PAYABLE", "Order is not payable", 400);
     }
-    const plan = data.plans.find((item) => item.id === order.planId);
-    if (!plan) {
-      throw new AppError("PLAN_UNAVAILABLE", "Plan is not available", 404);
-    }
-    const now = new Date().toISOString();
-    const providerEventId = `mock:${order.id}:paid`;
-    if (!data.paymentEvents.some((event) => event.providerEventId === providerEventId)) {
-      order.status = "PAID";
-      order.paymentIntentId = order.paymentIntentId ?? `mock_pi_${order.id}`;
-      order.paidAt = now;
-      order.updatedAt = now;
-      data.paymentEvents.push({
-        id: randomUUID(),
-        provider: order.paymentProvider,
-        providerEventId,
-        orderId: order.id,
-        eventType: "payment.succeeded",
-        payload: { mock: true, amountCents: order.amountCents },
-        processedAt: now,
-        createdAt: now
-      });
-      grantCredits(data, user.id, plan.credits, "ORDER", order.id, `order-grant:${order.id}`, `Purchased ${plan.name}`);
-    }
-    return envelope(request, { order, balanceAfter: mustFindCreditAccount(data, user.id).balance });
+    const result = applyPaymentSucceeded(data, {
+      provider: order.paymentProvider,
+      providerEventId: `mock:${order.id}:paid`,
+      orderId: order.id,
+      eventType: "payment.succeeded",
+      amountCents: order.amountCents,
+      payload: { mock: true, amountCents: order.amountCents }
+    });
+    return envelope(request, { order: result.order, balanceAfter: result.balanceAfter });
+  });
+});
+
+app.post("/api/payments/webhooks/:provider", async (request) => {
+  const { provider } = paymentWebhookParamSchema.parse(request.params);
+  if (provider !== paymentProvider.name) {
+    throw new AppError("VALIDATION_ERROR", "Payment provider is not enabled", 400);
+  }
+
+  let event: VerifiedPaymentEvent;
+  try {
+    event = await paymentProvider.verifyWebhook(request.body, webhookSignature(request));
+  } catch (error) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      error instanceof Error ? error.message : "Invalid payment webhook payload",
+      400
+    );
+  }
+
+  return store.update((data) => {
+    const result = applyPaymentSucceeded(data, {
+      provider: event.provider,
+      providerEventId: event.providerEventId,
+      orderId: event.orderId,
+      eventType: event.eventType,
+      amountCents: event.amountCents,
+      payload: payloadRecord(request.body)
+    });
+    return envelope(request, result);
   });
 });
 
 app.get("/api/admin/dashboard", async (request) => {
-  const { data } = await requireAdmin(request);
-  const paidRevenueCents = data.orders
-    .filter((order) => order.status === "PAID")
-    .reduce((sum, order) => sum + order.amountCents, 0);
-  return envelope(request, {
-    metrics: {
-      users: data.users.length,
-      tasks: data.generationTasks.length,
-      images: data.generatedImages.length,
-      paidOrders: data.orders.filter((order) => order.status === "PAID").length,
-      paidRevenueCents,
-      blockedSafetyEvents: data.safetyEvents.filter((event) => event.status === "BLOCKED").length
-    }
+  await requireAdmin(request);
+  return store.update((data) => {
+    runOrderMaintenance(data);
+    const paidRevenueCents = data.orders
+      .filter((order) => order.status === "PAID")
+      .reduce((sum, order) => sum + order.amountCents, 0);
+    return envelope(request, {
+      metrics: {
+        users: data.users.length,
+        tasks: data.generationTasks.length,
+        images: data.generatedImages.length,
+        paidOrders: data.orders.filter((order) => order.status === "PAID").length,
+        paidRevenueCents,
+        blockedSafetyEvents: data.safetyEvents.filter((event) => event.status === "BLOCKED").length
+      }
+    });
+  });
+});
+
+app.get("/api/admin/metrics", async (request) => {
+  await requireAdmin(request);
+  return store.update((data) => {
+    const maintenance = runOrderMaintenance(data);
+    const http = httpMetricsSnapshot();
+    const domain = domainMetricsSnapshot(data);
+    return envelope(request, {
+      service: {
+        uptimeSeconds: Math.floor((Date.now() - serviceStartedAt) / 1000),
+        startedAt: new Date(serviceStartedAt).toISOString(),
+        features: featureFlags()
+      },
+      http,
+      domain,
+      maintenance,
+      alerts: operationalAlertsSnapshot(data, http)
+    });
+  });
+});
+
+app.post("/api/admin/maintenance/reconcile", async (request) => {
+  const { user: admin } = await requireAdmin(request);
+  return store.update((data) => {
+    const maintenance = runOrderMaintenance(data);
+    audit(data, admin.id, "maintenance.reconcile", "SYSTEM", "orders", null, { ...maintenance }, request);
+    return envelope(request, { maintenance });
   });
 });
 
 app.get("/api/admin/users", async (request) => {
+  const query = adminUserQuerySchema.parse(request.query);
   const { data } = await requireAdmin(request);
-  return envelope(request, { users: data.users.map(withoutPassword) });
+  const search = query.search?.toLowerCase();
+  const users = data.users
+    .filter((user) => !query.status || user.status === query.status)
+    .filter((user) => {
+      if (!search) {
+        return true;
+      }
+      return user.email.toLowerCase().includes(search) || user.nickname.toLowerCase().includes(search);
+    })
+    .sort(descCreated)
+    .slice(0, query.limit)
+    .map(withoutPassword);
+  return envelope(request, { users });
 });
 
 app.patch("/api/admin/users/:userId/status", async (request) => {
@@ -529,24 +735,32 @@ app.post("/api/admin/users/:userId/credits/adjust", async (request) => {
     mustFindUser(data, userId);
     const account = mustFindCreditAccount(data, userId);
     const before = { balance: account.balance };
-    if (input.amount >= 0) {
-      grantCredits(data, userId, input.amount, "ADMIN", admin.id, `admin-adjust:${randomUUID()}`, input.reason);
-    } else {
-      spendCredits(data, userId, Math.abs(input.amount), "ADMIN", admin.id, `admin-adjust:${randomUUID()}`, input.reason);
-    }
+    adjustCredits(data, userId, input.amount, admin.id, `admin-adjust:${randomUUID()}`, input.reason);
     audit(data, admin.id, "user.credits.adjust", "USER", userId, before, { balance: account.balance }, request);
     return envelope(request, { account });
   });
 });
 
 app.get("/api/admin/generation/tasks", async (request) => {
+  const query = adminTaskQuerySchema.parse(request.query);
   const { data } = await requireAdmin(request);
-  return envelope(request, { tasks: data.generationTasks.sort(descCreated) });
+  const tasks = data.generationTasks
+    .filter((task) => !query.status || task.status === query.status)
+    .filter((task) => !query.userId || task.userId === query.userId)
+    .sort(descCreated)
+    .slice(0, query.limit);
+  return envelope(request, { tasks });
 });
 
 app.get("/api/admin/images", async (request) => {
+  const query = adminImageQuerySchema.parse(request.query);
   const { data } = await requireAdmin(request);
-  return envelope(request, { images: data.generatedImages.sort(descCreated) });
+  const images = data.generatedImages
+    .filter((image) => !query.visibility || image.visibility === query.visibility)
+    .filter((image) => !query.userId || image.userId === query.userId)
+    .sort(descCreated)
+    .slice(0, query.limit);
+  return envelope(request, { images });
 });
 
 app.patch("/api/admin/images/:imageId/visibility", async (request) => {
@@ -566,8 +780,14 @@ app.patch("/api/admin/images/:imageId/visibility", async (request) => {
 });
 
 app.get("/api/admin/orders", async (request) => {
+  const query = adminOrderQuerySchema.parse(request.query);
   const { data } = await requireAdmin(request);
-  return envelope(request, { orders: data.orders.sort(descCreated) });
+  const orders = data.orders
+    .filter((order) => !query.status || order.status === query.status)
+    .filter((order) => !query.userId || order.userId === query.userId)
+    .sort(descCreated)
+    .slice(0, query.limit);
+  return envelope(request, { orders });
 });
 
 app.get("/api/admin/plans", async (request) => {
@@ -648,14 +868,73 @@ app.patch("/api/admin/safety-rules/:ruleId", async (request) => {
   });
 });
 
-const port = Number(process.env.API_PORT ?? 4000);
+const port = Number(process.env.API_PORT ?? 4100);
 const host = process.env.API_HOST ?? "127.0.0.1";
 await app.listen({ port, host });
 
 declare module "fastify" {
   interface FastifyRequest {
     requestId?: string;
+    startedAt?: number;
   }
+}
+
+interface RouteMetric {
+  requests: number;
+  failures: number;
+  totalDurationMs: number;
+  maxDurationMs: number;
+}
+
+interface RateLimitBucket {
+  count: number;
+  resetAt: number;
+}
+
+interface RateLimitRule {
+  id: string;
+  method: string;
+  pattern: RegExp;
+  max: number;
+}
+
+type FeatureName = "generation" | "payments" | "uploads" | "downloads";
+
+interface FeatureFlags {
+  generation: boolean;
+  payments: boolean;
+  uploads: boolean;
+  downloads: boolean;
+}
+
+type UploadMimeType = ReferenceImage["mimeType"];
+
+interface InspectedReferenceUpload {
+  contentBase64: string;
+  contentHash: string;
+  fileSize: number;
+  mimeType: UploadMimeType;
+  width: number | null;
+  height: number | null;
+}
+
+interface OrderMaintenanceResult {
+  closedExpiredOrders: number;
+  reconciledPaidOrders: number;
+  reconciledPaymentEvents: number;
+}
+
+type OperationalAlertSeverity = "warning" | "critical";
+
+interface OperationalAlert {
+  id: string;
+  severity: OperationalAlertSeverity;
+  area: "generation" | "payments" | "http";
+  metric: string;
+  value: number;
+  threshold: number;
+  message: string;
+  runbook: string;
 }
 
 const registerSchema = z.object({
@@ -676,6 +955,7 @@ const updateProfileSchema = z.object({
 
 const generationInputSchema = z.object({
   clientRequestId: z.string().min(8).max(120).default(() => randomUUID()),
+  referenceImageId: z.string().min(1).optional(),
   prompt: z.string().min(1).max(maxPromptLength),
   negativePrompt: z.string().max(800).optional(),
   style: z.enum(["realistic", "illustration", "anime", "product_photography", "poster"]),
@@ -684,12 +964,43 @@ const generationInputSchema = z.object({
   quality: z.enum(["draft", "standard", "high"])
 });
 
+const referenceUploadSchema = z.object({
+  fileName: z.string().min(1).max(180),
+  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+  contentBase64: z.string().min(16).max(envNumber("UPLOAD_MAX_BASE64_CHARS", 8_000_000))
+});
+
 const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30)
 });
 
+const userStatusSchema = z.enum(["ACTIVE", "SUSPENDED", "DELETED"]);
+const taskStatusSchema = z.enum(["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"]);
+const imageVisibilitySchema = z.enum(["PRIVATE", "PUBLIC", "HIDDEN"]);
+const orderStatusSchema = z.enum(["PENDING", "PAID", "CANCELED", "REFUNDED", "CLOSED"]);
+
 const taskQuerySchema = paginationSchema.extend({
-  status: z.enum(["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"]).optional()
+  status: taskStatusSchema.optional()
+});
+
+const adminUserQuerySchema = paginationSchema.extend({
+  status: userStatusSchema.optional(),
+  search: z.string().trim().max(120).optional()
+});
+
+const adminTaskQuerySchema = paginationSchema.extend({
+  status: taskStatusSchema.optional(),
+  userId: z.string().min(1).optional()
+});
+
+const adminImageQuerySchema = paginationSchema.extend({
+  visibility: imageVisibilitySchema.optional(),
+  userId: z.string().min(1).optional()
+});
+
+const adminOrderQuerySchema = paginationSchema.extend({
+  status: orderStatusSchema.optional(),
+  userId: z.string().min(1).optional()
 });
 
 const idParamSchema = z.object({ taskId: z.string().min(1) });
@@ -697,14 +1008,15 @@ const imageParamSchema = z.object({ imageId: z.string().min(1) });
 const orderParamSchema = z.object({ orderId: z.string().min(1) });
 const userParamSchema = z.object({ userId: z.string().min(1) });
 const planParamSchema = z.object({ planId: z.string().min(1) });
+const paymentWebhookParamSchema = z.object({ provider: z.string().min(1) });
 
 const createOrderSchema = z.object({
   planId: z.string().min(1),
   paymentProvider: z.enum(["mock", "stripe", "wechat", "alipay"]).default("mock")
 });
 
-const statusSchema = z.object({ status: z.enum(["ACTIVE", "SUSPENDED", "DELETED"]) });
-const visibilitySchema = z.object({ visibility: z.enum(["PRIVATE", "PUBLIC", "HIDDEN"]) });
+const statusSchema = z.object({ status: userStatusSchema });
+const visibilitySchema = z.object({ visibility: imageVisibilitySchema });
 const adjustCreditSchema = z.object({
   amount: z.number().int().refine((value) => value !== 0),
   reason: z.string().min(3).max(240)
@@ -732,16 +1044,20 @@ function envelope<T>(request: FastifyRequest, data: T): ApiEnvelope<T> {
   return { data, requestId: request.requestId ?? randomUUID() };
 }
 
-function bearerToken(request: FastifyRequest): string {
+function sessionToken(request: FastifyRequest): string {
+  const cookieToken = cookieValue(request.headers.cookie, sessionCookieName());
+  if (cookieToken) {
+    return cookieToken;
+  }
   const authorization = request.headers.authorization;
   if (!authorization?.startsWith("Bearer ")) {
-    throw new AppError("UNAUTHORIZED", "Missing bearer token", 401);
+    throw new AppError("UNAUTHORIZED", "Missing session token", 401);
   }
   return authorization.slice("Bearer ".length);
 }
 
 async function requireAuth(request: FastifyRequest): Promise<{ data: StoreData; user: User }> {
-  const token = bearerToken(request);
+  const token = sessionToken(request);
   const data = await store.read();
   const now = new Date();
   data.sessions = data.sessions.filter((session) => new Date(session.expiresAt) > now);
@@ -754,6 +1070,63 @@ async function requireAuth(request: FastifyRequest): Promise<{ data: StoreData; 
     throw new AppError("FORBIDDEN", "User is not active", 403);
   }
   return { data, user };
+}
+
+function setSessionCookie(reply: FastifyReply, token: string, expiresAt: string): void {
+  reply.header("set-cookie", serializeCookie(sessionCookieName(), token, {
+    expires: new Date(expiresAt),
+    httpOnly: true,
+    secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
+    sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+    path: "/"
+  }));
+}
+
+function clearSessionCookie(reply: FastifyReply): void {
+  reply.header("set-cookie", serializeCookie(sessionCookieName(), "", {
+    expires: new Date(0),
+    httpOnly: true,
+    secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
+    sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+    path: "/"
+  }));
+}
+
+function sessionCookieName(): string {
+  return process.env.SESSION_COOKIE_NAME ?? "imagora_session";
+}
+
+function cookieValue(cookieHeader: string | undefined, name: string): string | null {
+  if (!cookieHeader) {
+    return null;
+  }
+  for (const part of cookieHeader.split(";")) {
+    const [rawKey, ...rawValue] = part.trim().split("=");
+    if (rawKey === name) {
+      return decodeURIComponent(rawValue.join("="));
+    }
+  }
+  return null;
+}
+
+function serializeCookie(
+  name: string,
+  value: string,
+  options: { expires: Date; httpOnly: boolean; secure: boolean; sameSite: string; path: string }
+): string {
+  const segments = [
+    `${name}=${encodeURIComponent(value)}`,
+    `Expires=${options.expires.toUTCString()}`,
+    `Path=${options.path}`,
+    `SameSite=${options.sameSite}`
+  ];
+  if (options.httpOnly) {
+    segments.push("HttpOnly");
+  }
+  if (options.secure) {
+    segments.push("Secure");
+  }
+  return segments.join("; ");
 }
 
 async function requireAdmin(request: FastifyRequest): Promise<{ data: StoreData; user: User }> {
@@ -792,6 +1165,20 @@ function mustFindOwnTask(data: StoreData, userId: string, taskId: string): Gener
   return task;
 }
 
+function mustFindOwnReferenceImage(data: StoreData, userId: string, referenceImageId: string): ReferenceImage {
+  const image = data.referenceImages.find((item) => item.id === referenceImageId && item.userId === userId && !item.deletedAt);
+  if (!image) {
+    throw new AppError("NOT_FOUND", "Reference image was not found", 404);
+  }
+  if (new Date(image.expiresAt).getTime() <= Date.now()) {
+    throw new AppError("VALIDATION_ERROR", "Reference image has expired", 400);
+  }
+  if (image.safetyStatus !== "PASSED") {
+    throw new AppError("CONTENT_BLOCKED", "Reference image is not available for generation", 400);
+  }
+  return image;
+}
+
 function mustFindOwnImage(data: StoreData, userId: string, imageId: string): GeneratedImage {
   const image = data.generatedImages.find((item) => item.id === imageId && item.userId === userId && !item.deletedAt);
   if (!image) {
@@ -806,6 +1193,181 @@ function mustFindOwnOrder(data: StoreData, userId: string, orderId: string): Ord
     throw new AppError("NOT_FOUND", "Order was not found", 404);
   }
   return order;
+}
+
+function mustFindOrder(data: StoreData, orderId: string): Order {
+  const order = data.orders.find((item) => item.id === orderId);
+  if (!order) {
+    throw new AppError("NOT_FOUND", "Order was not found", 404);
+  }
+  return order;
+}
+
+function runOrderMaintenance(data: StoreData): OrderMaintenanceResult {
+  const now = new Date().toISOString();
+  const closedExpiredOrders = closeExpiredPendingOrders(data, now);
+  const reconciledPaymentEvents = reconcileSucceededPaymentEvents(data, now);
+  const reconciledPaidOrders = reconcilePaidOrderCredits(data);
+  return { closedExpiredOrders, reconciledPaidOrders, reconciledPaymentEvents };
+}
+
+function closeExpiredPendingOrders(data: StoreData, now: string): number {
+  const expiresMs = envNumber("ORDER_PENDING_TTL_MINUTES", 30) * 60 * 1000;
+  if (expiresMs <= 0) {
+    return 0;
+  }
+  const cutoff = Date.now() - expiresMs;
+  let closed = 0;
+  for (const order of data.orders) {
+    if (order.status !== "PENDING") {
+      continue;
+    }
+    if (new Date(order.createdAt).getTime() <= cutoff) {
+      order.status = "CLOSED";
+      order.updatedAt = now;
+      closed += 1;
+    }
+  }
+  return closed;
+}
+
+function reconcileSucceededPaymentEvents(data: StoreData, now: string): number {
+  let reconciled = 0;
+  for (const event of data.paymentEvents) {
+    if (event.eventType !== "payment.succeeded") {
+      continue;
+    }
+    const order = data.orders.find((item) => item.id === event.orderId);
+    if (!order || order.status === "PAID") {
+      continue;
+    }
+    if (paymentEventAmount(event.payload) !== order.amountCents) {
+      continue;
+    }
+    order.status = "PAID";
+    order.paymentIntentId = order.paymentIntentId ?? `${event.provider}_pi_${order.id}`;
+    order.paidAt = order.paidAt ?? event.processedAt;
+    order.updatedAt = now;
+    reconciled += 1;
+  }
+  return reconciled;
+}
+
+function reconcilePaidOrderCredits(data: StoreData): number {
+  let reconciled = 0;
+  for (const order of data.orders) {
+    if (order.status !== "PAID") {
+      continue;
+    }
+    const idempotencyKey = `order-grant:${order.id}`;
+    if (data.creditLedgerEntries.some((entry) => entry.idempotencyKey === idempotencyKey)) {
+      continue;
+    }
+    const plan = data.plans.find((item) => item.id === order.planId);
+    if (!plan) {
+      continue;
+    }
+    grantCredits(data, order.userId, plan.credits, "ORDER", order.id, idempotencyKey, `Purchased ${plan.name}`);
+    reconciled += 1;
+  }
+  return reconciled;
+}
+
+function paymentEventAmount(payload: Record<string, unknown>): number | null {
+  const amount = payload.amountCents;
+  return typeof amount === "number" && Number.isInteger(amount) ? amount : null;
+}
+
+function applyPaymentSucceeded(
+  data: StoreData,
+  input: {
+    provider: string;
+    providerEventId: string;
+    orderId: string;
+    eventType: string;
+    amountCents: number;
+    payload: Record<string, unknown>;
+  }
+): { order: Order; balanceAfter: number; credited: boolean; duplicateEvent: boolean; reason: string | null } {
+  const duplicate = data.paymentEvents.find(
+    (event) => event.provider === input.provider && event.providerEventId === input.providerEventId
+  );
+  if (duplicate) {
+    const order = mustFindOrder(data, duplicate.orderId);
+    return {
+      order,
+      balanceAfter: mustFindCreditAccount(data, order.userId).balance,
+      credited: false,
+      duplicateEvent: true,
+      reason: "DUPLICATE_EVENT"
+    };
+  }
+
+  const order = mustFindOrder(data, input.orderId);
+  if (order.paymentProvider !== input.provider) {
+    throw new AppError("VALIDATION_ERROR", "Payment provider does not match order", 400);
+  }
+
+  const plan = data.plans.find((item) => item.id === order.planId);
+  if (!plan) {
+    throw new AppError("PLAN_UNAVAILABLE", "Plan is not available", 404);
+  }
+
+  const now = new Date().toISOString();
+  data.paymentEvents.push({
+    id: randomUUID(),
+    provider: input.provider,
+    providerEventId: input.providerEventId,
+    orderId: order.id,
+    eventType: input.eventType,
+    payload: input.payload,
+    processedAt: now,
+    createdAt: now
+  });
+
+  if (input.amountCents !== order.amountCents) {
+    return {
+      order,
+      balanceAfter: mustFindCreditAccount(data, order.userId).balance,
+      credited: false,
+      duplicateEvent: false,
+      reason: "AMOUNT_MISMATCH"
+    };
+  }
+
+  if (order.status === "PAID") {
+    return {
+      order,
+      balanceAfter: mustFindCreditAccount(data, order.userId).balance,
+      credited: false,
+      duplicateEvent: false,
+      reason: "ORDER_ALREADY_PAID"
+    };
+  }
+
+  if (!["PENDING", "CLOSED"].includes(order.status)) {
+    return {
+      order,
+      balanceAfter: mustFindCreditAccount(data, order.userId).balance,
+      credited: false,
+      duplicateEvent: false,
+      reason: "ORDER_NOT_PAYABLE"
+    };
+  }
+
+  order.status = "PAID";
+  order.paymentIntentId = order.paymentIntentId ?? `${input.provider}_pi_${order.id}`;
+  order.paidAt = now;
+  order.updatedAt = now;
+  grantCredits(data, order.userId, plan.credits, "ORDER", order.id, `order-grant:${order.id}`, `Purchased ${plan.name}`);
+
+  return {
+    order,
+    balanceAfter: mustFindCreditAccount(data, order.userId).balance,
+    credited: true,
+    duplicateEvent: false,
+    reason: null
+  };
 }
 
 function spendCredits(
@@ -873,6 +1435,43 @@ function grantCredits(
   });
 }
 
+function adjustCredits(
+  data: StoreData,
+  userId: string,
+  amount: number,
+  adminUserId: string,
+  idempotencyKey: string,
+  remark: string
+): void {
+  if (data.creditLedgerEntries.some((entry) => entry.idempotencyKey === idempotencyKey)) {
+    return;
+  }
+  const account = mustFindCreditAccount(data, userId);
+  if (amount < 0 && account.balance < Math.abs(amount)) {
+    throw new AppError("INSUFFICIENT_CREDITS", "Credit balance is not enough", 402);
+  }
+  const now = new Date().toISOString();
+  account.balance += amount;
+  if (amount > 0) {
+    account.totalEarned += amount;
+  } else {
+    account.totalSpent += Math.abs(amount);
+  }
+  account.updatedAt = now;
+  data.creditLedgerEntries.push({
+    id: randomUUID(),
+    userId,
+    type: "ADJUST",
+    amount,
+    balanceAfter: account.balance,
+    sourceType: "ADMIN",
+    sourceId: adminUserId,
+    idempotencyKey,
+    remark,
+    createdAt: now
+  });
+}
+
 function withFavorite(data: StoreData, userId: string, image: GeneratedImage): GeneratedImage & { favorite: boolean } {
   return {
     ...image,
@@ -903,6 +1502,563 @@ function audit(
     createdAt: new Date().toISOString()
   };
   data.adminAuditLogs.push(log);
+}
+
+function inspectReferenceUpload(input: z.infer<typeof referenceUploadSchema>): InspectedReferenceUpload {
+  const contentBase64 = normalizeBase64(input.contentBase64);
+  const bytes = decodeBase64(contentBase64);
+  const fileSize = bytes.byteLength;
+  const maxBytes = envNumber("UPLOAD_MAX_BYTES", 5 * 1024 * 1024);
+  if (fileSize > maxBytes) {
+    throw new AppError("VALIDATION_ERROR", "Reference image is too large", 400, { maxBytes, fileSize });
+  }
+
+  const mimeType = detectImageMime(bytes);
+  if (!mimeType) {
+    throw new AppError("VALIDATION_ERROR", "Reference image signature is not supported", 400);
+  }
+  if (mimeType !== input.mimeType) {
+    throw new AppError("VALIDATION_ERROR", "Reference image MIME does not match file signature", 400, {
+      declared: input.mimeType,
+      detected: mimeType
+    });
+  }
+
+  const dimensions = readImageDimensions(bytes, mimeType);
+  if (!dimensions) {
+    throw new AppError("VALIDATION_ERROR", "Reference image dimensions could not be read", 400);
+  }
+  const maxDimension = envNumber("UPLOAD_MAX_DIMENSION", 8192);
+  if (dimensions.width <= 0 || dimensions.height <= 0 || dimensions.width > maxDimension || dimensions.height > maxDimension) {
+    throw new AppError("VALIDATION_ERROR", "Reference image dimensions are not allowed", 400, {
+      maxDimension,
+      width: dimensions.width,
+      height: dimensions.height
+    });
+  }
+
+  return {
+    contentBase64,
+    contentHash: createHash("sha256").update(bytes).digest("hex"),
+    fileSize,
+    mimeType,
+    width: dimensions.width,
+    height: dimensions.height
+  };
+}
+
+function normalizeBase64(value: string): string {
+  const trimmed = value.trim();
+  const dataUrl = /^data:([^;]+);base64,(.+)$/i.exec(trimmed);
+  return (dataUrl?.[2] ?? trimmed).replace(/\s/g, "");
+}
+
+function decodeBase64(value: string): Buffer {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 === 1) {
+    throw new AppError("VALIDATION_ERROR", "Reference image content is not valid base64", 400);
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (!bytes.length) {
+    throw new AppError("VALIDATION_ERROR", "Reference image content is empty", 400);
+  }
+  return bytes;
+}
+
+function detectImageMime(bytes: Buffer): UploadMimeType | null {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
+    bytes.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return null;
+}
+
+function readImageDimensions(bytes: Buffer, mimeType: UploadMimeType): { width: number; height: number } | null {
+  switch (mimeType) {
+    case "image/png":
+      return bytes.length >= 24 ? { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) } : null;
+    case "image/jpeg":
+      return readJpegDimensions(bytes);
+    case "image/webp":
+      return readWebpDimensions(bytes);
+  }
+}
+
+function readJpegDimensions(bytes: Buffer): { width: number; height: number } | null {
+  let offset = 2;
+  while (offset + 9 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = bytes[offset + 1];
+    const segmentLength = bytes.readUInt16BE(offset + 2);
+    if (segmentLength < 2) {
+      return null;
+    }
+    if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb)) {
+      return { height: bytes.readUInt16BE(offset + 5), width: bytes.readUInt16BE(offset + 7) };
+    }
+    offset += 2 + segmentLength;
+  }
+  return null;
+}
+
+function readWebpDimensions(bytes: Buffer): { width: number; height: number } | null {
+  const chunk = bytes.subarray(12, 16).toString("ascii");
+  if (chunk === "VP8X" && bytes.length >= 30) {
+    return {
+      width: 1 + bytes.readUIntLE(24, 3),
+      height: 1 + bytes.readUIntLE(27, 3)
+    };
+  }
+  if (chunk === "VP8L" && bytes.length >= 25 && bytes[20] === 0x2f) {
+    const b1 = bytes[21];
+    const b2 = bytes[22];
+    const b3 = bytes[23];
+    const b4 = bytes[24];
+    return {
+      width: 1 + (((b2 & 0x3f) << 8) | b1),
+      height: 1 + (((b4 & 0x0f) << 10) | (b3 << 2) | ((b2 & 0xc0) >> 6))
+    };
+  }
+  if (chunk === "VP8 " && bytes.length >= 30 && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+    return {
+      width: bytes.readUInt16LE(26) & 0x3fff,
+      height: bytes.readUInt16LE(28) & 0x3fff
+    };
+  }
+  return null;
+}
+
+function extensionForMime(mimeType: UploadMimeType): string {
+  switch (mimeType) {
+    case "image/jpeg":
+      return "jpg";
+    case "image/png":
+      return "png";
+    case "image/webp":
+      return "webp";
+  }
+}
+
+function extensionForMimeType(mimeType: string): string {
+  switch (mimeType) {
+    case "image/jpeg":
+      return "jpg";
+    case "image/png":
+      return "png";
+    case "image/webp":
+      return "webp";
+    case "image/svg+xml":
+      return "svg";
+    default:
+      return "img";
+  }
+}
+
+function featureFlags(): FeatureFlags {
+  return {
+    generation: envBool("FEATURE_GENERATION_ENABLED", true),
+    payments: envBool("FEATURE_PAYMENTS_ENABLED", true),
+    uploads: envBool("FEATURE_UPLOADS_ENABLED", true),
+    downloads: envBool("FEATURE_DOWNLOADS_ENABLED", true)
+  };
+}
+
+function assertFeatureEnabled(feature: FeatureName): void {
+  if (!featureFlags()[feature]) {
+    throw new AppError("FEATURE_DISABLED", `${feature} is temporarily disabled`, 503, { feature });
+  }
+}
+
+function applySecurityHeaders(reply: FastifyReply): void {
+  reply.header("x-content-type-options", "nosniff");
+  reply.header("x-frame-options", "DENY");
+  reply.header("referrer-policy", "no-referrer");
+  reply.header("permissions-policy", "camera=(), microphone=(), geolocation=()");
+  reply.header("content-security-policy", "default-src 'none'; frame-ancestors 'none'");
+  if (process.env.NODE_ENV === "production") {
+    reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+  }
+}
+
+async function enforceRateLimit(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  const path = pathOnly(request.url);
+  const rule = rateLimitRules.find((item) => item.method === request.method && item.pattern.test(path));
+  if (!rule || rule.max <= 0) {
+    return;
+  }
+
+  const now = Date.now();
+  if (rateLimitBuckets.size > 5000) {
+    pruneRateLimitBuckets(now);
+  }
+
+  const key = `${rule.id}:${request.ip}`;
+  if ((process.env.RATE_LIMIT_PROVIDER ?? "memory") === "redis") {
+    const redisResult = await redisFixedWindowIncrement(key, rateLimitWindowMs);
+    reply.header("x-ratelimit-limit", String(rule.max));
+    reply.header("x-ratelimit-remaining", String(Math.max(rule.max - redisResult.count, 0)));
+    reply.header("x-ratelimit-reset", new Date(redisResult.resetAt).toISOString());
+    if (redisResult.count > rule.max) {
+      throw new AppError("RATE_LIMITED", "Too many requests, please retry later", 429, {
+        limit: rule.max,
+        resetAt: new Date(redisResult.resetAt).toISOString()
+      });
+    }
+    return;
+  }
+
+  const bucket = rateLimitBuckets.get(key);
+  const nextBucket =
+    !bucket || bucket.resetAt <= now ? { count: 1, resetAt: now + rateLimitWindowMs } : { ...bucket, count: bucket.count + 1 };
+  rateLimitBuckets.set(key, nextBucket);
+
+  reply.header("x-ratelimit-limit", String(rule.max));
+  reply.header("x-ratelimit-remaining", String(Math.max(rule.max - nextBucket.count, 0)));
+  reply.header("x-ratelimit-reset", new Date(nextBucket.resetAt).toISOString());
+
+  if (nextBucket.count > rule.max) {
+    throw new AppError("RATE_LIMITED", "Too many requests, please retry later", 429, {
+      limit: rule.max,
+      resetAt: new Date(nextBucket.resetAt).toISOString()
+    });
+  }
+}
+
+async function redisFixedWindowIncrement(key: string, windowMs: number): Promise<{ count: number; resetAt: number }> {
+  const redisKey = `imagora:ratelimit:${key}`;
+  const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
+  const count = Number(await redisCommand(redisUrl, ["INCR", redisKey]));
+  if (count === 1) {
+    await redisCommand(redisUrl, ["PEXPIRE", redisKey, String(windowMs)]);
+  }
+  const ttl = Number(await redisCommand(redisUrl, ["PTTL", redisKey]));
+  const resetAt = Date.now() + Math.max(ttl, 0);
+  return { count, resetAt };
+}
+
+function redisCommand(redisUrl: string, args: string[]): Promise<string> {
+  const url = new URL(redisUrl);
+  const port = Number(url.port || 6379);
+  const password = decodeURIComponent(url.password);
+  const db = Number(url.pathname.replace("/", "") || 0);
+  const commands: string[][] = [];
+  if (password) {
+    commands.push(["AUTH", password]);
+  }
+  if (db) {
+    commands.push(["SELECT", String(db)]);
+  }
+  commands.push(args);
+
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: url.hostname, port });
+    let buffer = Buffer.alloc(0);
+    const responses: string[] = [];
+    socket.setTimeout(envNumber("REDIS_RATE_LIMIT_TIMEOUT_MS", 500));
+    socket.on("connect", () => {
+      socket.write(commands.map(encodeRedisCommand).join(""));
+    });
+    socket.on("data", (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      while (buffer.length) {
+        const parsed = parseRedisResponse(buffer);
+        if (!parsed) {
+          break;
+        }
+        responses.push(parsed.value);
+        buffer = buffer.subarray(parsed.bytes);
+        if (responses.length === commands.length) {
+          socket.end();
+          resolve(responses[responses.length - 1] ?? "");
+        }
+      }
+    });
+    socket.on("timeout", () => {
+      socket.destroy();
+      reject(new Error("Redis rate limit command timed out"));
+    });
+    socket.on("error", reject);
+  });
+}
+
+function encodeRedisCommand(args: string[]): string {
+  return `*${args.length}\r\n${args.map((arg) => `$${Buffer.byteLength(arg)}\r\n${arg}\r\n`).join("")}`;
+}
+
+function parseRedisResponse(buffer: Buffer): { value: string; bytes: number } | null {
+  const type = String.fromCharCode(buffer[0] ?? 0);
+  const lineEnd = buffer.indexOf("\r\n");
+  if (lineEnd === -1) {
+    return null;
+  }
+  const line = buffer.subarray(1, lineEnd).toString("utf8");
+  if (type === "+" || type === ":") {
+    return { value: line, bytes: lineEnd + 2 };
+  }
+  if (type === "-") {
+    throw new Error(`Redis error: ${line}`);
+  }
+  if (type === "$") {
+    const length = Number(line);
+    if (length < 0) {
+      return { value: "", bytes: lineEnd + 2 };
+    }
+    const start = lineEnd + 2;
+    const end = start + length;
+    if (buffer.length < end + 2) {
+      return null;
+    }
+    return { value: buffer.subarray(start, end).toString("utf8"), bytes: end + 2 };
+  }
+  throw new Error(`Unsupported Redis response type: ${type}`);
+}
+
+function pruneRateLimitBuckets(now: number): void {
+  for (const [key, bucket] of rateLimitBuckets) {
+    if (bucket.resetAt <= now) {
+      rateLimitBuckets.delete(key);
+    }
+  }
+}
+
+function recordRequestMetric(request: FastifyRequest, statusCode: number): void {
+  const route = `${request.method} ${request.routeOptions.url ?? pathOnly(request.url)}`;
+  const metric = routeMetrics.get(route) ?? { requests: 0, failures: 0, totalDurationMs: 0, maxDurationMs: 0 };
+  const durationMs = Math.max(0, Date.now() - (request.startedAt ?? Date.now()));
+  metric.requests += 1;
+  metric.failures += statusCode >= 500 ? 1 : 0;
+  metric.totalDurationMs += durationMs;
+  metric.maxDurationMs = Math.max(metric.maxDurationMs, durationMs);
+  routeMetrics.set(route, metric);
+}
+
+function httpMetricsSnapshot() {
+  const routes = [...routeMetrics.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([route, metric]) => ({
+      route,
+      requests: metric.requests,
+      failures: metric.failures,
+      averageDurationMs: round(metric.totalDurationMs / metric.requests),
+      maxDurationMs: metric.maxDurationMs
+    }));
+  return {
+    requestsTotal: routes.reduce((sum, route) => sum + route.requests, 0),
+    failuresTotal: routes.reduce((sum, route) => sum + route.failures, 0),
+    routes
+  };
+}
+
+function operationalAlertsSnapshot(data: StoreData, http: ReturnType<typeof httpMetricsSnapshot>): OperationalAlert[] {
+  const alerts: OperationalAlert[] = [];
+  const terminalTasks = data.generationTasks.filter((task) =>
+    ["SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"].includes(task.status)
+  );
+  const failedTasks = terminalTasks.filter((task) => task.status === "FAILED");
+  const pendingTasks = data.generationTasks.filter((task) => task.status === "PENDING").length;
+  const runningTasks = data.generationTasks.filter((task) => task.status === "RUNNING").length;
+  const generationFailureRate = terminalTasks.length ? round(failedTasks.length / terminalTasks.length) : 0;
+  const generationFailureRateThreshold = envNumber("ALERT_GENERATION_FAILURE_RATE", 0.35);
+  if (generationFailureRateThreshold >= 0 && generationFailureRate > generationFailureRateThreshold) {
+    alerts.push({
+      id: "generation.failure-rate",
+      severity: alertSeverity(generationFailureRate, generationFailureRateThreshold),
+      area: "generation",
+      metric: "generationFailureRate",
+      value: generationFailureRate,
+      threshold: generationFailureRateThreshold,
+      message: "Generation failure rate is above threshold.",
+      runbook: "Disable generation, inspect provider failures, and restart/scale workers after provider health is confirmed."
+    });
+  }
+
+  const backlog = pendingTasks + runningTasks;
+  const backlogThreshold = envNumber("ALERT_GENERATION_BACKLOG_MAX", 25);
+  if (backlog > backlogThreshold) {
+    alerts.push({
+      id: "generation.backlog",
+      severity: alertSeverity(backlog, backlogThreshold),
+      area: "generation",
+      metric: "generationBacklog",
+      value: backlog,
+      threshold: backlogThreshold,
+      message: "Generation task backlog is above threshold.",
+      runbook: "Scale workers or temporarily disable generation submissions until backlog drains."
+    });
+  }
+
+  const staleRunningMinutes = envNumber("ALERT_STALE_RUNNING_MINUTES", 10);
+  const staleRunningThreshold = envNumber("ALERT_STALE_RUNNING_TASKS_MAX", 0);
+  const staleCutoff = Date.now() - staleRunningMinutes * 60 * 1000;
+  const staleRunning = data.generationTasks.filter(
+    (task) => task.status === "RUNNING" && task.startedAt && new Date(task.startedAt).getTime() <= staleCutoff
+  ).length;
+  if (staleRunning > staleRunningThreshold) {
+    alerts.push({
+      id: "generation.stale-running",
+      severity: "critical",
+      area: "generation",
+      metric: "staleRunningTasks",
+      value: staleRunning,
+      threshold: staleRunningThreshold,
+      message: "Generation tasks have been running longer than the stale threshold.",
+      runbook: "Run worker recovery, verify refunds, and check provider timeout logs by taskId."
+    });
+  }
+
+  const pendingOrders = data.orders.filter((order) => order.status === "PENDING").length;
+  const pendingOrdersThreshold = envNumber("ALERT_PENDING_ORDERS_MAX", 50);
+  if (pendingOrders > pendingOrdersThreshold) {
+    alerts.push({
+      id: "payments.pending-orders",
+      severity: alertSeverity(pendingOrders, pendingOrdersThreshold),
+      area: "payments",
+      metric: "pendingOrders",
+      value: pendingOrders,
+      threshold: pendingOrdersThreshold,
+      message: "Pending payment orders are above threshold.",
+      runbook: "Check payment provider status, disable payments if needed, and run order reconciliation."
+    });
+  }
+
+  const amountMismatchEvents = data.paymentEvents.filter((event) => {
+    if (event.eventType !== "payment.succeeded") {
+      return false;
+    }
+    const order = data.orders.find((item) => item.id === event.orderId);
+    return Boolean(order && paymentEventAmount(event.payload) !== order.amountCents);
+  }).length;
+  const amountMismatchThreshold = envNumber("ALERT_PAYMENT_AMOUNT_MISMATCH_MAX", 0);
+  if (amountMismatchEvents > amountMismatchThreshold) {
+    alerts.push({
+      id: "payments.amount-mismatch",
+      severity: "critical",
+      area: "payments",
+      metric: "paymentAmountMismatchEvents",
+      value: amountMismatchEvents,
+      threshold: amountMismatchThreshold,
+      message: "Payment succeeded events with amount mismatch were detected.",
+      runbook: "Do not manually grant credits until the provider event and order snapshot are verified."
+    });
+  }
+
+  const httpFailureRate = http.requestsTotal ? round(http.failuresTotal / http.requestsTotal) : 0;
+  const httpFailureRateThreshold = envNumber("ALERT_HTTP_FAILURE_RATE", 0.05);
+  if (httpFailureRate > httpFailureRateThreshold) {
+    alerts.push({
+      id: "http.failure-rate",
+      severity: alertSeverity(httpFailureRate, httpFailureRateThreshold),
+      area: "http",
+      metric: "httpFailureRate",
+      value: httpFailureRate,
+      threshold: httpFailureRateThreshold,
+      message: "HTTP 5xx failure rate is above threshold.",
+      runbook: "Inspect route metrics, recent deploys, and provider logs by requestId."
+    });
+  }
+
+  return alerts.sort((left, right) => severityRank(right.severity) - severityRank(left.severity));
+}
+
+function domainMetricsSnapshot(data: StoreData) {
+  const terminalTasks = data.generationTasks.filter((task) =>
+    ["SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"].includes(task.status)
+  );
+  const succeededTasks = data.generationTasks.filter((task) => task.status === "SUCCEEDED");
+  const completedDurations = data.generationTasks
+    .filter((task) => task.startedAt && task.completedAt)
+    .map((task) => new Date(task.completedAt as string).getTime() - new Date(task.startedAt as string).getTime())
+    .filter((duration) => Number.isFinite(duration) && duration >= 0);
+
+  return {
+    usersTotal: data.users.length,
+    creditsOutstanding: data.creditAccounts.reduce((sum, account) => sum + account.balance, 0),
+    tasksByStatus: countBy(data.generationTasks, (task) => task.status),
+    generationSuccessRate: terminalTasks.length ? round(succeededTasks.length / terminalTasks.length) : null,
+    averageGenerationDurationMs: completedDurations.length
+      ? round(completedDurations.reduce((sum, duration) => sum + duration, 0) / completedDurations.length)
+      : null,
+    referenceImagesTotal: data.referenceImages.filter((image) => !image.deletedAt).length,
+    imagesTotal: data.generatedImages.length,
+    ordersByStatus: countBy(data.orders, (order) => order.status),
+    paymentEventsTotal: data.paymentEvents.length,
+    blockedSafetyEventsTotal: data.safetyEvents.filter((event) => event.status === "BLOCKED").length
+  };
+}
+
+function alertSeverity(value: number, threshold: number): OperationalAlertSeverity {
+  return threshold > 0 && value >= threshold * 2 ? "critical" : "warning";
+}
+
+function severityRank(severity: OperationalAlertSeverity): number {
+  return severity === "critical" ? 2 : 1;
+}
+
+function countBy<T>(items: T[], selectKey: (item: T) => string): Record<string, number> {
+  return items.reduce<Record<string, number>>((result, item) => {
+    const key = selectKey(item);
+    result[key] = (result[key] ?? 0) + 1;
+    return result;
+  }, {});
+}
+
+function pathOnly(url: string): string {
+  return url.split("?")[0] ?? url;
+}
+
+function envNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function envBool(name: string, fallback: boolean): boolean {
+  const value = process.env[name];
+  if (value === undefined) {
+    return fallback;
+  }
+  return !["0", "false", "no", "off", "disabled"].includes(value.toLowerCase());
+}
+
+function round(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+function webhookSignature(request: FastifyRequest): string | undefined {
+  return (
+    headerValue(request.headers["stripe-signature"]) ??
+    headerValue(request.headers["x-webhook-signature"]) ??
+    headerValue(request.headers["x-payment-signature"])
+  );
+}
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function payloadRecord(payload: unknown): Record<string, unknown> {
+  if (typeof payload === "string") {
+    try {
+      const parsed = JSON.parse(payload) as unknown;
+      return payloadRecord(parsed);
+    } catch {
+      return { raw: payload };
+    }
+  }
+  if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
+    return payload as Record<string, unknown>;
+  }
+  return { raw: payload };
 }
 
 function addDays(iso: string, days: number): string {

@@ -66,6 +66,7 @@ export interface GenerationTask {
   id: string;
   userId: string;
   clientRequestId: string;
+  referenceImageId: string | null;
   prompt: string;
   negativePrompt: string | null;
   style: StyleId;
@@ -101,6 +102,23 @@ export interface GeneratedImage {
   visibility: ImageVisibility;
   deletedAt: string | null;
   createdAt: string;
+}
+
+export interface ReferenceImage {
+  id: string;
+  userId: string;
+  storageKey: string;
+  publicUrl: string;
+  originalFileName: string;
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  fileSize: number;
+  width: number | null;
+  height: number | null;
+  contentHash: string;
+  safetyStatus: SafetyStatus;
+  createdAt: string;
+  expiresAt: string;
+  deletedAt: string | null;
 }
 
 export interface ImageFavorite {
@@ -189,6 +207,7 @@ export interface StoreData {
   creditAccounts: UserCreditAccount[];
   creditLedgerEntries: CreditLedgerEntry[];
   generationTasks: GenerationTask[];
+  referenceImages: ReferenceImage[];
   generatedImages: GeneratedImage[];
   imageFavorites: ImageFavorite[];
   plans: Plan[];
@@ -224,6 +243,8 @@ export type ErrorCode =
   | "TASK_NOT_RETRYABLE"
   | "PLAN_UNAVAILABLE"
   | "ORDER_NOT_PAYABLE"
+  | "RATE_LIMITED"
+  | "FEATURE_DISABLED"
   | "INTERNAL_ERROR";
 
 export class AppError extends Error {
@@ -299,10 +320,10 @@ export function checkPromptSafety(prompt: string): { status: SafetyStatus; reaso
     return {
       status: "BLOCKED",
       reasonCode: "LOCAL_RULE_HIT",
-      reasonMessage: `Prompt matched blocked term: ${hit}`
+      reasonMessage: `提示词命中安全词：${hit}`
     };
   }
-  return { status: "PASSED", reasonCode: "OK", reasonMessage: "Local prompt check passed" };
+  return { status: "PASSED", reasonCode: "OK", reasonMessage: "本地提示词检查通过" };
 }
 
 export function requireNever(value: never): never {

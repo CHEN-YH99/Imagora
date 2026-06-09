@@ -1,0 +1,137 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-imagora}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-imagora}
+      POSTGRES_DB: ${POSTGRES_DB:-imagora}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 4100
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://127.0.0.1:3100}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-imagora}:${POSTGRES_PASSWORD:-imagora}@postgres:5432/${POSTGRES_DB:-imagora}
+      REDIS_URL: redis://redis:6379
+      DATA_STORE: ${DATA_STORE:-prisma}
+      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-bullmq}
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL:-gpt-image-1}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-inline}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-auto}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_WEBHOOK_TOLERANCE_SECONDS: ${STRIPE_WEBHOOK_TOLERANCE_SECONDS:-300}
+      STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL:-http://127.0.0.1:3100/orders?paid=1}
+      STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL:-http://127.0.0.1:3100/pricing?canceled=1}
+      SAFETY_PROVIDER: ${SAFETY_PROVIDER:-local}
+      ORDER_PENDING_TTL_MINUTES: ${ORDER_PENDING_TTL_MINUTES:-30}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-imagora_session}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-Lax}
+      DOWNLOAD_URL_TTL_MINUTES: ${DOWNLOAD_URL_TTL_MINUTES:-15}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_PROVIDER: ${RATE_LIMIT_PROVIDER:-redis}
+      REDIS_RATE_LIMIT_TIMEOUT_MS: ${REDIS_RATE_LIMIT_TIMEOUT_MS:-500}
+      RATE_LIMIT_AUTH_MAX: ${RATE_LIMIT_AUTH_MAX:-20}
+      RATE_LIMIT_GENERATION_MAX: ${RATE_LIMIT_GENERATION_MAX:-30}
+      RATE_LIMIT_UPLOAD_MAX: ${RATE_LIMIT_UPLOAD_MAX:-20}
+      RATE_LIMIT_DOWNLOAD_MAX: ${RATE_LIMIT_DOWNLOAD_MAX:-60}
+      UPLOAD_MAX_BYTES: ${UPLOAD_MAX_BYTES:-5242880}
+      UPLOAD_MAX_BASE64_CHARS: ${UPLOAD_MAX_BASE64_CHARS:-8000000}
+      UPLOAD_MAX_DIMENSION: ${UPLOAD_MAX_DIMENSION:-8192}
+      UPLOAD_REFERENCE_TTL_DAYS: ${UPLOAD_REFERENCE_TTL_DAYS:-1}
+      FEATURE_GENERATION_ENABLED: ${FEATURE_GENERATION_ENABLED:-true}
+      FEATURE_PAYMENTS_ENABLED: ${FEATURE_PAYMENTS_ENABLED:-true}
+      FEATURE_UPLOADS_ENABLED: ${FEATURE_UPLOADS_ENABLED:-true}
+      FEATURE_DOWNLOADS_ENABLED: ${FEATURE_DOWNLOADS_ENABLED:-true}
+      ALERT_GENERATION_FAILURE_RATE: ${ALERT_GENERATION_FAILURE_RATE:-0.35}
+      ALERT_GENERATION_BACKLOG_MAX: ${ALERT_GENERATION_BACKLOG_MAX:-25}
+      ALERT_STALE_RUNNING_MINUTES: ${ALERT_STALE_RUNNING_MINUTES:-10}
+      ALERT_STALE_RUNNING_TASKS_MAX: ${ALERT_STALE_RUNNING_TASKS_MAX:-0}
+      ALERT_PENDING_ORDERS_MAX: ${ALERT_PENDING_ORDERS_MAX:-50}
+      ALERT_PAYMENT_AMOUNT_MISMATCH_MAX: ${ALERT_PAYMENT_AMOUNT_MISMATCH_MAX:-0}
+      ALERT_HTTP_FAILURE_RATE: ${ALERT_HTTP_FAILURE_RATE:-0.05}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4100/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "4100:4100"
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.worker
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-imagora}:${POSTGRES_PASSWORD:-imagora}@postgres:5432/${POSTGRES_DB:-imagora}
+      REDIS_URL: redis://redis:6379
+      DATA_STORE: ${DATA_STORE:-prisma}
+      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-bullmq}
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL:-gpt-image-1}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-inline}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-auto}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
+      SAFETY_PROVIDER: ${SAFETY_PROVIDER:-local}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-2500}
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:4100}
+        NEXT_PUBLIC_PAYMENT_PROVIDER: ${NEXT_PUBLIC_PAYMENT_PROVIDER:-mock}
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:4100}
+      NEXT_PUBLIC_PAYMENT_PROVIDER: ${NEXT_PUBLIC_PAYMENT_PROVIDER:-mock}
+    ports:
+      - "3100:3100"
+
+volumes:
+  postgres-data:

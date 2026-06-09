@@ -26,14 +26,14 @@ export class LocalSafetyProvider implements SafetyProvider {
       return {
         status: "BLOCKED",
         reasonCode: "LOCAL_RULE_HIT",
-        reasonMessage: `Prompt matched blocked term: ${hit}`,
+        reasonMessage: `提示词命中安全词：${hit}`,
         provider: this.name
       };
     }
     return {
       status: "PASSED",
       reasonCode: "OK",
-      reasonMessage: "Local text check passed",
+      reasonMessage: "本地文本检查通过",
       provider: this.name
     };
   }
@@ -43,14 +43,14 @@ export class LocalSafetyProvider implements SafetyProvider {
       return {
         status: "BLOCKED",
         reasonCode: "UNSUPPORTED_MIME",
-        reasonMessage: "Only image content is allowed",
+        reasonMessage: "仅允许图片内容",
         provider: this.name
       };
     }
     return {
       status: "PASSED",
       reasonCode: "OK",
-      reasonMessage: "Local image check passed",
+      reasonMessage: "本地图片检查通过",
       provider: this.name
     };
   }

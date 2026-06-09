@@ -1,11 +1,10 @@
 
 > @imagora/web@0.1.0 dev
-> next dev --hostname 127.0.0.1 --port 3001
+> next dev -H 127.0.0.1 -p 3001
 
 ▲ Next.js 16.2.7 (Turbopack)
 - Local:         http://127.0.0.1:3001
 - Network:       http://127.0.0.1:3001
-✓ Ready in 336ms
+✓ Ready in 333ms
 
- GET / 200 in 2.0s (next.js: 1867ms, application-code: 154ms)
- GET / 200 in 53ms (next.js: 3ms, application-code: 49ms)
+ GET / 200 in 349ms (next.js: 174ms, application-code: 175ms)

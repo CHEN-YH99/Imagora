@@ -92,6 +92,7 @@ model User {
   creditAccount  UserCreditAccount?
   ledgerEntries  CreditLedgerEntry[]
   tasks          GenerationTask[]
+  referenceImages ReferenceImage[]
   images         GeneratedImage[]
   favorites      ImageFavorite[]
   orders         Order[]
@@ -145,6 +146,8 @@ model GenerationTask {
   userId          String          @map("user_id")
   user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   clientRequestId String          @map("client_request_id")
+  referenceImageId String?        @map("reference_image_id")
+  referenceImage   ReferenceImage? @relation(fields: [referenceImageId], references: [id], onDelete: SetNull)
   prompt          String
   negativePrompt  String?         @map("negative_prompt")
   style           String
@@ -167,8 +170,32 @@ model GenerationTask {
 
   @@unique([userId, clientRequestId])
   @@index([userId, createdAt(sort: Desc)])
+  @@index([referenceImageId])
   @@index([status, createdAt])
   @@map("generation_tasks")
+}
+
+model ReferenceImage {
+  id               String       @id @default(uuid())
+  userId           String       @map("user_id")
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storageKey       String       @map("storage_key")
+  publicUrl        String?      @map("public_url")
+  originalFileName String       @map("original_file_name")
+  mimeType         String       @map("mime_type")
+  fileSize         Int          @map("file_size")
+  width            Int?
+  height           Int?
+  contentHash      String       @map("content_hash")
+  safetyStatus     SafetyStatus @default(PASSED) @map("safety_status")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  expiresAt        DateTime     @map("expires_at")
+  deletedAt        DateTime?    @map("deleted_at")
+  tasks            GenerationTask[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([contentHash])
+  @@map("reference_images")
 }
 
 model GeneratedImage {

@@ -65,8 +65,12 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
       width: task.width,
       height: task.height,
       quantity: task.quantity,
-      quality: task.quality
+      quality: task.quality,
+      referenceImageUrl: task.referenceImageId
+        ? data.referenceImages.find((image) => image.id === task.referenceImageId && !image.deletedAt)?.publicUrl
+        : null
     });
+    console.log(`[imagora-worker] task ${task.id} provider request ${result.providerRequestId}`);
 
     for (const image of result.images) {
       const safetyResult = await safety.checkImage({ mimeType: image.mimeType, bytes: image.bytes });
@@ -140,9 +144,19 @@ function refundTask(data: StoreData, task: GenerationTask, remark: string): void
 async function createImage(task: GenerationTask, index: number, body: string, mimeType: string): Promise<GeneratedImage> {
   const id = randomUUID();
   const now = new Date().toISOString();
+  const extension = extensionForMimeType(mimeType);
+  const imageKey = `generated/${task.userId}/${task.id}/${id}.${extension}`;
+  const thumbnailKey = `generated/${task.userId}/${task.id}/${id}-thumb.${extension}`;
   const stored = await storage.putObject({
-    key: `mock/${task.userId}/${task.id}/${id}.svg`,
+    key: imageKey,
     body,
+    bodyEncoding: isBase64Mime(mimeType) ? "base64" : "utf8",
+    mimeType
+  });
+  await storage.putObject({
+    key: thumbnailKey,
+    body: thumbnailBody(task, body, mimeType),
+    bodyEncoding: isBase64Mime(mimeType) ? "base64" : "utf8",
     mimeType
   });
   return {
@@ -150,7 +164,7 @@ async function createImage(task: GenerationTask, index: number, body: string, mi
     taskId: task.id,
     userId: task.userId,
     storageKey: stored.key,
-    thumbnailKey: `mock/${task.userId}/${task.id}/${id}-thumb.svg`,
+    thumbnailKey,
     publicUrl: stored.publicUrl,
     width: task.width,
     height: task.height,
@@ -161,4 +175,32 @@ async function createImage(task: GenerationTask, index: number, body: string, mi
     deletedAt: null,
     createdAt: now
   };
+}
+
+function thumbnailBody(task: GenerationTask, body: string, mimeType: string): string {
+  if (mimeType !== "image/svg+xml") {
+    return body;
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 ${task.width} ${task.height}">${body
+    .replace(/^<svg[^>]*>/, "")
+    .replace(/<\/svg>$/, "")}</svg>`;
+}
+
+function isBase64Mime(mimeType: string): boolean {
+  return mimeType === "image/png" || mimeType === "image/jpeg" || mimeType === "image/webp";
+}
+
+function extensionForMimeType(mimeType: string): string {
+  switch (mimeType) {
+    case "image/jpeg":
+      return "jpg";
+    case "image/png":
+      return "png";
+    case "image/webp":
+      return "webp";
+    case "image/svg+xml":
+      return "svg";
+    default:
+      return "bin";
+  }
 }

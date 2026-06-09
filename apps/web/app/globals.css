@@ -64,6 +64,27 @@ button {
   outline-offset: 4px;
 }
 
+.icon-action {
+  display: inline-flex;
+  width: 2.25rem;
+  height: 2.25rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.72);
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.icon-action:hover {
+  border-color: rgba(88, 240, 182, 0.55);
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
 .hero-shell {
   position: relative;
   min-height: 88svh;

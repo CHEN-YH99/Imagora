@@ -4,24 +4,24 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { LogIn, UserRound } from "lucide-react";
-import { login, loginDemo, setStoredToken } from "../../lib/api";
+import { login, setStoredToken } from "../../lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("demo@imagora.local");
-  const [password, setPassword] = useState("Demo123!");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
-  async function submit(useDemo = false) {
+  async function submit() {
     setLoading(true);
     setMessage("");
     try {
-      const result = useDemo ? await loginDemo() : await login(email, password);
+      const result = await login(email, password);
       setStoredToken(result.token);
       router.push("/generate");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Login failed");
+      setMessage(error instanceof Error ? error.message : "登录失败，请检查账号信息后重试。");
     } finally {
       setLoading(false);
     }
@@ -34,11 +34,11 @@ export default function LoginPage() {
           <UserRound className="size-5" aria-hidden="true" />
           Imagora
         </Link>
-        <h1 className="mt-6 text-3xl font-semibold">Sign in</h1>
-        <p className="mt-2 text-sm leading-6 text-white/62">登录后才能保存生成历史、下载图片和使用积分。游客硬冲生产功能，那是不讲武德。</p>
+        <h1 className="mt-6 text-3xl font-semibold">登录</h1>
+        <p className="mt-2 text-sm leading-6 text-white/62">登录后可保存生成历史、下载图片、管理收藏并使用账户积分。</p>
         <div className="mt-6 space-y-4">
           <label className="block text-sm text-white/70">
-            Email
+            邮箱
             <input
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={email}
@@ -47,7 +47,7 @@ export default function LoginPage() {
             />
           </label>
           <label className="block text-sm text-white/70">
-            Password
+            密码
             <input
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={password}
@@ -60,23 +60,15 @@ export default function LoginPage() {
             className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
             type="button"
             disabled={loading}
-            onClick={() => submit(false)}
+            onClick={submit}
           >
             <LogIn className="size-4" aria-hidden="true" />
-            {loading ? "Signing in..." : "Sign in"}
-          </button>
-          <button
-            className="focus-ring w-full rounded-full border border-white/12 px-5 py-3 font-semibold text-white/76 transition-colors duration-200 hover:bg-white/10 hover:text-white"
-            type="button"
-            disabled={loading}
-            onClick={() => submit(true)}
-          >
-            Use demo account
+            {loading ? "登录中..." : "登录"}
           </button>
           <p className="text-center text-sm text-white/56">
-            No account?{" "}
+            还没有账号？{" "}
             <Link className="text-mint hover:text-volt" href="/register">
-              Register
+              注册
             </Link>
           </p>
         </div>

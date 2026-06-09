@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AppFrame, Panel, StatusPill } from "../../components/AppFrame";
-import { apiFetch, formatMoney, getStoredToken, type Order } from "../../lib/api";
+import { apiFetch, formatMoney, formatPaymentProvider, getStoredToken, type Order } from "../../lib/api";
 
 export default function OrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
@@ -11,16 +11,16 @@ export default function OrdersPage() {
   useEffect(() => {
     const token = getStoredToken();
     if (!token) {
-      setMessage("Sign in first.");
+      setMessage("请先登录后查看订单。");
       return;
     }
     apiFetch<{ orders: Order[] }>("/api/orders", { token })
       .then((result) => setOrders(result.orders))
-      .catch((error) => setMessage(error instanceof Error ? error.message : "Failed to load orders"));
+      .catch((error) => setMessage(error instanceof Error ? error.message : "订单加载失败，请稍后重试。"));
   }, []);
 
   return (
-    <AppFrame title="Orders" subtitle="订单状态、金额和支付渠道集中展示，支付幂等别藏在黑箱里。">
+    <AppFrame title="订单记录" subtitle="查看积分订单的状态、金额、支付渠道和创建时间，便于核对充值结果。">
       <Panel>
         {message ? <p className="mb-4 text-sm text-white/60">{message}</p> : null}
         <div className="space-y-3">
@@ -29,7 +29,7 @@ export default function OrdersPage() {
               <div>
                 <p className="font-semibold">{order.orderNo}</p>
                 <p className="mt-1 text-sm text-white/52">
-                  {order.paymentProvider} · {new Date(order.createdAt).toLocaleString()}
+                  {formatPaymentProvider(order.paymentProvider)} · {new Date(order.createdAt).toLocaleString("zh-CN")}
                 </p>
               </div>
               <div className="flex items-center gap-4">
@@ -38,7 +38,7 @@ export default function OrdersPage() {
               </div>
             </article>
           ))}
-          {orders.length === 0 ? <p className="text-sm text-white/50">No orders yet.</p> : null}
+          {orders.length === 0 ? <p className="text-sm text-white/50">暂无订单记录。</p> : null}
         </div>
       </Panel>
     </AppFrame>

@@ -2,9 +2,9 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Imagora - AI image generation platform",
+  title: "Imagora - 智能图片生成平台",
   description:
-    "A credit-based AI image generation platform for prompts, style exploration, preview galleries, and creative teams."
+    "面向创作者、电商运营和内容团队的积分制智能图片生成平台。"
 };
 
 export const viewport: Viewport = {

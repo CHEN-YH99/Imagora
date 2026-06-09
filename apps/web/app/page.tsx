@@ -24,6 +24,7 @@ import {
   X,
   Zap
 } from "lucide-react";
+import { formatApiErrorMessage, formatCredits, formatQualityLabel, formatStatusLabel } from "../lib/api";
 
 type StyleOption = {
   id: string;
@@ -53,54 +54,54 @@ type ApiTask = {
 const styleOptions: StyleOption[] = [
   {
     id: "cinematic",
-    name: "Cinematic",
-    label: "写实电影",
-    description: "镜头光、景深和强叙事画面",
+    name: "电影写实",
+    label: "电影写实",
+    description: "强调镜头语言、景深层次和叙事氛围",
     cost: 8,
     artClass: "art-cinematic",
     accentClass: "from-ember to-cyanx"
   },
   {
     id: "product",
-    name: "Product",
+    name: "产品摄影",
     label: "产品摄影",
-    description: "电商主图、材质和棚拍质感",
+    description: "适合电商主图、材质表现和棚拍质感",
     cost: 7,
     artClass: "art-product",
     accentClass: "from-mint to-cyanx"
   },
   {
     id: "anime",
-    name: "Anime",
+    name: "动漫插画",
     label: "动漫插画",
-    description: "角色视觉、封面和社媒头像",
+    description: "适合角色视觉、封面图和社媒头像",
     cost: 6,
     artClass: "art-anime",
     accentClass: "from-plasma to-cyanx"
   },
   {
     id: "poster",
-    name: "Poster",
+    name: "海报设计",
     label: "海报设计",
-    description: "活动视觉、标题空间和高对比",
+    description: "适合活动主视觉、标题空间和高对比排版",
     cost: 9,
     artClass: "art-poster",
     accentClass: "from-volt to-ember"
   },
   {
     id: "architecture",
-    name: "Architecture",
+    name: "空间概念",
     label: "空间概念",
-    description: "室内、建筑、展陈和光影结构",
+    description: "适合室内、建筑、展陈和光影结构方案",
     cost: 8,
     artClass: "art-architecture",
     accentClass: "from-cyanx to-ember"
   },
   {
     id: "isometric",
-    name: "Isometric",
+    name: "等距图形",
     label: "等距图形",
-    description: "应用插图、流程图和品牌素材",
+    description: "适合应用插图、流程说明和品牌素材",
     cost: 5,
     artClass: "art-isometric",
     accentClass: "from-plasma to-volt"
@@ -109,78 +110,78 @@ const styleOptions: StyleOption[] = [
 
 const galleryItems = [
   {
-    title: "Neon market alley",
-    style: "Cinematic",
+    title: "霓虹雨巷",
+    style: "电影写实",
     prompt: "雨夜赛博巷道，霓虹反射，35mm 电影镜头",
     cost: 16,
     artClass: "art-cinematic"
   },
   {
-    title: "Ceramic headphones",
-    style: "Product",
+    title: "陶瓷质感耳机",
+    style: "产品摄影",
     prompt: "白瓷无线耳机，薄荷色光带，干净棚拍",
     cost: 14,
     artClass: "art-product"
   },
   {
-    title: "Solar courier",
-    style: "Anime",
+    title: "太阳能信使",
+    style: "动漫插画",
     prompt: "未来城市信使，明亮发光披风，动画封面",
     cost: 12,
     artClass: "art-anime"
   },
   {
-    title: "Festival launch key art",
-    style: "Poster",
+    title: "音乐节主视觉",
+    style: "海报设计",
     prompt: "音乐节主视觉，撞色几何，留出标题版位",
     cost: 18,
     artClass: "art-poster"
   },
   {
-    title: "Coastal studio interior",
-    style: "Architecture",
+    title: "海岸创作室",
+    style: "空间概念",
     prompt: "海边创作工作室，玻璃立面，晨光进入空间",
     cost: 16,
     artClass: "art-architecture"
   },
   {
-    title: "Creator workflow map",
-    style: "Isometric",
-    prompt: "AI 创作流程等距插图，节点清晰，活力配色",
+    title: "创作流程图",
+    style: "等距图形",
+    prompt: "智能创作流程等距插图，节点清晰，活力配色",
     cost: 10,
     artClass: "art-isometric"
   }
 ];
 
 const promptExamples = [
-  "A cinematic product shot of a translucent smart camera on a wet obsidian table, mint rim light, high detail",
-  "A bold event poster for an underground synth festival, orange typography space, vivid geometric shapes",
-  "An isometric creator dashboard with image tiles, credit ledger, queue status, clean dark UI",
-  "A cozy futuristic studio overlooking the coast, glass walls, modular furniture, early sunrise",
-  "A stylized anime character designing holographic fashion, energetic pose, saturated highlights"
+  "半透明智能相机置于黑曜石湿润台面，薄荷色轮廓光，高细节产品摄影",
+  "地下电子音乐节活动海报，预留橙色标题空间，几何图形鲜明有冲击力",
+  "等距视角创作者工作台，包含图片网格、积分账本和队列状态，深色专业界面",
+  "面向海岸的未来创作室，玻璃墙、模块化家具，清晨自然光进入室内",
+  "动漫风角色正在设计全息服装，姿态有张力，高饱和高光，封面构图"
 ];
 
 const pricingPlans = [
   {
-    name: "Starter",
-    price: "$9",
-    credits: "220 credits",
+    name: "入门版",
+    price: "9 美元",
+    credits: "220 积分",
     note: "适合灵感探索",
     highlight: false,
-    features: ["约 27 张标准写实图", "生成历史保留 30 天", "低清下载与收藏"]
+    features: ["约 27 张标准写实图", "生成历史保留 30 天", "标准下载与收藏管理"]
   },
   {
-    name: "Creator",
-    price: "$19",
-    credits: "620 credits",
+    name: "创作者版",
+    price: "19 美元",
+    credits: "620 积分",
     note: "多数创作者的起点",
     highlight: true,
     features: ["约 77 张标准写实图", "高清下载", "失败任务自动退还积分"]
   },
   {
-    name: "Studio",
-    price: "$49",
-    credits: "1,850 credits",
+    name: "团队版",
+    price: "49 美元",
+    credits: "1,850 积分",
     note: "适合小团队和电商运营",
     highlight: false,
     features: ["并发生成队列", "商用素材工作流", "优先任务处理"]
@@ -209,7 +210,7 @@ export default function HomePage() {
   const [quantity, setQuantity] = useState(2);
   const [prompt, setPrompt] = useState(promptExamples[0]);
   const [token, setToken] = useState<string | null>(null);
-  const [apiMessage, setApiMessage] = useState("Demo API ready on port 4000");
+  const [apiMessage, setApiMessage] = useState("生成服务已就绪，可以提交预览任务。");
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedImages, setGeneratedImages] = useState<ApiImage[]>([]);
   const [balance, setBalance] = useState(1240);
@@ -221,7 +222,7 @@ export default function HomePage() {
   async function handleGenerate() {
     setIsGenerating(true);
     setGeneratedImages([]);
-    setApiMessage("Connecting to Imagora API...");
+    setApiMessage("正在连接生成服务...");
     try {
       const sessionToken = token ?? (await loginDemo());
       setToken(sessionToken);
@@ -231,7 +232,7 @@ export default function HomePage() {
         body: {
           clientRequestId: crypto.randomUUID(),
           prompt,
-          negativePrompt: "low quality, blurry, distorted watermark",
+          negativePrompt: "低质量、模糊、变形、水印",
           style: mapStyle(selectedStyle.id),
           aspectRatio: "1:1",
           quantity,
@@ -239,16 +240,16 @@ export default function HomePage() {
         }
       });
       setBalance(created.balanceAfter);
-      setApiMessage(`Task ${created.task.status.toLowerCase()} - ${creditCost} credits reserved`);
+      setApiMessage(`任务${formatStatusLabel(created.task.status)}，已预留 ${formatCredits(creditCost)}。`);
       const result = await waitForTask(sessionToken, created.task.id);
       if (result.task.status === "SUCCEEDED") {
         setGeneratedImages(result.images);
-        setApiMessage(`Generation succeeded - ${result.images.length} image(s) delivered`);
+        setApiMessage(`生成完成，已交付 ${result.images.length} 张图片。`);
       } else {
-        setApiMessage(result.task.failureMessage ?? `Generation ended with ${result.task.status}`);
+        setApiMessage(result.task.failureMessage ?? `任务已结束：${formatStatusLabel(result.task.status)}。`);
       }
     } catch (error) {
-      setApiMessage(error instanceof Error ? error.message : "Generation failed");
+      setApiMessage(error instanceof Error ? error.message : "生成失败，请稍后重试。");
     } finally {
       setIsGenerating(false);
     }
@@ -266,13 +267,18 @@ export default function HomePage() {
           </a>
 
           <div className="hidden items-center gap-1 md:flex">
-            {["Gallery", "Styles", "Prompts", "Pricing"].map((item) => (
+            {[
+              { id: "gallery", label: "案例" },
+              { id: "styles", label: "风格" },
+              { id: "prompts", label: "提示词" },
+              { id: "pricing", label: "套餐" }
+            ].map((item) => (
               <a
-                key={item}
-                href={`#${item.toLowerCase()}`}
+                key={item.id}
+                href={`#${item.id}`}
                 className="focus-ring rounded-full px-4 py-2 text-sm text-white/72 transition-colors duration-200 hover:bg-white/10 hover:text-white"
               >
-                {item}
+                {item.label}
               </a>
             ))}
           </div>
@@ -280,17 +286,17 @@ export default function HomePage() {
           <div className="hidden items-center gap-2 md:flex">
             <a
               className="focus-ring inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm text-white/78 transition-colors duration-200 hover:bg-white/10 hover:text-white"
-              href="#signin"
+              href="/login"
             >
               <LogIn className="size-4" aria-hidden="true" />
-              Sign in
+              登录
             </a>
             <a
               className="focus-ring inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-mint"
               href="#generator"
             >
               <UserPlus className="size-4" aria-hidden="true" />
-              Start free
+              开始创作
             </a>
           </div>
 
@@ -306,14 +312,19 @@ export default function HomePage() {
 
         {menuOpen ? (
           <div className="mx-auto mt-2 max-w-7xl rounded-3xl border border-white/15 bg-ink/94 p-3 shadow-2xl shadow-black/40 backdrop-blur-xl md:hidden">
-            {["Gallery", "Styles", "Prompts", "Pricing"].map((item) => (
+            {[
+              { id: "gallery", label: "案例" },
+              { id: "styles", label: "风格" },
+              { id: "prompts", label: "提示词" },
+              { id: "pricing", label: "套餐" }
+            ].map((item) => (
               <a
-                key={item}
-                href={`#${item.toLowerCase()}`}
+                key={item.id}
+                href={`#${item.id}`}
                 className="focus-ring flex rounded-2xl px-4 py-3 text-white/76 transition-colors duration-200 hover:bg-white/10 hover:text-white"
                 onClick={() => setMenuOpen(false)}
               >
-                {item}
+                {item.label}
               </a>
             ))}
           </div>
@@ -330,18 +341,18 @@ export default function HomePage() {
         <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col items-center py-16 text-center sm:py-20">
           <div className="mb-6 inline-flex max-w-full items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 py-2 text-sm text-white/78 backdrop-blur-xl">
             <Moon className="size-4 text-mint" aria-hidden="true" />
-            Dark workspace for prompt driven image production
+            面向商业创意团队的智能图片生产工作台
           </div>
           <h1 className="max-w-5xl text-balance text-5xl font-semibold leading-[1.04] sm:text-6xl lg:text-7xl">
-            Imagora turns sharp prompts into ready to use visual assets.
+            Imagora 将清晰提示词转化为可交付视觉资产
           </h1>
           <p className="mt-6 max-w-3xl text-pretty text-base leading-8 text-white/74 sm:text-lg">
-            面向创作者、电商运营和内容团队的 AI 图片生成平台。风格、比例、数量、质量和积分消耗在提交前讲清楚，别让用户生成完才发现额度没了。
+            面向创作者、电商运营和内容团队，提供风格选择、比例设置、批量生成、质量控制和积分预估，让图片生产流程清晰可控。
           </p>
 
           <div id="generator" className="glass-panel accent-border mt-9 w-full max-w-4xl rounded-[2rem] p-3 text-left">
             <label className="sr-only" htmlFor="prompt">
-              Prompt
+              提示词
             </label>
             <div className="flex flex-col gap-3 md:flex-row">
               <textarea
@@ -350,15 +361,15 @@ export default function HomePage() {
                 onChange={(event) => setPrompt(event.target.value)}
                 className="focus-ring min-h-28 flex-1 resize-none rounded-[1.35rem] border border-white/12 bg-black/34 px-5 py-4 text-base leading-7 text-white placeholder:text-white/40"
                 maxLength={420}
-                placeholder="Describe the image you want to generate..."
+                placeholder="描述你想生成的图片内容、主体、风格、光线和用途..."
               />
               <div className="flex min-w-0 flex-col justify-between rounded-[1.35rem] border border-white/12 bg-white/8 p-4 md:w-64">
                 <div className="grid grid-cols-2 gap-2 text-sm">
-                  <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">Style</span>
+                  <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">风格</span>
                   <span className="rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">{selectedStyle.name}</span>
-                  <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">Quality</span>
-                  <span className="rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">{quality}</span>
-                  <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">Images</span>
+                  <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">质量</span>
+                  <span className="rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">{formatQualityLabel(quality)}</span>
+                  <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">数量</span>
                   <span className="flex items-center justify-between rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">
                     <button
                       className="focus-ring rounded-full px-2 text-white/70 hover:bg-white/10 hover:text-white"
@@ -386,7 +397,7 @@ export default function HomePage() {
                   className="focus-ring mt-4 inline-flex items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Wand2 className="size-4" aria-hidden="true" />
-                  {isGenerating ? "Generating..." : "Generate preview"}
+                  {isGenerating ? "生成中..." : "生成预览"}
                 </button>
               </div>
             </div>
@@ -405,17 +416,17 @@ export default function HomePage() {
                         : "border-white/14 bg-white/8 text-white/72 hover:bg-white/14 hover:text-white"
                     }`}
                   >
-                    {item}
+                    {formatQualityLabel(item)}
                   </button>
                 ))}
               </div>
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-full border border-white/12 bg-black/28 px-4 py-2 text-sm text-white/78">
                 <span className="inline-flex items-center gap-2">
                   <Coins className="size-4 text-volt" aria-hidden="true" />
-                  {creditCost} credits
+                  {formatCredits(creditCost)}
                 </span>
                 <span className="h-4 w-px bg-white/18" aria-hidden="true" />
-                <span>Balance {balance.toLocaleString()}</span>
+                <span>余额 {balance.toLocaleString("zh-CN")}</span>
               </div>
             </div>
 
@@ -427,7 +438,7 @@ export default function HomePage() {
                     <img
                       key={image.id}
                       src={image.publicUrl}
-                      alt="Generated Imagora mock result"
+                      alt="Imagora 生成结果"
                       className="aspect-square w-full rounded-2xl border border-white/12 object-cover"
                       width={image.width}
                       height={image.height}
@@ -461,9 +472,9 @@ export default function HomePage() {
       <section id="gallery" className="px-4 py-20 sm:py-24">
         <div className="mx-auto max-w-7xl">
           <SectionHeading
-            eyebrow="Generation Preview Gallery"
-            title="A gallery that sells the outcome, not the model name."
-            description="精选案例配置化展示，包含提示词摘要、风格标签和积分成本，贴合首页 FR-001/FR-002 以及图片列表性能要求。"
+            eyebrow="生成案例"
+            title="用真实产出展示创意方向和交付质量"
+            description="精选案例呈现提示词摘要、风格标签和积分成本，方便快速判断生成方向、复用表达方式，并规划后续创作预算。"
           />
 
           <div className="mt-10 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -472,14 +483,14 @@ export default function HomePage() {
                 key={item.title}
                 className="group rounded-[1.35rem] border border-white/12 bg-white/7 p-3 transition-colors duration-200 hover:border-white/24 hover:bg-white/10"
               >
-                <div className={`gallery-art ${item.artClass}`} role="img" aria-label={`${item.title} preview`} />
+                <div className={`gallery-art ${item.artClass}`} role="img" aria-label={`${item.title}预览`} />
                 <div className="space-y-4 p-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <h3 className="truncate text-lg font-semibold text-white">{item.title}</h3>
                       <p className="mt-1 text-sm text-white/58">{item.style}</p>
                     </div>
-                    <span className="shrink-0 rounded-full bg-white/10 px-3 py-1 text-sm text-volt">{item.cost} cr</span>
+                    <span className="shrink-0 rounded-full bg-white/10 px-3 py-1 text-sm text-volt">{item.cost} 积分</span>
                   </div>
                   <p className="line-clamp-2 min-h-12 text-sm leading-6 text-white/68">{item.prompt}</p>
                   <div className="flex flex-wrap gap-2">
@@ -488,14 +499,14 @@ export default function HomePage() {
                       className="focus-ring inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-mint"
                     >
                       <Download className="size-4" aria-hidden="true" />
-                      Download
+                      下载
                     </button>
                     <button
                       type="button"
                       className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/12 px-4 py-2 text-sm text-white/76 transition-colors duration-200 hover:bg-white/10 hover:text-white"
                     >
                       <Heart className="size-4" aria-hidden="true" />
-                      Save
+                      收藏
                     </button>
                     <button
                       type="button"
@@ -503,7 +514,7 @@ export default function HomePage() {
                       className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/12 px-4 py-2 text-sm text-white/76 transition-colors duration-200 hover:bg-white/10 hover:text-white"
                     >
                       <RefreshCw className="size-4" aria-hidden="true" />
-                      Reuse
+                      复用
                     </button>
                   </div>
                 </div>
@@ -516,9 +527,9 @@ export default function HomePage() {
       <section id="styles" className="border-y border-white/10 bg-white/[0.035] px-4 py-20 sm:py-24">
         <div className="mx-auto max-w-7xl">
           <SectionHeading
-            eyebrow="Style Options"
-            title="Structured style choices keep prompts powerful without making users hand-roll parameters."
-            description="覆盖写实、插画、动漫、产品摄影、海报和空间概念，满足需求文档 FR-012，同时让积分预估可解释。"
+            eyebrow="风格选择"
+            title="结构化风格参数让提示词更稳定"
+            description="覆盖写实、插画、动漫、产品摄影、海报和空间概念等常见创作场景，减少重复调参成本，并让积分预估更容易理解。"
           />
 
           <div className="mt-10 grid gap-4 lg:grid-cols-3">
@@ -534,14 +545,14 @@ export default function HomePage() {
                     : "border-white/12 bg-white/7 hover:border-white/24 hover:bg-white/10"
                 }`}
               >
-                <div className={`gallery-art ${item.artClass} min-h-28`} role="img" aria-label={`${item.label} style preview`} />
+                <div className={`gallery-art ${item.artClass} min-h-28`} role="img" aria-label={`${item.label}风格预览`} />
                 <div className="mt-4 flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <p className="text-sm text-white/58">{item.name}</p>
                     <h3 className="mt-1 text-xl font-semibold text-white">{item.label}</h3>
                   </div>
                   <span className={`shrink-0 rounded-full bg-gradient-to-r ${item.accentClass} px-3 py-1 text-sm font-semibold text-ink`}>
-                    {item.cost} cr
+                    {item.cost} 积分
                   </span>
                 </div>
                 <p className="mt-3 text-sm leading-6 text-white/68">{item.description}</p>
@@ -556,13 +567,13 @@ export default function HomePage() {
           <div>
             <p className="inline-flex items-center gap-2 rounded-full border border-white/12 bg-white/8 px-4 py-2 text-sm text-white/70">
               <Sparkles className="size-4 text-plasma" aria-hidden="true" />
-              Prompt Examples
+              提示词示例
             </p>
             <h2 className="mt-5 text-3xl font-semibold leading-tight text-white sm:text-5xl">
-              Prompt samples that map directly into the generation form.
+              可直接进入生成表单的专业提示词
             </h2>
             <p className="mt-5 text-base leading-8 text-white/68">
-              文档说得很直白：别让用户一上来就被高级参数吓到。示例 Prompt 可以直接填入输入框，并保留风格、数量、质量和积分估算。
+              示例提示词围绕主体、环境、光线、构图和用途组织，便于直接复用，也便于进一步调整风格、数量、质量和积分预算。
             </p>
           </div>
 
@@ -588,16 +599,16 @@ export default function HomePage() {
       <section className="border-y border-white/10 bg-white/[0.035] px-4 py-20 sm:py-24">
         <div className="mx-auto max-w-7xl">
           <SectionHeading
-            eyebrow="MVP Flow"
-            title="The landing page hints at the real product workflow."
-            description="生成入口、积分预估、队列状态、失败退还和资产操作都在前台语言中露出，后续接 API 时不用推翻交互。"
+            eyebrow="创作流程"
+            title="从提示词到资产交付的完整闭环"
+            description="生成入口、积分预估、队列状态、失败退还和资产操作都保持清晰，让创作团队能稳定管理每一次图片生产。"
           />
 
           <div className="mt-10 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <FlowCard icon={Palette} title="Prompt + Style" text="提示词、负向提示词、风格和比例结构化，不把一切塞进一段文本。" />
-            <FlowCard icon={Coins} title="Quote Credits" text="提交前预估积分，余额不足就引导购买，前端价格不作为真实扣费依据。" />
-            <FlowCard icon={Gauge} title="Async Queue" text="任务排队、生成中、成功、失败状态清晰，HTTP 请求不直接等模型。" />
-            <FlowCard icon={ShieldCheck} title="Refund + Safety" text="违规不扣分，系统失败触发退款补偿，内容安全事件可追踪。" />
+            <FlowCard icon={Palette} title="提示词与风格" text="提示词、负向提示词、风格和比例结构化配置，降低参数管理成本。" />
+            <FlowCard icon={Coins} title="积分预估" text="提交前展示预计消耗和账户余额，帮助用户明确预算和生成成本。" />
+            <FlowCard icon={Gauge} title="异步队列" text="清晰呈现排队、生成中、完成和失败状态，适合批量图片生产。" />
+            <FlowCard icon={ShieldCheck} title="安全与退回" text="安全拦截、系统失败和积分退回可追踪，减少资产生产风险。" />
           </div>
         </div>
       </section>
@@ -605,9 +616,9 @@ export default function HomePage() {
       <section id="pricing" className="px-4 py-20 sm:py-24">
         <div className="mx-auto max-w-7xl">
           <SectionHeading
-            eyebrow="Credit Based Pricing"
-            title="Credits are the business model, so the pricing cannot be vague."
-            description="套餐围绕积分、有效权益和失败退款说明展开，承接需求 FR-034 到 FR-038。"
+            eyebrow="积分套餐"
+            title="清晰展示积分、权益和适用场景"
+            description="套餐围绕积分额度、下载权益、任务优先级和失败退回机制展示，方便个人创作者和团队按需选择。"
           />
 
           <div className="mt-10 grid gap-4 lg:grid-cols-3">
@@ -626,12 +637,12 @@ export default function HomePage() {
                     <p className="mt-2 text-sm text-white/58">{plan.note}</p>
                   </div>
                   {plan.highlight ? (
-                    <span className="rounded-full bg-mint px-3 py-1 text-sm font-semibold text-ink">Popular</span>
+                    <span className="rounded-full bg-mint px-3 py-1 text-sm font-semibold text-ink">推荐</span>
                   ) : null}
                 </div>
                 <div className="mt-8 flex items-end gap-3">
                   <span className="text-5xl font-semibold text-white">{plan.price}</span>
-                  <span className="pb-2 text-white/58">/ pack</span>
+                  <span className="pb-2 text-white/58">/ 套餐</span>
                 </div>
                 <p className="mt-4 inline-flex items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm text-volt">
                   <Coins className="size-4" aria-hidden="true" />
@@ -651,7 +662,7 @@ export default function HomePage() {
                     plan.highlight ? "bg-mint text-ink hover:bg-volt" : "bg-white text-ink hover:bg-mint"
                   }`}
                 >
-                  Choose {plan.name}
+                  选择{plan.name}
                   <ArrowRight className="size-4" aria-hidden="true" />
                 </a>
               </article>
@@ -664,9 +675,9 @@ export default function HomePage() {
         <div className="mx-auto max-w-7xl rounded-[2rem] border border-white/12 bg-white/7 p-6 sm:p-10">
           <div className="grid gap-8 lg:grid-cols-[1fr_auto] lg:items-center">
             <div>
-              <p className="text-sm text-white/58">Imagora MVP</p>
+              <p className="text-sm text-white/58">Imagora 工作台</p>
               <h2 className="mt-3 text-3xl font-semibold leading-tight text-white sm:text-5xl">
-                Start with the landing page, keep the architecture ready for the full generation loop.
+                开始一次可追踪、可复用的专业图片生成流程
               </h2>
             </div>
             <div className="flex flex-wrap gap-3">
@@ -675,14 +686,14 @@ export default function HomePage() {
                 className="focus-ring inline-flex items-center gap-2 rounded-full bg-white px-5 py-3 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-mint"
               >
                 <Play className="size-4" aria-hidden="true" />
-                Try prompt
+                试用提示词
               </a>
               <a
                 href="#pricing"
                 className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/14 px-5 py-3 text-sm font-semibold text-white transition-colors duration-200 hover:bg-white/10"
               >
                 <Layers className="size-4" aria-hidden="true" />
-                View credits
+                查看套餐
               </a>
             </div>
           </div>
@@ -691,8 +702,8 @@ export default function HomePage() {
 
       <footer className="border-t border-white/10 px-4 py-8 text-sm text-white/52">
         <div className="mx-auto flex max-w-7xl flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <p>Imagora - AI image generation platform</p>
-          <p>Built from the MVP landing milestone in the development checkpoint plan.</p>
+          <p>Imagora 智能图片生成平台</p>
+          <p>为创作者、电商运营和内容团队提供可管理的图片生产流程。</p>
         </div>
       </footer>
     </main>
@@ -740,7 +751,7 @@ function FlowCard({
   );
 }
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000";
+const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4100";
 
 async function loginDemo(): Promise<string> {
   const response = await apiFetch<{ token: string }>("/api/auth/login", {
@@ -761,7 +772,7 @@ async function waitForTask(token: string, taskId: string): Promise<{ task: ApiTa
       return result;
     }
   }
-  throw new Error("Task polling timed out");
+  throw new Error("生成任务等待超时，请稍后在历史记录中查看结果。");
 }
 
 async function apiFetch<T>(
@@ -780,9 +791,9 @@ async function apiFetch<T>(
     },
     body: options.body ? JSON.stringify(options.body) : undefined
   });
-  const payload = (await response.json()) as { data?: T; error?: { message: string } };
+  const payload = (await response.json()) as { data?: T; error?: { code?: string; message: string } };
   if (!response.ok || !payload.data) {
-    throw new Error(payload.error?.message ?? `API request failed: ${response.status}`);
+    throw new Error(formatApiErrorMessage(payload.error?.code, payload.error?.message, response.status));
   }
   return payload.data;
 }

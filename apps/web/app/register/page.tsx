@@ -18,11 +18,11 @@ export default function RegisterPage() {
     setLoading(true);
     setMessage("");
     try {
-      const result = await register(email, password, nickname || email.split("@")[0] || "Creator");
+      const result = await register(email, password, nickname || email.split("@")[0] || "创作者");
       setStoredToken(result.token);
       router.push("/generate");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Register failed");
+      setMessage(error instanceof Error ? error.message : "注册失败，请检查信息后重试。");
     } finally {
       setLoading(false);
     }
@@ -32,13 +32,13 @@ export default function RegisterPage() {
     <main className="flex min-h-screen items-center justify-center bg-ink px-4 text-white">
       <section className="w-full max-w-md rounded-[1.5rem] border border-white/12 bg-white/7 p-6">
         <Link className="focus-ring text-sm text-white/70 hover:text-white" href="/">
-          Back to Imagora
+          返回 Imagora
         </Link>
-        <h1 className="mt-6 text-3xl font-semibold">Create account</h1>
-        <p className="mt-2 text-sm leading-6 text-white/62">新用户会获得欢迎积分，用来验证生成链路、历史和下载。</p>
+        <h1 className="mt-6 text-3xl font-semibold">创建账号</h1>
+        <p className="mt-2 text-sm leading-6 text-white/62">新用户可获得欢迎积分，用于体验图片生成、历史记录和下载流程。</p>
         <div className="mt-6 space-y-4">
           <label className="block text-sm text-white/70">
-            Email
+            邮箱
             <input
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={email}
@@ -47,7 +47,7 @@ export default function RegisterPage() {
             />
           </label>
           <label className="block text-sm text-white/70">
-            Nickname
+            昵称
             <input
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={nickname}
@@ -55,7 +55,7 @@ export default function RegisterPage() {
             />
           </label>
           <label className="block text-sm text-white/70">
-            Password
+            密码
             <input
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={password}
@@ -71,12 +71,12 @@ export default function RegisterPage() {
             onClick={submit}
           >
             <UserPlus className="size-4" aria-hidden="true" />
-            {loading ? "Creating..." : "Create account"}
+            {loading ? "创建中..." : "创建账号"}
           </button>
           <p className="text-center text-sm text-white/56">
-            Already have one?{" "}
+            已有账号？{" "}
             <Link className="text-mint hover:text-volt" href="/login">
-              Sign in
+              登录
             </Link>
           </p>
         </div>

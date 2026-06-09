@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
@@ -18,6 +18,7 @@ export function createStore(): Store {
 
 export class JsonStore implements Store {
   readonly filePath: string;
+  private updateChain: Promise<void> = Promise.resolve();
 
   constructor(filePath = process.env.IMAGORA_STORE_PATH ? resolve(process.env.IMAGORA_STORE_PATH) : defaultPath) {
     this.filePath = filePath;
@@ -25,20 +26,40 @@ export class JsonStore implements Store {
 
   async read(): Promise<StoreData> {
     await this.ensureInitialized();
-    const content = await readFile(this.filePath, "utf8");
-    return normalizeStoreData(JSON.parse(content) as Partial<StoreData>);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const content = await readFile(this.filePath, "utf8");
+        return normalizeStoreData(JSON.parse(content) as Partial<StoreData>);
+      } catch (error) {
+        if (attempt === 2 || !(error instanceof SyntaxError)) {
+          throw error;
+        }
+        await sleep(20);
+      }
+    }
+    throw new Error("JSON store read failed");
   }
 
   async write(data: StoreData): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+    const temporaryPath = `${this.filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+    await writeFile(temporaryPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+    await rename(temporaryPath, this.filePath);
   }
 
   async update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
-    const data = await this.read();
-    const result = await mutate(data);
-    await this.write(data);
-    return result;
+    let result: T | undefined;
+    const operation = this.updateChain.then(async () => {
+      const data = await this.read();
+      result = await mutate(data);
+      await this.write(data);
+    });
+    this.updateChain = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    await operation;
+    return result as T;
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -65,6 +86,7 @@ export class PrismaStore implements Store {
       creditAccounts,
       creditLedgerEntries,
       generationTasks,
+      referenceImages,
       generatedImages,
       imageFavorites,
       plans,
@@ -79,6 +101,7 @@ export class PrismaStore implements Store {
       this.prisma.userCreditAccount.findMany(),
       this.prisma.creditLedgerEntry.findMany(),
       this.prisma.generationTask.findMany(),
+      this.prisma.referenceImage.findMany(),
       this.prisma.generatedImage.findMany(),
       this.prisma.imageFavorite.findMany(),
       this.prisma.plan.findMany(),
@@ -131,6 +154,7 @@ export class PrismaStore implements Store {
         id: task.id,
         userId: task.userId,
         clientRequestId: task.clientRequestId,
+        referenceImageId: task.referenceImageId,
         prompt: task.prompt,
         negativePrompt: task.negativePrompt,
         style: task.style as StoreData["generationTasks"][number]["style"],
@@ -149,6 +173,22 @@ export class PrismaStore implements Store {
         completedAt: task.completedAt?.toISOString() ?? null,
         createdAt: task.createdAt.toISOString(),
         updatedAt: task.updatedAt.toISOString()
+      })),
+      referenceImages: referenceImages.map((image) => ({
+        id: image.id,
+        userId: image.userId,
+        storageKey: image.storageKey,
+        publicUrl: image.publicUrl ?? "",
+        originalFileName: image.originalFileName,
+        mimeType: image.mimeType as StoreData["referenceImages"][number]["mimeType"],
+        fileSize: image.fileSize,
+        width: image.width,
+        height: image.height,
+        contentHash: image.contentHash,
+        safetyStatus: image.safetyStatus,
+        createdAt: image.createdAt.toISOString(),
+        expiresAt: image.expiresAt.toISOString(),
+        deletedAt: image.deletedAt?.toISOString() ?? null
       })),
       generatedImages: generatedImages.map((image) => ({
         id: image.id,
@@ -252,6 +292,7 @@ export class PrismaStore implements Store {
       await tx.imageFavorite.deleteMany();
       await tx.generatedImage.deleteMany();
       await tx.generationTask.deleteMany();
+      await tx.referenceImage.deleteMany();
       await tx.creditLedgerEntry.deleteMany();
       await tx.userCreditAccount.deleteMany();
       await tx.session.deleteMany();
@@ -328,12 +369,33 @@ export class PrismaStore implements Store {
           }))
         });
       }
+      if (data.referenceImages.length) {
+        await tx.referenceImage.createMany({
+          data: data.referenceImages.map((image) => ({
+            id: image.id,
+            userId: image.userId,
+            storageKey: image.storageKey,
+            publicUrl: image.publicUrl,
+            originalFileName: image.originalFileName,
+            mimeType: image.mimeType,
+            fileSize: image.fileSize,
+            width: image.width,
+            height: image.height,
+            contentHash: image.contentHash,
+            safetyStatus: image.safetyStatus,
+            createdAt: toDate(image.createdAt),
+            expiresAt: toDate(image.expiresAt),
+            deletedAt: image.deletedAt ? toDate(image.deletedAt) : null
+          }))
+        });
+      }
       if (data.generationTasks.length) {
         await tx.generationTask.createMany({
           data: data.generationTasks.map((task) => ({
             id: task.id,
             userId: task.userId,
             clientRequestId: task.clientRequestId,
+            referenceImageId: task.referenceImageId,
             prompt: task.prompt,
             negativePrompt: task.negativePrompt,
             style: task.style,
@@ -499,7 +561,7 @@ export function createSeedData(): StoreData {
         id: demoId,
         email: "demo@imagora.local",
         passwordHash: hashPassword("Demo123!"),
-        nickname: "Demo Creator",
+        nickname: "创作用户",
         avatarUrl: null,
         role: "USER",
         status: "ACTIVE",
@@ -515,9 +577,10 @@ export function createSeedData(): StoreData {
     ],
     creditLedgerEntries: [
       seedLedger(adminId, 9999, "Initial admin credits", now),
-      seedLedger(demoId, 1240, "Demo welcome credits", now)
+      seedLedger(demoId, 1240, "新用户欢迎积分", now)
     ],
     generationTasks: [],
+    referenceImages: [],
     generatedImages: [],
     imageFavorites: [],
     plans: seedPlans(now),
@@ -569,8 +632,8 @@ function seedPlans(now: string): Plan[] {
   return [
     {
       id: "starter",
-      name: "Starter",
-      description: "220 credits for prompt exploration",
+      name: "入门版",
+      description: "适合验证提示词方向、探索风格和完成轻量创作。",
       priceCents: 900,
       currency: "USD",
       credits: 220,
@@ -582,8 +645,8 @@ function seedPlans(now: string): Plan[] {
     },
     {
       id: "creator",
-      name: "Creator",
-      description: "620 credits with HD downloads",
+      name: "创作者版",
+      description: "适合个人创作者稳定生成素材，并支持高清下载。",
       priceCents: 1900,
       currency: "USD",
       credits: 620,
@@ -595,8 +658,8 @@ function seedPlans(now: string): Plan[] {
     },
     {
       id: "studio",
-      name: "Studio",
-      description: "1850 credits for teams and ecommerce operators",
+      name: "团队版",
+      description: "面向小团队、电商运营和持续内容生产的高容量积分包。",
       priceCents: 4900,
       currency: "USD",
       credits: 1850,
@@ -613,7 +676,7 @@ function seedSafetyRules(now: string) {
   return [
     {
       id: randomUUID(),
-      term: "child abuse",
+      term: "儿童安全风险内容",
       action: "BLOCK" as const,
       status: "ACTIVE" as const,
       createdAt: now,
@@ -621,7 +684,7 @@ function seedSafetyRules(now: string) {
     },
     {
       id: randomUUID(),
-      term: "sexual violence",
+      term: "性暴力内容",
       action: "BLOCK" as const,
       status: "ACTIVE" as const,
       createdAt: now,
@@ -629,7 +692,7 @@ function seedSafetyRules(now: string) {
     },
     {
       id: randomUUID(),
-      term: "terrorist",
+      term: "恐怖主义内容",
       action: "BLOCK" as const,
       status: "ACTIVE" as const,
       createdAt: now,
@@ -645,7 +708,8 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
     sessions: data.sessions ?? [],
     creditAccounts: data.creditAccounts ?? [],
     creditLedgerEntries: data.creditLedgerEntries ?? [],
-    generationTasks: data.generationTasks ?? [],
+    generationTasks: (data.generationTasks ?? []).map((task) => ({ ...task, referenceImageId: task.referenceImageId ?? null })),
+    referenceImages: data.referenceImages ?? [],
     generatedImages: data.generatedImages ?? [],
     imageFavorites: data.imageFavorites ?? [],
     plans: data.plans ?? seedPlans(now),
@@ -659,4 +723,10 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
 
 function toDate(value: string): Date {
   return new Date(value);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
