@@ -1,0 +1,76 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: imagora
+      POSTGRES_PASSWORD: imagora
+      POSTGRES_DB: imagora
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    image: node:24-alpine
+    working_dir: /workspace
+    command: sh -c "npm install && npm run dev:api"
+    ports:
+      - "4000:4000"
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 4000
+      WEB_ORIGIN: http://127.0.0.1:3000
+      IMAGORA_STORE_PATH: /workspace/data/imagora-store.json
+      DATABASE_URL: postgresql://imagora:imagora@postgres:5432/imagora
+      REDIS_URL: redis://redis:6379
+      DATA_STORE: json
+      QUEUE_PROVIDER: inline
+      AI_PROVIDER: mock
+      STORAGE_PROVIDER: inline
+      PAYMENT_PROVIDER: mock
+      SAFETY_PROVIDER: local
+    volumes:
+      - ..:/workspace
+
+  worker:
+    image: node:24-alpine
+    working_dir: /workspace
+    command: sh -c "npm install && npm run dev:worker"
+    depends_on:
+      - api
+    environment:
+      IMAGORA_STORE_PATH: /workspace/data/imagora-store.json
+      WORKER_POLL_INTERVAL_MS: 1500
+      DATABASE_URL: postgresql://imagora:imagora@postgres:5432/imagora
+      REDIS_URL: redis://redis:6379
+      DATA_STORE: json
+      QUEUE_PROVIDER: inline
+      AI_PROVIDER: mock
+      STORAGE_PROVIDER: inline
+      SAFETY_PROVIDER: local
+    volumes:
+      - ..:/workspace
+
+  web:
+    image: node:24-alpine
+    working_dir: /workspace
+    command: sh -c "npm install && npm run dev:web -- --hostname 0.0.0.0 --port 3000"
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:4000
+    volumes:
+      - ..:/workspace
+
+volumes:
+  postgres-data:

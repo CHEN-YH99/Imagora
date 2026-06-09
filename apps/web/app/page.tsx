@@ -37,6 +37,19 @@ type StyleOption = {
 
 type Quality = "Draft" | "Studio" | "Ultra";
 
+type ApiImage = {
+  id: string;
+  publicUrl: string;
+  width: number;
+  height: number;
+};
+
+type ApiTask = {
+  id: string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "BLOCKED";
+  failureMessage: string | null;
+};
+
 const styleOptions: StyleOption[] = [
   {
     id: "cinematic",
@@ -195,10 +208,51 @@ export default function HomePage() {
   const [quality, setQuality] = useState<Quality>("Studio");
   const [quantity, setQuantity] = useState(2);
   const [prompt, setPrompt] = useState(promptExamples[0]);
+  const [token, setToken] = useState<string | null>(null);
+  const [apiMessage, setApiMessage] = useState("Demo API ready on port 4000");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generatedImages, setGeneratedImages] = useState<ApiImage[]>([]);
+  const [balance, setBalance] = useState(1240);
 
   const creditCost = useMemo(() => {
     return Math.ceil(selectedStyle.cost * qualityMultiplier[quality] * quantity);
   }, [quality, quantity, selectedStyle]);
+
+  async function handleGenerate() {
+    setIsGenerating(true);
+    setGeneratedImages([]);
+    setApiMessage("Connecting to Imagora API...");
+    try {
+      const sessionToken = token ?? (await loginDemo());
+      setToken(sessionToken);
+      const created = await apiFetch<{ task: ApiTask; balanceAfter: number }>("/api/generation/tasks", {
+        method: "POST",
+        token: sessionToken,
+        body: {
+          clientRequestId: crypto.randomUUID(),
+          prompt,
+          negativePrompt: "low quality, blurry, distorted watermark",
+          style: mapStyle(selectedStyle.id),
+          aspectRatio: "1:1",
+          quantity,
+          quality: mapQuality(quality)
+        }
+      });
+      setBalance(created.balanceAfter);
+      setApiMessage(`Task ${created.task.status.toLowerCase()} - ${creditCost} credits reserved`);
+      const result = await waitForTask(sessionToken, created.task.id);
+      if (result.task.status === "SUCCEEDED") {
+        setGeneratedImages(result.images);
+        setApiMessage(`Generation succeeded - ${result.images.length} image(s) delivered`);
+      } else {
+        setApiMessage(result.task.failureMessage ?? `Generation ended with ${result.task.status}`);
+      }
+    } catch (error) {
+      setApiMessage(error instanceof Error ? error.message : "Generation failed");
+    } finally {
+      setIsGenerating(false);
+    }
+  }
 
   return (
     <main className="min-h-screen bg-ink text-white">
@@ -305,15 +359,35 @@ export default function HomePage() {
                   <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">Quality</span>
                   <span className="rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">{quality}</span>
                   <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">Images</span>
-                  <span className="rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">{quantity}</span>
+                  <span className="flex items-center justify-between rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">
+                    <button
+                      className="focus-ring rounded-full px-2 text-white/70 hover:bg-white/10 hover:text-white"
+                      type="button"
+                      aria-label="减少生成数量"
+                      onClick={() => setQuantity((value) => Math.max(1, value - 1))}
+                    >
+                      -
+                    </button>
+                    {quantity}
+                    <button
+                      className="focus-ring rounded-full px-2 text-white/70 hover:bg-white/10 hover:text-white"
+                      type="button"
+                      aria-label="增加生成数量"
+                      onClick={() => setQuantity((value) => Math.min(4, value + 1))}
+                    >
+                      +
+                    </button>
+                  </span>
                 </div>
-                <a
-                  href="#gallery"
-                  className="focus-ring mt-4 inline-flex items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-volt"
+                <button
+                  type="button"
+                  disabled={isGenerating || !prompt.trim()}
+                  onClick={handleGenerate}
+                  className="focus-ring mt-4 inline-flex items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Wand2 className="size-4" aria-hidden="true" />
-                  Generate preview
-                </a>
+                  {isGenerating ? "Generating..." : "Generate preview"}
+                </button>
               </div>
             </div>
 
@@ -341,8 +415,26 @@ export default function HomePage() {
                   {creditCost} credits
                 </span>
                 <span className="h-4 w-px bg-white/18" aria-hidden="true" />
-                <span>Balance 1,240</span>
+                <span>Balance {balance.toLocaleString()}</span>
               </div>
+            </div>
+
+            <div className="mt-3 rounded-[1.25rem] border border-white/12 bg-black/24 p-4">
+              <p className="text-sm text-white/70">{apiMessage}</p>
+              {generatedImages.length > 0 ? (
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  {generatedImages.map((image) => (
+                    <img
+                      key={image.id}
+                      src={image.publicUrl}
+                      alt="Generated Imagora mock result"
+                      className="aspect-square w-full rounded-2xl border border-white/12 object-cover"
+                      width={image.width}
+                      height={image.height}
+                    />
+                  ))}
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -646,4 +738,85 @@ function FlowCard({
       <p className="mt-3 text-sm leading-6 text-white/66">{text}</p>
     </article>
   );
+}
+
+const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000";
+
+async function loginDemo(): Promise<string> {
+  const response = await apiFetch<{ token: string }>("/api/auth/login", {
+    method: "POST",
+    body: { email: "demo@imagora.local", password: "Demo123!" }
+  });
+  return response.token;
+}
+
+async function waitForTask(token: string, taskId: string): Promise<{ task: ApiTask; images: ApiImage[] }> {
+  for (let attempt = 0; attempt < 18; attempt += 1) {
+    await sleep(1200);
+    const result = await apiFetch<{ task: ApiTask; images: ApiImage[] }>(`/api/generation/tasks/${taskId}`, {
+      method: "GET",
+      token
+    });
+    if (["SUCCEEDED", "FAILED", "BLOCKED", "CANCELED"].includes(result.task.status)) {
+      return result;
+    }
+  }
+  throw new Error("Task polling timed out");
+}
+
+async function apiFetch<T>(
+  path: string,
+  options: {
+    method: "GET" | "POST" | "PATCH" | "DELETE";
+    token?: string;
+    body?: unknown;
+  }
+): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method: options.method,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {})
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  const payload = (await response.json()) as { data?: T; error?: { message: string } };
+  if (!response.ok || !payload.data) {
+    throw new Error(payload.error?.message ?? `API request failed: ${response.status}`);
+  }
+  return payload.data;
+}
+
+function mapStyle(styleId: string): "realistic" | "illustration" | "anime" | "product_photography" | "poster" {
+  switch (styleId) {
+    case "product":
+      return "product_photography";
+    case "anime":
+      return "anime";
+    case "poster":
+      return "poster";
+    case "isometric":
+      return "illustration";
+    case "architecture":
+    case "cinematic":
+    default:
+      return "realistic";
+  }
+}
+
+function mapQuality(value: Quality): "draft" | "standard" | "high" {
+  switch (value) {
+    case "Draft":
+      return "draft";
+    case "Ultra":
+      return "high";
+    case "Studio":
+      return "standard";
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

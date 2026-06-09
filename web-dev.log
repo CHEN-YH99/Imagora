@@ -8,3 +8,4 @@
 ✓ Ready in 336ms
 
  GET / 200 in 2.0s (next.js: 1867ms, application-code: 154ms)
+ GET / 200 in 53ms (next.js: 3ms, application-code: 49ms)

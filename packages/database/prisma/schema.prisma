@@ -1,0 +1,309 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum TaskStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELED
+  BLOCKED
+}
+
+enum CreditLedgerType {
+  GRANT
+  SPEND
+  REFUND
+  EXPIRE
+  ADJUST
+}
+
+enum SourceType {
+  TASK
+  ORDER
+  ADMIN
+  SYSTEM
+}
+
+enum SafetyStatus {
+  PASSED
+  BLOCKED
+  REVIEW_REQUIRED
+}
+
+enum ImageVisibility {
+  PRIVATE
+  PUBLIC
+  HIDDEN
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELED
+  REFUNDED
+  CLOSED
+}
+
+enum PlanStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum SafetyRuleAction {
+  BLOCK
+  REVIEW
+}
+
+enum SafetyRuleStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model User {
+  id             String              @id @default(uuid())
+  email          String              @unique
+  passwordHash   String              @map("password_hash")
+  nickname       String
+  avatarUrl      String?             @map("avatar_url")
+  role           UserRole            @default(USER)
+  status         UserStatus          @default(ACTIVE)
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+  lastLoginAt    DateTime?           @map("last_login_at")
+  sessions       Session[]
+  creditAccount  UserCreditAccount?
+  ledgerEntries  CreditLedgerEntry[]
+  tasks          GenerationTask[]
+  images         GeneratedImage[]
+  favorites      ImageFavorite[]
+  orders         Order[]
+  safetyEvents   SafetyEvent[]
+  adminAuditLogs AdminAuditLog[]     @relation("AdminAuditActor")
+
+  @@map("users")
+}
+
+model Session {
+  token     String   @id
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model UserCreditAccount {
+  userId      String   @id @map("user_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance     Int      @default(0)
+  totalEarned Int      @default(0) @map("total_earned")
+  totalSpent  Int      @default(0) @map("total_spent")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("user_credit_accounts")
+}
+
+model CreditLedgerEntry {
+  id             String           @id @default(uuid())
+  userId          String           @map("user_id")
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type            CreditLedgerType
+  amount          Int
+  balanceAfter    Int              @map("balance_after")
+  sourceType      SourceType       @map("source_type")
+  sourceId        String           @map("source_id")
+  idempotencyKey  String           @unique @map("idempotency_key")
+  remark          String
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("credit_ledger_entries")
+}
+
+model GenerationTask {
+  id              String          @id @default(uuid())
+  userId          String          @map("user_id")
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clientRequestId String          @map("client_request_id")
+  prompt          String
+  negativePrompt  String?         @map("negative_prompt")
+  style           String
+  aspectRatio     String          @map("aspect_ratio")
+  width           Int
+  height          Int
+  quantity        Int
+  quality         String
+  modelProvider   String          @map("model_provider")
+  modelName       String          @map("model_name")
+  status          TaskStatus      @default(PENDING)
+  creditCost      Int             @map("credit_cost")
+  failureCode     String?         @map("failure_code")
+  failureMessage  String?         @map("failure_message")
+  startedAt       DateTime?       @map("started_at")
+  completedAt     DateTime?       @map("completed_at")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+  images          GeneratedImage[]
+
+  @@unique([userId, clientRequestId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@map("generation_tasks")
+}
+
+model GeneratedImage {
+  id           String            @id @default(uuid())
+  taskId       String            @map("task_id")
+  task         GenerationTask    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId       String            @map("user_id")
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storageKey   String            @map("storage_key")
+  thumbnailKey String            @map("thumbnail_key")
+  publicUrl    String?           @map("public_url")
+  width        Int
+  height       Int
+  fileSize     Int               @map("file_size")
+  mimeType     String            @map("mime_type")
+  safetyStatus SafetyStatus      @default(PASSED) @map("safety_status")
+  visibility   ImageVisibility   @default(PRIVATE)
+  deletedAt    DateTime?         @map("deleted_at")
+  createdAt    DateTime          @default(now()) @map("created_at")
+  favorites    ImageFavorite[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([taskId])
+  @@map("generated_images")
+}
+
+model ImageFavorite {
+  userId    String         @map("user_id")
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  imageId   String         @map("image_id")
+  image     GeneratedImage @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  createdAt DateTime       @default(now()) @map("created_at")
+
+  @@id([userId, imageId])
+  @@map("image_favorites")
+}
+
+model Plan {
+  id          String     @id @default(uuid())
+  name        String
+  description String
+  priceCents  Int        @map("price_cents")
+  currency    String
+  credits     Int
+  validDays   Int?       @map("valid_days")
+  status      PlanStatus @default(ACTIVE)
+  sortOrder   Int        @default(0) @map("sort_order")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+  orders      Order[]
+
+  @@index([status, sortOrder])
+  @@map("plans")
+}
+
+model Order {
+  id              String         @id @default(uuid())
+  userId          String         @map("user_id")
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planId          String         @map("plan_id")
+  plan            Plan           @relation(fields: [planId], references: [id])
+  orderNo         String         @unique @map("order_no")
+  amountCents     Int            @map("amount_cents")
+  currency        String
+  paymentProvider String         @map("payment_provider")
+  paymentIntentId String?        @map("payment_intent_id")
+  status          OrderStatus    @default(PENDING)
+  paidAt          DateTime?      @map("paid_at")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  paymentEvents   PaymentEvent[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("orders")
+}
+
+model PaymentEvent {
+  id              String   @id @default(uuid())
+  provider        String
+  providerEventId String   @map("provider_event_id")
+  orderId         String   @map("order_id")
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  eventType       String   @map("event_type")
+  payload         Json
+  processedAt     DateTime @map("processed_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([provider, providerEventId])
+  @@map("payment_events")
+}
+
+model SafetyEvent {
+  id            String       @id @default(uuid())
+  userId        String       @map("user_id")
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  targetType    String       @map("target_type")
+  targetId      String       @map("target_id")
+  status        SafetyStatus
+  reasonCode    String       @map("reason_code")
+  reasonMessage String       @map("reason_message")
+  provider      String
+  createdAt     DateTime     @default(now()) @map("created_at")
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@map("safety_events")
+}
+
+model SafetyRule {
+  id        String           @id @default(uuid())
+  term      String
+  action    SafetyRuleAction @default(BLOCK)
+  status    SafetyRuleStatus @default(ACTIVE)
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  @@unique([term])
+  @@index([status])
+  @@map("safety_rules")
+}
+
+model AdminAuditLog {
+  id          String   @id @default(uuid())
+  adminUserId String   @map("admin_user_id")
+  adminUser   User     @relation("AdminAuditActor", fields: [adminUserId], references: [id])
+  action      String
+  targetType  String   @map("target_type")
+  targetId    String   @map("target_id")
+  before      Json?
+  after       Json?
+  ipAddress   String   @map("ip_address")
+  userAgent   String   @map("user_agent")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([adminUserId, createdAt(sort: Desc)])
+  @@index([targetType, targetId])
+  @@map("admin_audit_logs")
+}

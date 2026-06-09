@@ -1,0 +1,26 @@
+{
+  "name": "@imagora/worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "dev": "npm --workspace packages/shared run build && npm --workspace packages/database run build && tsx src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@imagora/ai-providers": "0.1.0",
+    "@imagora/database": "0.1.0",
+    "@imagora/queue": "0.1.0",
+    "@imagora/safety": "0.1.0",
+    "@imagora/storage": "0.1.0",
+    "@imagora/shared": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

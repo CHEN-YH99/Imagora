@@ -1,0 +1,30 @@
+{
+  "name": "@imagora/database",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prisma:validate": "node scripts/prisma-cli.mjs validate",
+    "prisma:generate": "node scripts/prisma-cli.mjs generate",
+    "prisma:push": "node scripts/prisma-cli.mjs db push"
+  },
+  "dependencies": {
+    "@imagora/shared": "0.1.0",
+    "@prisma/client": "^6.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "prisma": "^6.19.0",
+    "typescript": "^5.7.2"
+  }
+}
