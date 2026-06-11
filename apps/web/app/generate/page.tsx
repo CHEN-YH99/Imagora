@@ -114,15 +114,18 @@ function GenerateExperience() {
     try {
       const currentToken = await ensureToken();
       const dataUrl = await readFileAsDataUrl(file);
-      const result = await apiFetch<{ referenceImage: ReferenceImage; duplicate: boolean }>("/api/uploads/reference-images", {
-        method: "POST",
-        token: currentToken,
-        body: {
-          fileName: file.name,
-          mimeType: file.type,
-          contentBase64: dataUrl.split(",")[1] ?? ""
+      const result = await apiFetch<{ referenceImage: ReferenceImage; duplicate: boolean }>(
+        "/api/uploads/reference-images",
+        {
+          method: "POST",
+          token: currentToken,
+          body: {
+            fileName: file.name,
+            mimeType: file.type,
+            contentBase64: dataUrl.split(",")[1] ?? ""
+          }
         }
-      });
+      );
       setReferenceImage(result.referenceImage);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "参考图上传失败，请重新选择图片。");
@@ -212,7 +215,8 @@ function GenerateExperience() {
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-white">{referenceImage.originalFileName}</p>
                     <p className="mt-1 text-xs text-white/50">
-                      {referenceImage.width ?? "-"} × {referenceImage.height ?? "-"} · {Math.ceil(referenceImage.fileSize / 1024)} KB
+                      {referenceImage.width ?? "-"} × {referenceImage.height ?? "-"} ·{" "}
+                      {Math.ceil(referenceImage.fileSize / 1024)} KB
                     </p>
                   </div>
                 </div>
@@ -238,7 +242,11 @@ function GenerateExperience() {
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="block text-sm text-white/70">
                 风格
-                <select className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white" value={style} onChange={(event) => setStyle(event.target.value)}>
+                <select
+                  className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                  value={style}
+                  onChange={(event) => setStyle(event.target.value)}
+                >
                   {styles.map((item) => (
                     <option key={item.value} value={item.value}>
                       {item.label}
@@ -248,7 +256,11 @@ function GenerateExperience() {
               </label>
               <label className="block text-sm text-white/70">
                 画面比例
-                <select className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white" value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}>
+                <select
+                  className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                  value={aspectRatio}
+                  onChange={(event) => setAspectRatio(event.target.value)}
+                >
                   {["1:1", "3:4", "4:3", "9:16", "16:9"].map((item) => (
                     <option key={item} value={item}>
                       {item}
@@ -269,7 +281,11 @@ function GenerateExperience() {
               </label>
               <label className="block text-sm text-white/70">
                 生成质量
-                <select className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white" value={quality} onChange={(event) => setQuality(event.target.value)}>
+                <select
+                  className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                  value={quality}
+                  onChange={(event) => setQuality(event.target.value)}
+                >
                   {qualityOptions.map((item) => (
                     <option key={item.value} value={item.value}>
                       {item.label}
@@ -283,9 +299,13 @@ function GenerateExperience() {
                 <Coins className="size-4 text-volt" aria-hidden="true" />
                 预计消耗：{quote ? formatCredits(quote) : "登录后计算"}
               </span>
-              <span className="text-sm text-white/72">当前余额：{account ? formatCredits(account.balance) : "未登录"}</span>
+              <span className="text-sm text-white/72">
+                当前余额：{account ? formatCredits(account.balance) : "未登录"}
+              </span>
             </div>
-            {message ? <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p> : null}
+            {message ? (
+              <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p>
+            ) : null}
             <button
               className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
               type="button"
@@ -303,12 +323,25 @@ function GenerateExperience() {
             <h2 className="text-xl font-semibold">生成结果</h2>
             <StatusPill>{task?.status ?? "IDLE"}</StatusPill>
           </div>
-          {task?.failureMessage ? <p className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{task.failureMessage}</p> : null}
+          {task?.failureMessage ? (
+            <p className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">
+              {task.failureMessage}
+            </p>
+          ) : null}
           <div className="grid gap-3 sm:grid-cols-2">
             {images.map((image) => (
-              <img key={image.id} className="aspect-square w-full rounded-2xl border border-white/12 object-cover" src={image.publicUrl} alt="生成图片结果" />
+              <img
+                key={image.id}
+                className="aspect-square w-full rounded-2xl border border-white/12 object-cover"
+                src={image.publicUrl}
+                alt="生成图片结果"
+              />
             ))}
-            {images.length === 0 ? <div className="flex min-h-80 items-center justify-center rounded-2xl border border-dashed border-white/14 text-sm text-white/50">生成结果会显示在这里</div> : null}
+            {images.length === 0 ? (
+              <div className="flex min-h-80 items-center justify-center rounded-2xl border border-dashed border-white/14 text-sm text-white/50">
+                生成结果会显示在这里
+              </div>
+            ) : null}
           </div>
         </Panel>
       </div>

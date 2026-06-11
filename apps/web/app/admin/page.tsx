@@ -97,7 +97,9 @@ export default function AdminPage() {
   const [imageVisibilityFilter, setImageVisibilityFilter] = useState<"ALL" | GeneratedImage["visibility"]>("ALL");
   const [creditAdjustments, setCreditAdjustments] = useState<Record<string, CreditAdjustmentDraft>>({});
   const [planDraft, setPlanDraft] = useState<PlanFormState>(emptyPlanForm);
-  const [planEdits, setPlanEdits] = useState<Record<string, Pick<PlanFormState, "priceCents" | "credits" | "sortOrder">>>({});
+  const [planEdits, setPlanEdits] = useState<
+    Record<string, Pick<PlanFormState, "priceCents" | "credits" | "sortOrder">>
+  >({});
 
   useEffect(() => {
     const token = getStoredToken();
@@ -124,7 +126,17 @@ export default function AdminPage() {
 
   async function load(token: string) {
     try {
-      const [dashboard, operations, userResult, taskResult, imageResult, orderResult, planResult, ruleResult, logResult] = await Promise.all([
+      const [
+        dashboard,
+        operations,
+        userResult,
+        taskResult,
+        imageResult,
+        orderResult,
+        planResult,
+        ruleResult,
+        logResult
+      ] = await Promise.all([
         apiFetch<{ metrics: AdminMetrics }>("/api/admin/dashboard", { token }),
         apiFetch<AdminOperationalMetrics>("/api/admin/metrics", { token }),
         apiFetch<{ users: User[] }>(withQuery("/api/admin/users", { limit: 30 }), { token }),
@@ -343,9 +355,15 @@ export default function AdminPage() {
     }
   }
 
-  const visibleTasks = tasks.filter((task) => taskStatusFilter === "ALL" || task.status === taskStatusFilter).slice(0, 12);
-  const visibleOrders = orders.filter((order) => orderStatusFilter === "ALL" || order.status === orderStatusFilter).slice(0, 12);
-  const visibleImages = images.filter((image) => imageVisibilityFilter === "ALL" || image.visibility === imageVisibilityFilter).slice(0, 8);
+  const visibleTasks = tasks
+    .filter((task) => taskStatusFilter === "ALL" || task.status === taskStatusFilter)
+    .slice(0, 12);
+  const visibleOrders = orders
+    .filter((order) => orderStatusFilter === "ALL" || order.status === orderStatusFilter)
+    .slice(0, 12);
+  const visibleImages = images
+    .filter((image) => imageVisibilityFilter === "ALL" || image.visibility === imageVisibilityFilter)
+    .slice(0, 8);
 
   async function addRule() {
     const token = getStoredToken();
@@ -390,7 +408,10 @@ export default function AdminPage() {
   }
 
   return (
-    <AppFrame title="管理控制台" subtitle="集中管理用户、生成任务、图片资产、订单、套餐、安全规则和审计记录，保障平台运营可追踪。">
+    <AppFrame
+      title="管理控制台"
+      subtitle="集中管理用户、生成任务、图片资产、订单、套餐、安全规则和审计记录，保障平台运营可追踪。"
+    >
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <button
           className="focus-ring inline-flex items-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
@@ -428,7 +449,8 @@ export default function AdminPage() {
         <Metric
           label="生成成功率"
           value={
-            operationalMetrics?.domain.generationSuccessRate === null || operationalMetrics?.domain.generationSuccessRate === undefined
+            operationalMetrics?.domain.generationSuccessRate === null ||
+            operationalMetrics?.domain.generationSuccessRate === undefined
               ? "-"
               : `${Math.round(operationalMetrics.domain.generationSuccessRate * 100)}%`
           }
@@ -452,10 +474,7 @@ export default function AdminPage() {
         {operationalMetrics?.alerts.length ? (
           <div className="grid gap-3 lg:grid-cols-2">
             {operationalMetrics.alerts.map((alert) => (
-              <article
-                key={alert.id}
-                className="rounded-2xl border border-white/10 bg-black/20 p-4"
-              >
+              <article key={alert.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <p className="font-medium">{formatOperationalAlertMessage(alert.message)}</p>
@@ -496,7 +515,9 @@ export default function AdminPage() {
                       <button
                         className="focus-ring cursor-pointer rounded-full border border-white/12 bg-white/8 px-3 py-2 text-xs font-semibold text-white transition-colors hover:border-mint/70"
                         type="button"
-                        onClick={() => void updateUserStatus(user.id, user.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE")}
+                        onClick={() =>
+                          void updateUserStatus(user.id, user.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE")
+                        }
                       >
                         {user.status === "ACTIVE" ? "停用" : "启用"}
                       </button>
@@ -559,7 +580,9 @@ export default function AdminPage() {
                   <p className="line-clamp-1 text-sm text-white/70">{task.prompt}</p>
                   <StatusPill>{task.status}</StatusPill>
                 </div>
-                <p className="mt-2 text-xs text-white/42">{formatCredits(task.creditCost)} · {formatStyleLabel(task.style)}</p>
+                <p className="mt-2 text-xs text-white/42">
+                  {formatCredits(task.creditCost)} · {formatStyleLabel(task.style)}
+                </p>
               </article>
             ))}
             {visibleTasks.length === 0 ? <p className="text-sm text-white/50">暂无符合条件的生成任务。</p> : null}
@@ -591,16 +614,24 @@ export default function AdminPage() {
                     <button
                       className="focus-ring inline-flex flex-1 cursor-pointer items-center justify-center gap-1 rounded-full border border-white/12 px-2 py-2 text-xs text-white transition-colors hover:border-mint/70"
                       type="button"
-                      onClick={() => void updateImageVisibility(image.id, image.visibility === "HIDDEN" ? "PRIVATE" : "HIDDEN")}
+                      onClick={() =>
+                        void updateImageVisibility(image.id, image.visibility === "HIDDEN" ? "PRIVATE" : "HIDDEN")
+                      }
                     >
-                      {image.visibility === "HIDDEN" ? <Eye className="size-3" aria-hidden="true" /> : <EyeOff className="size-3" aria-hidden="true" />}
+                      {image.visibility === "HIDDEN" ? (
+                        <Eye className="size-3" aria-hidden="true" />
+                      ) : (
+                        <EyeOff className="size-3" aria-hidden="true" />
+                      )}
                       {image.visibility === "HIDDEN" ? "显示" : "隐藏"}
                     </button>
                   </div>
                 </div>
               </article>
             ))}
-            {visibleImages.length === 0 ? <p className="col-span-full text-sm text-white/50">暂无符合条件的图片资产。</p> : null}
+            {visibleImages.length === 0 ? (
+              <p className="col-span-full text-sm text-white/50">暂无符合条件的图片资产。</p>
+            ) : null}
           </div>
         </Panel>
 
@@ -623,7 +654,10 @@ export default function AdminPage() {
           </div>
           <div className="space-y-3">
             {visibleOrders.map((order) => (
-              <article key={order.id} className="flex items-center justify-between gap-4 rounded-2xl border border-white/10 bg-black/20 p-4">
+              <article
+                key={order.id}
+                className="flex items-center justify-between gap-4 rounded-2xl border border-white/10 bg-black/20 p-4"
+              >
                 <div>
                   <p className="font-medium">{order.orderNo}</p>
                   <p className="mt-1 text-sm text-white/50">
@@ -712,7 +746,9 @@ export default function AdminPage() {
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div>
                     <p className="font-medium">{formatPlanName(plan.name)}</p>
-                    <p className="mt-1 text-sm text-white/50">{formatMoney(plan.priceCents, plan.currency)} · {formatCredits(plan.credits)}</p>
+                    <p className="mt-1 text-sm text-white/50">
+                      {formatMoney(plan.priceCents, plan.currency)} · {formatCredits(plan.credits)}
+                    </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <StatusPill>{plan.status}</StatusPill>
@@ -781,7 +817,10 @@ export default function AdminPage() {
           </div>
           <div className="space-y-3">
             {rules.map((rule) => (
-              <article key={rule.id} className="flex items-center justify-between gap-4 rounded-2xl border border-white/10 bg-black/20 p-4">
+              <article
+                key={rule.id}
+                className="flex items-center justify-between gap-4 rounded-2xl border border-white/10 bg-black/20 p-4"
+              >
                 <p className="font-medium">{formatSafetyRuleTerm(rule.term)}</p>
                 <StatusPill>
                   {formatStatusLabel(rule.action)} · {formatStatusLabel(rule.status)}

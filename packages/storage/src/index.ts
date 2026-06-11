@@ -99,12 +99,7 @@ export class S3CompatibleObjectStorage implements ObjectStorage {
       "host",
       "UNSIGNED-PAYLOAD"
     ].join("\n");
-    const stringToSign = [
-      "AWS4-HMAC-SHA256",
-      amzDate(now),
-      credentialScope,
-      sha256Hex(canonicalRequest)
-    ].join("\n");
+    const stringToSign = ["AWS4-HMAC-SHA256", amzDate(now), credentialScope, sha256Hex(canonicalRequest)].join("\n");
     const signature = hmacHex(signingKey(this.secretAccessKey, dateStamp(now), this.region), stringToSign);
     url.searchParams.set("X-Amz-Signature", signature);
     return url.toString();
@@ -160,12 +155,9 @@ export class S3CompatibleObjectStorage implements ObjectStorage {
       headers["x-amz-content-sha256"]
     ].join("\n");
     const credentialScope = `${dateStamp(now)}/${this.region}/s3/aws4_request`;
-    const stringToSign = [
-      "AWS4-HMAC-SHA256",
-      headers["x-amz-date"],
-      credentialScope,
-      sha256Hex(canonicalRequest)
-    ].join("\n");
+    const stringToSign = ["AWS4-HMAC-SHA256", headers["x-amz-date"], credentialScope, sha256Hex(canonicalRequest)].join(
+      "\n"
+    );
     const signature = hmacHex(signingKey(this.secretAccessKey, dateStamp(now), this.region), stringToSign);
     return `AWS4-HMAC-SHA256 Credential=${this.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders.join(";")}, Signature=${signature}`;
   }

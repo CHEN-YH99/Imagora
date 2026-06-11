@@ -2,9 +2,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-imagora}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-imagora}
-      POSTGRES_DB: ${POSTGRES_DB:-imagora}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER before production deploy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD before production deploy}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB before production deploy}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -33,32 +33,32 @@ services:
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 4100
-      WEB_ORIGIN: ${WEB_ORIGIN:-http://127.0.0.1:3100}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-imagora}:${POSTGRES_PASSWORD:-imagora}@postgres:5432/${POSTGRES_DB:-imagora}
+      WEB_ORIGIN: ${WEB_ORIGIN:?Set WEB_ORIGIN to the public web origin}
+      DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
       REDIS_URL: redis://redis:6379
-      DATA_STORE: ${DATA_STORE:-prisma}
-      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-bullmq}
-      AI_PROVIDER: ${AI_PROVIDER:-mock}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DATA_STORE: prisma
+      QUEUE_PROVIDER: bullmq
+      AI_PROVIDER: openai
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY before production deploy}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL:-gpt-image-1}
-      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-inline}
-      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:?Set STORAGE_PROVIDER to s3 or r2}
+      S3_ENDPOINT: ${S3_ENDPOINT:?Set S3_ENDPOINT before production deploy}
       S3_REGION: ${S3_REGION:-auto}
-      S3_BUCKET: ${S3_BUCKET:-}
-      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
-      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
-      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
-      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      S3_BUCKET: ${S3_BUCKET:?Set S3_BUCKET before production deploy}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID before production deploy}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY before production deploy}
+      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:?Set S3_PUBLIC_BASE_URL before production deploy}
+      PAYMENT_PROVIDER: stripe
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:?Set STRIPE_SECRET_KEY before production deploy}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?Set STRIPE_WEBHOOK_SECRET before production deploy}
       STRIPE_WEBHOOK_TOLERANCE_SECONDS: ${STRIPE_WEBHOOK_TOLERANCE_SECONDS:-300}
-      STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL:-http://127.0.0.1:3100/orders?paid=1}
-      STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL:-http://127.0.0.1:3100/pricing?canceled=1}
+      STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL:?Set STRIPE_SUCCESS_URL before production deploy}
+      STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL:?Set STRIPE_CANCEL_URL before production deploy}
       SAFETY_PROVIDER: ${SAFETY_PROVIDER:-local}
       ORDER_PENDING_TTL_MINUTES: ${ORDER_PENDING_TTL_MINUTES:-30}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-imagora_session}
-      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      SESSION_COOKIE_SECURE: "true"
       SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-Lax}
       DOWNLOAD_URL_TTL_MINUTES: ${DOWNLOAD_URL_TTL_MINUTES:-15}
       RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
@@ -84,7 +84,13 @@ services:
       ALERT_PAYMENT_AMOUNT_MISMATCH_MAX: ${ALERT_PAYMENT_AMOUNT_MISMATCH_MAX:-0}
       ALERT_HTTP_FAILURE_RATE: ${ALERT_HTTP_FAILURE_RATE:-0.05}
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4100/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4100/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -99,21 +105,21 @@ services:
       api:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-imagora}:${POSTGRES_PASSWORD:-imagora}@postgres:5432/${POSTGRES_DB:-imagora}
+      DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
       REDIS_URL: redis://redis:6379
-      DATA_STORE: ${DATA_STORE:-prisma}
-      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-bullmq}
-      AI_PROVIDER: ${AI_PROVIDER:-mock}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DATA_STORE: prisma
+      QUEUE_PROVIDER: bullmq
+      AI_PROVIDER: openai
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY before production deploy}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL:-gpt-image-1}
-      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-inline}
-      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:?Set STORAGE_PROVIDER to s3 or r2}
+      S3_ENDPOINT: ${S3_ENDPOINT:?Set S3_ENDPOINT before production deploy}
       S3_REGION: ${S3_REGION:-auto}
-      S3_BUCKET: ${S3_BUCKET:-}
-      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
-      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
-      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
+      S3_BUCKET: ${S3_BUCKET:?Set S3_BUCKET before production deploy}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set S3_ACCESS_KEY_ID before production deploy}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set S3_SECRET_ACCESS_KEY before production deploy}
+      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:?Set S3_PUBLIC_BASE_URL before production deploy}
       SAFETY_PROVIDER: ${SAFETY_PROVIDER:-local}
       WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-2500}
 
@@ -122,14 +128,14 @@ services:
       context: ..
       dockerfile: infra/Dockerfile.web
       args:
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:4100}
-        NEXT_PUBLIC_PAYMENT_PROVIDER: ${NEXT_PUBLIC_PAYMENT_PROVIDER:-mock}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?Set NEXT_PUBLIC_API_BASE_URL before production deploy}
+        NEXT_PUBLIC_PAYMENT_PROVIDER: stripe
     depends_on:
       api:
         condition: service_healthy
     environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:4100}
-      NEXT_PUBLIC_PAYMENT_PROVIDER: ${NEXT_PUBLIC_PAYMENT_PROVIDER:-mock}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?Set NEXT_PUBLIC_API_BASE_URL before production deploy}
+      NEXT_PUBLIC_PAYMENT_PROVIDER: stripe
     ports:
       - "3100:3100"
 

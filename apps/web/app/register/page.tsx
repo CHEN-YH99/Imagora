@@ -35,7 +35,9 @@ export default function RegisterPage() {
           返回 Imagora
         </Link>
         <h1 className="mt-6 text-3xl font-semibold">创建账号</h1>
-        <p className="mt-2 text-sm leading-6 text-white/62">新用户可获得欢迎积分，用于体验图片生成、历史记录和下载流程。</p>
+        <p className="mt-2 text-sm leading-6 text-white/62">
+          新用户可获得欢迎积分，用于体验图片生成、历史记录和下载流程。
+        </p>
         <div className="mt-6 space-y-4">
           <label className="block text-sm text-white/70">
             邮箱
@@ -63,7 +65,9 @@ export default function RegisterPage() {
               type="password"
             />
           </label>
-          {message ? <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p> : null}
+          {message ? (
+            <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p>
+          ) : null}
           <button
             className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
             type="button"

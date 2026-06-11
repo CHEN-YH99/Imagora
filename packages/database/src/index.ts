@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
@@ -26,6 +26,34 @@ export class JsonStore implements Store {
 
   async read(): Promise<StoreData> {
     await this.ensureInitialized();
+    return this.readUnlocked();
+  }
+
+  async write(data: StoreData): Promise<void> {
+    await withFileLock(this.filePath, async () => {
+      await this.writeUnlocked(data);
+    });
+  }
+
+  async update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
+    let result: T | undefined;
+    const operation = this.updateChain.then(async () => {
+      await withFileLock(this.filePath, async () => {
+        await this.ensureInitializedUnlocked();
+        const data = await this.readUnlocked();
+        result = await mutate(data);
+        await this.writeUnlocked(data);
+      });
+    });
+    this.updateChain = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    await operation;
+    return result as T;
+  }
+
+  private async readUnlocked(): Promise<StoreData> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const content = await readFile(this.filePath, "utf8");
@@ -40,39 +68,34 @@ export class JsonStore implements Store {
     throw new Error("JSON store read failed");
   }
 
-  async write(data: StoreData): Promise<void> {
+  private async writeUnlocked(data: StoreData): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
     const temporaryPath = `${this.filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
     await writeFile(temporaryPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
     await rename(temporaryPath, this.filePath);
   }
 
-  async update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
-    let result: T | undefined;
-    const operation = this.updateChain.then(async () => {
-      const data = await this.read();
-      result = await mutate(data);
-      await this.write(data);
+  private async ensureInitialized(): Promise<void> {
+    await withFileLock(this.filePath, async () => {
+      await this.ensureInitializedUnlocked();
     });
-    this.updateChain = operation.then(
-      () => undefined,
-      () => undefined
-    );
-    await operation;
-    return result as T;
   }
 
-  private async ensureInitialized(): Promise<void> {
+  private async ensureInitializedUnlocked(): Promise<void> {
     try {
       await readFile(this.filePath, "utf8");
-    } catch {
-      await this.write(createSeedData());
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) {
+        throw error;
+      }
+      await this.writeUnlocked(createInitialData());
     }
   }
 }
 
 export class PrismaStore implements Store {
   private readonly prisma: PrismaClient;
+  private updateChain: Promise<void> = Promise.resolve();
 
   constructor(prisma = new PrismaClient()) {
     this.prisma = prisma;
@@ -83,6 +106,7 @@ export class PrismaStore implements Store {
     const [
       users,
       sessions,
+      passwordResetTokens,
       creditAccounts,
       creditLedgerEntries,
       generationTasks,
@@ -98,6 +122,7 @@ export class PrismaStore implements Store {
     ] = await Promise.all([
       this.prisma.user.findMany(),
       this.prisma.session.findMany(),
+      this.prisma.passwordResetToken.findMany(),
       this.prisma.userCreditAccount.findMany(),
       this.prisma.creditLedgerEntry.findMany(),
       this.prisma.generationTask.findMany(),
@@ -130,6 +155,14 @@ export class PrismaStore implements Store {
         userId: session.userId,
         createdAt: session.createdAt.toISOString(),
         expiresAt: session.expiresAt.toISOString()
+      })),
+      passwordResetTokens: passwordResetTokens.map((token) => ({
+        id: token.id,
+        userId: token.userId,
+        tokenHash: token.tokenHash,
+        expiresAt: token.expiresAt.toISOString(),
+        usedAt: token.usedAt?.toISOString() ?? null,
+        createdAt: token.createdAt.toISOString()
       })),
       creditAccounts: creditAccounts.map((account) => ({
         userId: account.userId,
@@ -295,6 +328,7 @@ export class PrismaStore implements Store {
       await tx.referenceImage.deleteMany();
       await tx.creditLedgerEntry.deleteMany();
       await tx.userCreditAccount.deleteMany();
+      await tx.passwordResetToken.deleteMany();
       await tx.session.deleteMany();
       await tx.plan.deleteMany();
       await tx.user.deleteMany();
@@ -339,6 +373,18 @@ export class PrismaStore implements Store {
             userId: session.userId,
             createdAt: toDate(session.createdAt),
             expiresAt: toDate(session.expiresAt)
+          }))
+        });
+      }
+      if (data.passwordResetTokens.length) {
+        await tx.passwordResetToken.createMany({
+          data: data.passwordResetTokens.map((token) => ({
+            id: token.id,
+            userId: token.userId,
+            tokenHash: token.tokenHash,
+            expiresAt: toDate(token.expiresAt),
+            usedAt: token.usedAt ? toDate(token.usedAt) : null,
+            createdAt: toDate(token.createdAt)
           }))
         });
       }
@@ -525,18 +571,48 @@ export class PrismaStore implements Store {
   }
 
   async update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
-    const data = await this.read();
-    const result = await mutate(data);
-    await this.write(data);
-    return result;
+    let result: T | undefined;
+    const operation = this.updateChain.then(async () => {
+      await this.prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(73341001)");
+          const data = await this.read();
+          result = await mutate(data);
+          await this.write(data);
+        },
+        { timeout: 30_000 }
+      );
+    });
+    this.updateChain = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    await operation;
+    return result as T;
   }
 
   private async ensureSeeded(): Promise<void> {
     const userCount = await this.prisma.user.count();
     if (userCount === 0) {
-      await this.write(createSeedData());
+      await this.write(createInitialData());
     }
   }
+}
+
+export function createInitialData(): StoreData {
+  if (shouldSeedDemoData()) {
+    return createSeedData();
+  }
+
+  const email = process.env.IMAGORA_BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();
+  const password = process.env.IMAGORA_BOOTSTRAP_ADMIN_PASSWORD;
+  if (!email || !password) {
+    throw new Error(
+      "Store is empty. Set IMAGORA_BOOTSTRAP_ADMIN_EMAIL and IMAGORA_BOOTSTRAP_ADMIN_PASSWORD, or set IMAGORA_SEED_DEMO_DATA=true for local demos."
+    );
+  }
+
+  return createBootstrapAdminData(email, password);
 }
 
 export function createSeedData(): StoreData {
@@ -571,6 +647,7 @@ export function createSeedData(): StoreData {
       }
     ],
     sessions: [],
+    passwordResetTokens: [],
     creditAccounts: [
       { userId: adminId, balance: 9999, totalEarned: 9999, totalSpent: 0, updatedAt: now },
       { userId: demoId, balance: 1240, totalEarned: 1240, totalSpent: 0, updatedAt: now }
@@ -579,6 +656,41 @@ export function createSeedData(): StoreData {
       seedLedger(adminId, 9999, "Initial admin credits", now),
       seedLedger(demoId, 1240, "新用户欢迎积分", now)
     ],
+    generationTasks: [],
+    referenceImages: [],
+    generatedImages: [],
+    imageFavorites: [],
+    plans: seedPlans(now),
+    orders: [],
+    paymentEvents: [],
+    safetyEvents: [],
+    safetyRules: seedSafetyRules(now),
+    adminAuditLogs: []
+  };
+}
+
+function createBootstrapAdminData(email: string, password: string): StoreData {
+  const now = new Date().toISOString();
+  const adminId = randomUUID();
+  return {
+    users: [
+      {
+        id: adminId,
+        email,
+        passwordHash: hashPassword(password),
+        nickname: "Imagora Admin",
+        avatarUrl: null,
+        role: "ADMIN",
+        status: "ACTIVE",
+        createdAt: now,
+        updatedAt: now,
+        lastLoginAt: null
+      }
+    ],
+    sessions: [],
+    passwordResetTokens: [],
+    creditAccounts: [{ userId: adminId, balance: 9999, totalEarned: 9999, totalSpent: 0, updatedAt: now }],
+    creditLedgerEntries: [seedLedger(adminId, 9999, "Initial admin credits", now)],
     generationTasks: [],
     referenceImages: [],
     generatedImages: [],
@@ -706,9 +818,13 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
   return {
     users: data.users ?? [],
     sessions: data.sessions ?? [],
+    passwordResetTokens: data.passwordResetTokens ?? [],
     creditAccounts: data.creditAccounts ?? [],
     creditLedgerEntries: data.creditLedgerEntries ?? [],
-    generationTasks: (data.generationTasks ?? []).map((task) => ({ ...task, referenceImageId: task.referenceImageId ?? null })),
+    generationTasks: (data.generationTasks ?? []).map((task) => ({
+      ...task,
+      referenceImageId: task.referenceImageId ?? null
+    })),
     referenceImages: data.referenceImages ?? [],
     generatedImages: data.generatedImages ?? [],
     imageFavorites: data.imageFavorites ?? [],
@@ -723,6 +839,70 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
 
 function toDate(value: string): Date {
   return new Date(value);
+}
+
+function shouldSeedDemoData(): boolean {
+  const value = process.env.IMAGORA_SEED_DEMO_DATA;
+  if (value !== undefined) {
+    return envFlag(value);
+  }
+  return process.env.NODE_ENV !== "production";
+}
+
+async function withFileLock<T>(filePath: string, action: () => Promise<T>): Promise<T> {
+  const release = await acquireFileLock(`${filePath}.lock`);
+  try {
+    return await action();
+  } finally {
+    await release();
+  }
+}
+
+async function acquireFileLock(lockPath: string): Promise<() => Promise<void>> {
+  await mkdir(dirname(lockPath), { recursive: true });
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    try {
+      const handle = await open(lockPath, "wx");
+      await handle.writeFile(`${process.pid}:${Date.now()}`);
+      await handle.close();
+      return async () => {
+        await unlink(lockPath).catch((error) => {
+          if (!isNodeError(error, "ENOENT")) {
+            throw error;
+          }
+        });
+      };
+    } catch (error) {
+      if (!isNodeError(error, "EEXIST")) {
+        throw error;
+      }
+      await removeStaleLock(lockPath);
+      await sleep(25);
+    }
+  }
+  throw new Error(`Timed out waiting for store lock: ${lockPath}`);
+}
+
+async function removeStaleLock(lockPath: string): Promise<void> {
+  try {
+    const content = await readFile(lockPath, "utf8");
+    const timestamp = Number(content.split(":")[1]);
+    if (Number.isFinite(timestamp) && Date.now() - timestamp > 30_000) {
+      await unlink(lockPath);
+    }
+  } catch (error) {
+    if (!isNodeError(error, "ENOENT")) {
+      throw error;
+    }
+  }
+}
+
+function envFlag(value: string): boolean {
+  return !["0", "false", "no", "off", "disabled"].includes(value.toLowerCase());
+}
+
+function isNodeError(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -32,14 +32,17 @@ import {
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
 
+// Structured logging setup
+const isProduction = process.env.NODE_ENV === "production";
+
+validateProductionConfig();
+
 const store = createStore();
 const safetyProvider = createSafetyProvider();
 const paymentProvider = createPaymentProvider();
 const generationQueue = createGenerationQueue();
 const storage = createObjectStorage();
 
-// Structured logging setup
-const isProduction = process.env.NODE_ENV === "production";
 const logger = pino({
   level: process.env.LOG_LEVEL ?? (isProduction ? "info" : "debug"),
   transport: isProduction
@@ -65,8 +68,18 @@ const rateLimitBuckets = new Map<string, RateLimitBucket>();
 const rateLimitWindowMs = envNumber("RATE_LIMIT_WINDOW_MS", 60_000);
 const rateLimitRules: RateLimitRule[] = [
   { id: "auth-login", method: "POST", pattern: /^\/api\/auth\/login$/, max: envNumber("RATE_LIMIT_AUTH_MAX", 20) },
-  { id: "auth-register", method: "POST", pattern: /^\/api\/auth\/register$/, max: envNumber("RATE_LIMIT_AUTH_MAX", 20) },
-  { id: "generation-create", method: "POST", pattern: /^\/api\/generation\/tasks$/, max: envNumber("RATE_LIMIT_GENERATION_MAX", 30) },
+  {
+    id: "auth-register",
+    method: "POST",
+    pattern: /^\/api\/auth\/register$/,
+    max: envNumber("RATE_LIMIT_AUTH_MAX", 20)
+  },
+  {
+    id: "generation-create",
+    method: "POST",
+    pattern: /^\/api\/generation\/tasks$/,
+    max: envNumber("RATE_LIMIT_GENERATION_MAX", 30)
+  },
   {
     id: "reference-upload",
     method: "POST",
@@ -104,7 +117,7 @@ app.addHook("onRequest", async (request, reply) => {
   // Request tracing
   request.requestId = request.headers["x-request-id"]?.toString() ?? randomUUID();
   request.startedAt = Date.now();
-  
+
   // Extract user ID from session if available
   const token = sessionToken(request, true);
   let userId: string | undefined;
@@ -115,7 +128,7 @@ app.addHook("onRequest", async (request, reply) => {
       userId = session.userId;
     }
   }
-  
+
   // Add child logger with context
   const childLogger = request.log.child({
     requestId: request.requestId,
@@ -124,7 +137,7 @@ app.addHook("onRequest", async (request, reply) => {
     path: request.url,
     timestamp: new Date().toISOString()
   });
-  
+
   request.log = childLogger;
   reply.header("x-request-id", request.requestId);
   applySecurityHeaders(reply);
@@ -134,7 +147,7 @@ app.addHook("onRequest", async (request, reply) => {
 app.addHook("onResponse", async (request, reply) => {
   const duration = Date.now() - (request.startedAt ?? Date.now());
   const statusCode = reply.statusCode;
-  
+
   // Log request completion with metrics
   request.log.info(
     {
@@ -145,14 +158,14 @@ app.addHook("onResponse", async (request, reply) => {
     },
     `${request.method} ${request.url} ${statusCode} ${duration}ms`
   );
-  
+
   recordRequestMetric(request, statusCode);
 });
 
 app.setErrorHandler((error, request, reply) => {
   const requestId = request.requestId ?? randomUUID();
   const duration = Date.now() - (request.startedAt ?? Date.now());
-  
+
   if (error instanceof AppError) {
     request.log.warn(
       {
@@ -168,7 +181,7 @@ app.setErrorHandler((error, request, reply) => {
       requestId
     });
   }
-  
+
   if (error instanceof z.ZodError) {
     request.log.warn({ errorCode: "VALIDATION_ERROR", details: error.flatten(), duration }, "Validation error");
     return reply.status(400).send({
@@ -176,7 +189,7 @@ app.setErrorHandler((error, request, reply) => {
       requestId
     });
   }
-  
+
   if (typeof error === "object" && error !== null && "statusCode" in error) {
     const statusCode = typeof error.statusCode === "number" ? error.statusCode : 500;
     const message = error instanceof Error ? error.message : "Request failed";
@@ -186,7 +199,7 @@ app.setErrorHandler((error, request, reply) => {
       requestId
     });
   }
-  
+
   // Log unhandled errors
   request.log.error(
     {
@@ -196,7 +209,7 @@ app.setErrorHandler((error, request, reply) => {
     },
     "Unhandled error"
   );
-  
+
   return reply.status(500).send({
     error: { code: "INTERNAL_ERROR", message: "Unexpected server error" },
     requestId
@@ -287,7 +300,7 @@ app.post("/api/auth/request-password-reset", async (request) => {
   const input = requestPasswordResetSchema.parse(request.body);
   const data = await store.read();
   const user = data.users.find((u) => u.email === input.email.toLowerCase());
-  
+
   // Always return success to prevent email enumeration
   if (!user) {
     return envelope(request, { ok: true, message: "If email exists, reset link will be sent" });
@@ -328,7 +341,7 @@ app.post("/api/auth/request-password-reset", async (request) => {
 
 app.post("/api/auth/reset-password", async (request) => {
   const input = resetPasswordSchema.parse(request.body);
-  
+
   const data = await store.read();
   const tokenHash = createHash("sha256").update(input.token).digest("hex");
   const resetToken = data.passwordResetTokens.find((t) => t.tokenHash === tokenHash && !t.usedAt);
@@ -355,7 +368,10 @@ app.post("/api/auth/reset-password", async (request) => {
 
     request.log.info({ userId: user.id }, "Password reset completed");
 
-    return envelope(request, { ok: true, message: "Password reset successfully. Please login with your new password." });
+    return envelope(request, {
+      ok: true,
+      message: "Password reset successfully. Please login with your new password."
+    });
   });
 });
 
@@ -420,7 +436,9 @@ app.post("/api/generation/tasks", async (request, reply) => {
         requestedAt: duplicate.createdAt
       };
     }
-    const referenceImage = input.referenceImageId ? mustFindOwnReferenceImage(data, user.id, input.referenceImageId) : null;
+    const referenceImage = input.referenceImageId
+      ? mustFindOwnReferenceImage(data, user.id, input.referenceImageId)
+      : null;
     const safety = await safetyProvider.checkText({
       text: [input.prompt, input.negativePrompt ?? ""].join("\n"),
       blockedTerms: data.safetyRules
@@ -485,7 +503,11 @@ app.post("/api/generation/tasks", async (request, reply) => {
     };
   });
   if (result.enqueue) {
-    await generationQueue.enqueueGenerationTask({ taskId: result.task.id, userId: user.id, requestedAt: result.requestedAt });
+    await generationQueue.enqueueGenerationTask({
+      taskId: result.task.id,
+      userId: user.id,
+      requestedAt: result.requestedAt
+    });
     reply.status(201);
   }
   return envelope(request, { task: result.task, balanceAfter: result.balanceAfter });
@@ -596,7 +618,15 @@ app.post("/api/generation/tasks/:taskId/retry", async (request, reply) => {
       throw new AppError("INSUFFICIENT_CREDITS", "Credit balance is not enough", 402);
     }
     data.generationTasks.push(task);
-    spendCredits(data, user.id, task.creditCost, "TASK", task.id, `task-spend:${task.id}`, "Retry image generation task");
+    spendCredits(
+      data,
+      user.id,
+      task.creditCost,
+      "TASK",
+      task.id,
+      `task-spend:${task.id}`,
+      "Retry image generation task"
+    );
     return { task, balanceAfter: mustFindCreditAccount(data, user.id).balance };
   });
   await generationQueue.enqueueGenerationTask({
@@ -676,13 +706,16 @@ app.delete("/api/images/:imageId", async (request) => {
 
 app.get("/api/plans", async (request) => {
   const data = await store.read();
-  return envelope(request, { plans: data.plans.filter((plan) => plan.status === "ACTIVE").sort((a, b) => a.sortOrder - b.sortOrder) });
+  return envelope(request, {
+    plans: data.plans.filter((plan) => plan.status === "ACTIVE").sort((a, b) => a.sortOrder - b.sortOrder)
+  });
 });
 
 app.post("/api/orders", async (request, reply) => {
   assertFeatureEnabled("payments");
   const { user } = await requireAuth(request);
   const input = createOrderSchema.parse(request.body);
+  assertPaymentProviderEnabled(input.paymentProvider);
   return store.update(async (data) => {
     runOrderMaintenance(data);
     const plan = data.plans.find((item) => item.id === input.planId && item.status === "ACTIVE");
@@ -753,6 +786,7 @@ app.get("/api/orders/:orderId", async (request) => {
 
 app.post("/api/orders/:orderId/pay", async (request) => {
   assertFeatureEnabled("payments");
+  assertMockPaymentAllowed();
   const { user } = await requireAuth(request);
   const { orderId } = orderParamSchema.parse(request.params);
   return store.update((data) => {
@@ -775,6 +809,9 @@ app.post("/api/orders/:orderId/pay", async (request) => {
 
 app.post("/api/payments/webhooks/:provider", async (request) => {
   const { provider } = paymentWebhookParamSchema.parse(request.params);
+  if (provider === "mock") {
+    assertMockPaymentAllowed();
+  }
   if (provider !== paymentProvider.name) {
     throw new AppError("VALIDATION_ERROR", "Payment provider is not enabled", 400);
   }
@@ -934,7 +971,16 @@ app.patch("/api/admin/images/:imageId/visibility", async (request) => {
     }
     const before = { visibility: image.visibility };
     image.visibility = input.visibility;
-    audit(data, admin.id, "image.visibility.update", "IMAGE", image.id, before, { visibility: image.visibility }, request);
+    audit(
+      data,
+      admin.id,
+      "image.visibility.update",
+      "IMAGE",
+      image.id,
+      before,
+      { visibility: image.visibility },
+      request
+    );
     return envelope(request, { image });
   });
 });
@@ -1123,7 +1169,11 @@ const updateProfileSchema = z.object({
 });
 
 const generationInputSchema = z.object({
-  clientRequestId: z.string().min(8).max(120).default(() => randomUUID()),
+  clientRequestId: z
+    .string()
+    .min(8)
+    .max(120)
+    .default(() => randomUUID()),
   referenceImageId: z.string().min(1).optional(),
   prompt: z.string().min(1).max(maxPromptLength),
   negativePrompt: z.string().max(800).optional(),
@@ -1187,7 +1237,10 @@ const createOrderSchema = z.object({
 const statusSchema = z.object({ status: userStatusSchema });
 const visibilitySchema = z.object({ visibility: imageVisibilitySchema });
 const adjustCreditSchema = z.object({
-  amount: z.number().int().refine((value) => value !== 0),
+  amount: z
+    .number()
+    .int()
+    .refine((value) => value !== 0),
   reason: z.string().min(3).max(240)
 });
 const planSchema = z.object({
@@ -1245,23 +1298,29 @@ async function requireAuth(request: FastifyRequest): Promise<{ data: StoreData; 
 }
 
 function setSessionCookie(reply: FastifyReply, token: string, expiresAt: string): void {
-  reply.header("set-cookie", serializeCookie(sessionCookieName(), token, {
-    expires: new Date(expiresAt),
-    httpOnly: true,
-    secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-    sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
-    path: "/"
-  }));
+  reply.header(
+    "set-cookie",
+    serializeCookie(sessionCookieName(), token, {
+      expires: new Date(expiresAt),
+      httpOnly: true,
+      secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
+      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+      path: "/"
+    })
+  );
 }
 
 function clearSessionCookie(reply: FastifyReply): void {
-  reply.header("set-cookie", serializeCookie(sessionCookieName(), "", {
-    expires: new Date(0),
-    httpOnly: true,
-    secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-    sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
-    path: "/"
-  }));
+  reply.header(
+    "set-cookie",
+    serializeCookie(sessionCookieName(), "", {
+      expires: new Date(0),
+      httpOnly: true,
+      secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
+      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+      path: "/"
+    })
+  );
 }
 
 function sessionCookieName(): string {
@@ -1338,7 +1397,9 @@ function mustFindOwnTask(data: StoreData, userId: string, taskId: string): Gener
 }
 
 function mustFindOwnReferenceImage(data: StoreData, userId: string, referenceImageId: string): ReferenceImage {
-  const image = data.referenceImages.find((item) => item.id === referenceImageId && item.userId === userId && !item.deletedAt);
+  const image = data.referenceImages.find(
+    (item) => item.id === referenceImageId && item.userId === userId && !item.deletedAt
+  );
   if (!image) {
     throw new AppError("NOT_FOUND", "Reference image was not found", 404);
   }
@@ -1531,7 +1592,15 @@ function applyPaymentSucceeded(
   order.paymentIntentId = order.paymentIntentId ?? `${input.provider}_pi_${order.id}`;
   order.paidAt = now;
   order.updatedAt = now;
-  grantCredits(data, order.userId, plan.credits, "ORDER", order.id, `order-grant:${order.id}`, `Purchased ${plan.name}`);
+  grantCredits(
+    data,
+    order.userId,
+    plan.credits,
+    "ORDER",
+    order.id,
+    `order-grant:${order.id}`,
+    `Purchased ${plan.name}`
+  );
 
   return {
     order,
@@ -1701,7 +1770,12 @@ function inspectReferenceUpload(input: z.infer<typeof referenceUploadSchema>): I
     throw new AppError("VALIDATION_ERROR", "Reference image dimensions could not be read", 400);
   }
   const maxDimension = envNumber("UPLOAD_MAX_DIMENSION", 8192);
-  if (dimensions.width <= 0 || dimensions.height <= 0 || dimensions.width > maxDimension || dimensions.height > maxDimension) {
+  if (
+    dimensions.width <= 0 ||
+    dimensions.height <= 0 ||
+    dimensions.width > maxDimension ||
+    dimensions.height > maxDimension
+  ) {
     throw new AppError("VALIDATION_ERROR", "Reference image dimensions are not allowed", 400, {
       maxDimension,
       width: dimensions.width,
@@ -1776,7 +1850,11 @@ function readJpegDimensions(bytes: Buffer): { width: number; height: number } | 
     if (segmentLength < 2) {
       return null;
     }
-    if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb)) {
+    if (
+      (marker >= 0xc0 && marker <= 0xc3) ||
+      (marker >= 0xc5 && marker <= 0xc7) ||
+      (marker >= 0xc9 && marker <= 0xcb)
+    ) {
       return { height: bytes.readUInt16BE(offset + 5), width: bytes.readUInt16BE(offset + 7) };
     }
     offset += 2 + segmentLength;
@@ -1852,6 +1930,75 @@ function assertFeatureEnabled(feature: FeatureName): void {
   }
 }
 
+function assertPaymentProviderEnabled(provider: string): void {
+  if (provider !== paymentProvider.name) {
+    throw new AppError("VALIDATION_ERROR", "Payment provider is not enabled", 400, {
+      requestedProvider: provider,
+      enabledProvider: paymentProvider.name
+    });
+  }
+}
+
+function assertMockPaymentAllowed(): void {
+  if (isProduction || paymentProvider.name !== "mock") {
+    throw new AppError("FEATURE_DISABLED", "Mock payment completion is disabled", 503, {
+      provider: paymentProvider.name
+    });
+  }
+}
+
+function validateProductionConfig(): void {
+  if (!isProduction) {
+    return;
+  }
+
+  requireProductionValue("WEB_ORIGIN");
+  rejectLocalhostProductionValue("WEB_ORIGIN");
+  requireProductionValue("DATABASE_URL");
+  requireProductionValue("REDIS_URL");
+  requireProductionValue("OPENAI_API_KEY");
+  requireProductionValue("S3_ENDPOINT");
+  requireProductionValue("S3_BUCKET");
+  requireProductionValue("S3_ACCESS_KEY_ID");
+  requireProductionValue("S3_SECRET_ACCESS_KEY");
+  requireProductionValue("S3_PUBLIC_BASE_URL");
+  requireProductionValue("STRIPE_SECRET_KEY");
+  requireProductionValue("STRIPE_WEBHOOK_SECRET");
+  requireProductionValue("STRIPE_SUCCESS_URL");
+  requireProductionValue("STRIPE_CANCEL_URL");
+  requireProductionSetting("DATA_STORE", "prisma");
+  requireProductionSetting("QUEUE_PROVIDER", "bullmq");
+  requireProductionSetting("AI_PROVIDER", "openai");
+  requireProductionSetting("STORAGE_PROVIDER", "s3", "r2");
+  requireProductionSetting("PAYMENT_PROVIDER", "stripe");
+  requireProductionSetting("RATE_LIMIT_PROVIDER", "redis");
+  if (!envBool("SESSION_COOKIE_SECURE", false)) {
+    throw new Error("Unsafe production config: SESSION_COOKIE_SECURE must be true");
+  }
+}
+
+function requireProductionValue(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`Unsafe production config: ${name} is required`);
+  }
+  return value;
+}
+
+function requireProductionSetting(name: string, ...allowedValues: string[]): void {
+  const value = requireProductionValue(name);
+  if (!allowedValues.includes(value)) {
+    throw new Error(`Unsafe production config: ${name} must be ${allowedValues.join(" or ")}`);
+  }
+}
+
+function rejectLocalhostProductionValue(name: string): void {
+  const value = requireProductionValue(name);
+  if (/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(value)) {
+    throw new Error(`Unsafe production config: ${name} must not point at localhost`);
+  }
+}
+
 function applySecurityHeaders(reply: FastifyReply): void {
   reply.header("x-content-type-options", "nosniff");
   reply.header("x-frame-options", "DENY");
@@ -1892,7 +2039,9 @@ async function enforceRateLimit(request: FastifyRequest, reply: FastifyReply): P
 
   const bucket = rateLimitBuckets.get(key);
   const nextBucket =
-    !bucket || bucket.resetAt <= now ? { count: 1, resetAt: now + rateLimitWindowMs } : { ...bucket, count: bucket.count + 1 };
+    !bucket || bucket.resetAt <= now
+      ? { count: 1, resetAt: now + rateLimitWindowMs }
+      : { ...bucket, count: bucket.count + 1 };
   rateLimitBuckets.set(key, nextBucket);
 
   reply.header("x-ratelimit-limit", String(rule.max));
@@ -2051,7 +2200,8 @@ function operationalAlertsSnapshot(data: StoreData, http: ReturnType<typeof http
       value: generationFailureRate,
       threshold: generationFailureRateThreshold,
       message: "Generation failure rate is above threshold.",
-      runbook: "Disable generation, inspect provider failures, and restart/scale workers after provider health is confirmed."
+      runbook:
+        "Disable generation, inspect provider failures, and restart/scale workers after provider health is confirmed."
     });
   }
 

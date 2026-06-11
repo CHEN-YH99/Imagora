@@ -4,7 +4,15 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
 import { AppFrame, Panel, StatusPill } from "../../components/AppFrame";
-import { apiFetch, formatCredits, formatQualityLabel, formatStyleLabel, getStoredToken, type GeneratedImage, type Task } from "../../lib/api";
+import {
+  apiFetch,
+  formatCredits,
+  formatQualityLabel,
+  formatStyleLabel,
+  getStoredToken,
+  type GeneratedImage,
+  type Task
+} from "../../lib/api";
 
 type TaskDetail = {
   task: Task;
@@ -112,7 +120,9 @@ export default function HistoryPage() {
 
   return (
     <AppFrame title="生成历史" subtitle="集中管理生成任务、图片资产、下载、收藏和再次生成，方便复用高质量创意结果。">
-      {message ? <p className="mb-5 rounded-2xl border border-white/12 bg-white/7 p-4 text-sm text-white/70">{message}</p> : null}
+      {message ? (
+        <p className="mb-5 rounded-2xl border border-white/12 bg-white/7 p-4 text-sm text-white/70">{message}</p>
+      ) : null}
       <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
         <Panel>
           <div className="mb-4 flex items-center justify-between gap-3">
@@ -133,7 +143,9 @@ export default function HistoryPage() {
               <button
                 key={task.id}
                 className={`focus-ring w-full rounded-2xl border p-4 text-left transition-colors duration-200 ${
-                  selectedTask?.id === task.id ? "border-mint/70 bg-mint/10" : "border-white/10 bg-black/20 hover:bg-white/8"
+                  selectedTask?.id === task.id
+                    ? "border-mint/70 bg-mint/10"
+                    : "border-white/10 bg-black/20 hover:bg-white/8"
                 }`}
                 type="button"
                 onClick={() => setSelectedTaskId(task.id)}
@@ -143,7 +155,8 @@ export default function HistoryPage() {
                   <StatusPill>{task.status}</StatusPill>
                 </div>
                 <p className="mt-3 text-xs text-white/46">
-                  {formatStyleLabel(task.style)} · {task.aspectRatio} · {task.quantity} 张 · {formatCredits(task.creditCost)}
+                  {formatStyleLabel(task.style)} · {task.aspectRatio} · {task.quantity} 张 ·{" "}
+                  {formatCredits(task.creditCost)}
                 </p>
               </button>
             ))}
@@ -202,22 +215,42 @@ export default function HistoryPage() {
           ) : null}
 
           <div className="grid gap-3 sm:grid-cols-2">
-            {(detail?.images.length ? detail.images : images.filter((image) => image.taskId === selectedTask?.id)).map((image) => (
-              <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/20">
-                <img className="aspect-square w-full object-cover" src={image.publicUrl} alt="历史生成图片" />
-                <div className="flex flex-wrap gap-2 p-3">
-                  <button className="icon-action" type="button" onClick={() => void toggleFavorite(image)} aria-label="切换收藏">
-                    <Heart className={`size-4 ${image.favorite ? "fill-current text-ember" : ""}`} aria-hidden="true" />
-                  </button>
-                  <button className="icon-action" type="button" onClick={() => void downloadImage(image)} aria-label="下载图片">
-                    <Download className="size-4" aria-hidden="true" />
-                  </button>
-                  <button className="icon-action" type="button" onClick={() => void deleteImage(image)} aria-label="删除图片">
-                    <Trash2 className="size-4" aria-hidden="true" />
-                  </button>
-                </div>
-              </article>
-            ))}
+            {(detail?.images.length ? detail.images : images.filter((image) => image.taskId === selectedTask?.id)).map(
+              (image) => (
+                <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/20">
+                  <img className="aspect-square w-full object-cover" src={image.publicUrl} alt="历史生成图片" />
+                  <div className="flex flex-wrap gap-2 p-3">
+                    <button
+                      className="icon-action"
+                      type="button"
+                      onClick={() => void toggleFavorite(image)}
+                      aria-label="切换收藏"
+                    >
+                      <Heart
+                        className={`size-4 ${image.favorite ? "fill-current text-ember" : ""}`}
+                        aria-hidden="true"
+                      />
+                    </button>
+                    <button
+                      className="icon-action"
+                      type="button"
+                      onClick={() => void downloadImage(image)}
+                      aria-label="下载图片"
+                    >
+                      <Download className="size-4" aria-hidden="true" />
+                    </button>
+                    <button
+                      className="icon-action"
+                      type="button"
+                      onClick={() => void deleteImage(image)}
+                      aria-label="删除图片"
+                    >
+                      <Trash2 className="size-4" aria-hidden="true" />
+                    </button>
+                  </div>
+                </article>
+              )
+            )}
           </div>
         </Panel>
       </div>

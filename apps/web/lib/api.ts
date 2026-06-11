@@ -145,22 +145,21 @@ export type SafetyRule = {
   createdAt: string;
 };
 
+const cookieSessionToken = "cookie-session";
+
 export function getStoredToken(): string | null {
   if (typeof window === "undefined") {
     return null;
   }
-  return window.localStorage.getItem("imagora.token");
+  window.localStorage.removeItem("imagora.token");
+  return cookieSessionToken;
 }
 
-export function setStoredToken(token: string | null): void {
+export function setStoredToken(_token: string | null): void {
   if (typeof window === "undefined") {
     return;
   }
-  if (token) {
-    window.localStorage.setItem("imagora.token", token);
-  } else {
-    window.localStorage.removeItem("imagora.token");
-  }
+  window.localStorage.removeItem("imagora.token");
 }
 
 export async function apiFetch<T>(
@@ -176,7 +175,7 @@ export async function apiFetch<T>(
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {})
+      ...(isBearerToken(options.token) ? { Authorization: `Bearer ${options.token}` } : {})
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body)
   });
@@ -194,7 +193,11 @@ export async function login(email: string, password: string): Promise<{ token: s
   });
 }
 
-export async function register(email: string, password: string, nickname: string): Promise<{ token: string; user: User }> {
+export async function register(
+  email: string,
+  password: string,
+  nickname: string
+): Promise<{ token: string; user: User }> {
   return apiFetch<{ token: string; user: User }>("/api/auth/register", {
     method: "POST",
     body: { email, password, nickname }
@@ -514,4 +517,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function isBearerToken(token: string | null | undefined): token is string {
+  return Boolean(token && token !== cookieSessionToken);
 }

@@ -25,7 +25,10 @@ export default function OrdersPage() {
         {message ? <p className="mb-4 text-sm text-white/60">{message}</p> : null}
         <div className="space-y-3">
           {orders.map((order) => (
-            <article key={order.id} className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/20 p-4 md:flex-row md:items-center md:justify-between">
+            <article
+              key={order.id}
+              className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/20 p-4 md:flex-row md:items-center md:justify-between"
+            >
               <div>
                 <p className="font-semibold">{order.orderNo}</p>
                 <p className="mt-1 text-sm text-white/52">

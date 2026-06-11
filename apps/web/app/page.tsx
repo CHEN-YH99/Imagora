@@ -368,7 +368,9 @@ export default function HomePage() {
                   <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">风格</span>
                   <span className="rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">{selectedStyle.name}</span>
                   <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">质量</span>
-                  <span className="rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">{formatQualityLabel(quality)}</span>
+                  <span className="rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">
+                    {formatQualityLabel(quality)}
+                  </span>
                   <span className="rounded-2xl bg-black/28 px-3 py-2 text-white/64">数量</span>
                   <span className="flex items-center justify-between rounded-2xl bg-black/28 px-3 py-2 font-medium text-white">
                     <button
@@ -490,7 +492,9 @@ export default function HomePage() {
                       <h3 className="truncate text-lg font-semibold text-white">{item.title}</h3>
                       <p className="mt-1 text-sm text-white/58">{item.style}</p>
                     </div>
-                    <span className="shrink-0 rounded-full bg-white/10 px-3 py-1 text-sm text-volt">{item.cost} 积分</span>
+                    <span className="shrink-0 rounded-full bg-white/10 px-3 py-1 text-sm text-volt">
+                      {item.cost} 积分
+                    </span>
                   </div>
                   <p className="line-clamp-2 min-h-12 text-sm leading-6 text-white/68">{item.prompt}</p>
                   <div className="flex flex-wrap gap-2">
@@ -545,13 +549,19 @@ export default function HomePage() {
                     : "border-white/12 bg-white/7 hover:border-white/24 hover:bg-white/10"
                 }`}
               >
-                <div className={`gallery-art ${item.artClass} min-h-28`} role="img" aria-label={`${item.label}风格预览`} />
+                <div
+                  className={`gallery-art ${item.artClass} min-h-28`}
+                  role="img"
+                  aria-label={`${item.label}风格预览`}
+                />
                 <div className="mt-4 flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <p className="text-sm text-white/58">{item.name}</p>
                     <h3 className="mt-1 text-xl font-semibold text-white">{item.label}</h3>
                   </div>
-                  <span className={`shrink-0 rounded-full bg-gradient-to-r ${item.accentClass} px-3 py-1 text-sm font-semibold text-ink`}>
+                  <span
+                    className={`shrink-0 rounded-full bg-gradient-to-r ${item.accentClass} px-3 py-1 text-sm font-semibold text-ink`}
+                  >
                     {item.cost} 积分
                   </span>
                 </div>
@@ -605,10 +615,18 @@ export default function HomePage() {
           />
 
           <div className="mt-10 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <FlowCard icon={Palette} title="提示词与风格" text="提示词、负向提示词、风格和比例结构化配置，降低参数管理成本。" />
+            <FlowCard
+              icon={Palette}
+              title="提示词与风格"
+              text="提示词、负向提示词、风格和比例结构化配置，降低参数管理成本。"
+            />
             <FlowCard icon={Coins} title="积分预估" text="提交前展示预计消耗和账户余额，帮助用户明确预算和生成成本。" />
             <FlowCard icon={Gauge} title="异步队列" text="清晰呈现排队、生成中、完成和失败状态，适合批量图片生产。" />
-            <FlowCard icon={ShieldCheck} title="安全与退回" text="安全拦截、系统失败和积分退回可追踪，减少资产生产风险。" />
+            <FlowCard
+              icon={ShieldCheck}
+              title="安全与退回"
+              text="安全拦截、系统失败和积分退回可追踪，减少资产生产风险。"
+            />
           </div>
         </div>
       </section>
@@ -710,15 +728,7 @@ export default function HomePage() {
   );
 }
 
-function SectionHeading({
-  eyebrow,
-  title,
-  description
-}: {
-  eyebrow: string;
-  title: string;
-  description: string;
-}) {
+function SectionHeading({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) {
   return (
     <div className="max-w-3xl">
       <p className="inline-flex items-center gap-2 rounded-full border border-white/12 bg-white/8 px-4 py-2 text-sm text-white/70">
@@ -731,15 +741,7 @@ function SectionHeading({
   );
 }
 
-function FlowCard({
-  icon: Icon,
-  title,
-  text
-}: {
-  icon: LucideIcon;
-  title: string;
-  text: string;
-}) {
+function FlowCard({ icon: Icon, title, text }: { icon: LucideIcon; title: string; text: string }) {
   return (
     <article className="rounded-[1.35rem] border border-white/12 bg-white/7 p-5">
       <div className="flex size-12 items-center justify-center rounded-2xl bg-white text-ink">

@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { LogOut, Sparkles } from "lucide-react";
-import { apiFetch, formatStatusLabel, getStoredToken, logout as apiLogout, setStoredToken, type User } from "../lib/api";
+import {
+  apiFetch,
+  formatStatusLabel,
+  getStoredToken,
+  logout as apiLogout,
+  setStoredToken,
+  type User
+} from "../lib/api";
 
 const navItems = [
   { href: "/generate", label: "生成" },
@@ -96,10 +103,14 @@ export function AppFrame({
 }
 
 export function Panel({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <section className={`rounded-[1.35rem] border border-white/12 bg-white/7 p-5 ${className}`}>{children}</section>;
+  return (
+    <section className={`rounded-[1.35rem] border border-white/12 bg-white/7 p-5 ${className}`}>{children}</section>
+  );
 }
 
 export function StatusPill({ children }: { children: React.ReactNode }) {
   const label = typeof children === "string" ? formatStatusLabel(children) : children;
-  return <span className="rounded-full border border-white/10 bg-white/8 px-3 py-1 text-xs text-white/68">{label}</span>;
+  return (
+    <span className="rounded-full border border-white/10 bg-white/8 px-3 py-1 text-xs text-white/68">{label}</span>
+  );
 }

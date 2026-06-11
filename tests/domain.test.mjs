@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { JsonStore, verifyPassword } from "../packages/database/dist/index.js";
+import { createInitialData, JsonStore, verifyPassword } from "../packages/database/dist/index.js";
 import { calculateCreditCost, checkPromptSafety } from "../packages/shared/dist/index.js";
 
 test("credit cost increases with quantity and quality", () => {
@@ -42,3 +42,63 @@ test("seed users have verifiable password hashes", async () => {
 
   await rm(dir, { recursive: true, force: true });
 });
+
+test("production initial data requires explicit bootstrap admin credentials", () => {
+  const previous = snapshotEnv([
+    "NODE_ENV",
+    "IMAGORA_SEED_DEMO_DATA",
+    "IMAGORA_BOOTSTRAP_ADMIN_EMAIL",
+    "IMAGORA_BOOTSTRAP_ADMIN_PASSWORD"
+  ]);
+  try {
+    process.env.NODE_ENV = "production";
+    delete process.env.IMAGORA_SEED_DEMO_DATA;
+    delete process.env.IMAGORA_BOOTSTRAP_ADMIN_EMAIL;
+    delete process.env.IMAGORA_BOOTSTRAP_ADMIN_PASSWORD;
+
+    assert.throws(() => createInitialData(), /IMAGORA_BOOTSTRAP_ADMIN_EMAIL/);
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
+test("production bootstrap admin uses configured credentials", () => {
+  const previous = snapshotEnv([
+    "NODE_ENV",
+    "IMAGORA_SEED_DEMO_DATA",
+    "IMAGORA_BOOTSTRAP_ADMIN_EMAIL",
+    "IMAGORA_BOOTSTRAP_ADMIN_PASSWORD"
+  ]);
+  try {
+    process.env.NODE_ENV = "production";
+    delete process.env.IMAGORA_SEED_DEMO_DATA;
+    process.env.IMAGORA_BOOTSTRAP_ADMIN_EMAIL = "owner@example.com";
+    process.env.IMAGORA_BOOTSTRAP_ADMIN_PASSWORD = "Owner123!";
+
+    const data = createInitialData();
+    assert.equal(data.users.length, 1);
+    assert.equal(data.users[0].email, "owner@example.com");
+    assert.equal(data.users[0].role, "ADMIN");
+    assert.equal(verifyPassword("Owner123!", data.users[0].passwordHash), true);
+    assert.equal(
+      data.users.some((user) => user.email === "admin@imagora.local"),
+      false
+    );
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
+function snapshotEnv(names) {
+  return Object.fromEntries(names.map((name) => [name, process.env[name]]));
+}
+
+function restoreEnv(snapshot) {
+  for (const [name, value] of Object.entries(snapshot)) {
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  }
+}

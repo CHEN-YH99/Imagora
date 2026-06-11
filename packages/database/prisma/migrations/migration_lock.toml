@@ -1,0 +1,4 @@
+# Please keep the migration_lock.toml file as-is.
+# If you need to reset the migrations, delete the entire migrations folder and run prisma migrate dev
+
+provider = "postgresql"

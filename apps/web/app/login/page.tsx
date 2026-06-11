@@ -30,7 +30,10 @@ export default function LoginPage() {
   return (
     <main className="flex min-h-screen items-center justify-center bg-ink px-4 text-white">
       <section className="w-full max-w-md rounded-[1.5rem] border border-white/12 bg-white/7 p-6">
-        <Link className="focus-ring inline-flex items-center gap-2 rounded-full text-white/70 hover:text-white" href="/">
+        <Link
+          className="focus-ring inline-flex items-center gap-2 rounded-full text-white/70 hover:text-white"
+          href="/"
+        >
           <UserRound className="size-5" aria-hidden="true" />
           Imagora
         </Link>
@@ -55,7 +58,9 @@ export default function LoginPage() {
               type="password"
             />
           </label>
-          {message ? <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p> : null}
+          {message ? (
+            <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p>
+          ) : null}
           <button
             className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
             type="button"

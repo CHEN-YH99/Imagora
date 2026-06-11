@@ -42,11 +42,14 @@ export default function PricingPage() {
         window.location.href = order.checkoutUrl;
         return;
       }
-      const paid = await apiFetch<{ order: { status: string }; balanceAfter: number }>(`/api/orders/${order.order.id}/pay`, {
-        method: "POST",
-        token,
-        body: {}
-      });
+      const paid = await apiFetch<{ order: { status: string }; balanceAfter: number }>(
+        `/api/orders/${order.order.id}/pay`,
+        {
+          method: "POST",
+          token,
+          body: {}
+        }
+      );
       setMessage(`订单${formatStatusLabel(paid.order.status)}，支付后余额为 ${formatCredits(paid.balanceAfter)}。`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "支付失败，请稍后重试。");
@@ -55,7 +58,9 @@ export default function PricingPage() {
 
   return (
     <AppFrame title="积分套餐" subtitle="按创作规模选择积分包，套餐价格、积分额度和有效期以服务端配置为准。">
-      {message ? <p className="mb-5 rounded-2xl border border-white/12 bg-white/7 p-4 text-sm text-white/70">{message}</p> : null}
+      {message ? (
+        <p className="mb-5 rounded-2xl border border-white/12 bg-white/7 p-4 text-sm text-white/70">{message}</p>
+      ) : null}
       <div className="grid gap-5 lg:grid-cols-3">
         {plans.map((plan, index) => (
           <Panel key={plan.id} className={index === 1 ? "border-mint bg-mint/10" : ""}>
@@ -64,7 +69,9 @@ export default function PricingPage() {
                 <h2 className="text-2xl font-semibold">{formatPlanName(plan.name)}</h2>
                 <p className="mt-2 text-sm leading-6 text-white/60">{formatPlanDescription(plan.description)}</p>
               </div>
-              {index === 1 ? <span className="rounded-full bg-mint px-3 py-1 text-sm font-semibold text-ink">推荐</span> : null}
+              {index === 1 ? (
+                <span className="rounded-full bg-mint px-3 py-1 text-sm font-semibold text-ink">推荐</span>
+              ) : null}
             </div>
             <p className="mt-8 text-5xl font-semibold">{formatMoney(plan.priceCents, plan.currency)}</p>
             <p className="mt-4 inline-flex items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm text-volt">

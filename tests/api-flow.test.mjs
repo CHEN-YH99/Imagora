@@ -120,12 +120,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
       quantity: 1,
       quality: "draft"
     };
-    const created = await post(
-      baseUrl,
-      "/api/generation/tasks",
-      generationPayload,
-      demoToken
-    );
+    const created = await post(baseUrl, "/api/generation/tasks", generationPayload, demoToken);
     const duplicateCreated = await post(baseUrl, "/api/generation/tasks", generationPayload, demoToken);
 
     assert.equal(duplicateCreated.data.task.id, created.data.task.id);
@@ -195,12 +190,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     );
 
     const beforePaymentCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
-    const orderCreated = await post(
-      baseUrl,
-      "/api/orders",
-      { planId: "starter", paymentProvider: "mock" },
-      demoToken
-    );
+    const orderCreated = await post(baseUrl, "/api/orders", { planId: "starter", paymentProvider: "mock" }, demoToken);
     const providerEventId = `evt_${crypto.randomUUID()}`;
     const webhookPayload = {
       providerEventId,
@@ -213,18 +203,16 @@ test("api and worker complete generation and enforce admin safety rules", async 
     assert.equal(webhookPaid.data.credited, true);
     assert.equal(webhookPaid.data.duplicateEvent, false);
     assert.equal(webhookPaid.data.order.status, "PAID");
-    assert.equal(webhookPaid.data.balanceAfter, beforePaymentCredits.data.account.balance + orderCreated.data.plan.credits);
+    assert.equal(
+      webhookPaid.data.balanceAfter,
+      beforePaymentCredits.data.account.balance + orderCreated.data.plan.credits
+    );
     assert.equal(webhookDuplicate.data.credited, false);
     assert.equal(webhookDuplicate.data.duplicateEvent, true);
     assert.equal(webhookDuplicate.data.balanceAfter, webhookPaid.data.balanceAfter);
 
     const beforeMismatchCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
-    const mismatchOrder = await post(
-      baseUrl,
-      "/api/orders",
-      { planId: "starter", paymentProvider: "mock" },
-      demoToken
-    );
+    const mismatchOrder = await post(baseUrl, "/api/orders", { planId: "starter", paymentProvider: "mock" }, demoToken);
     const mismatchWebhook = await post(baseUrl, "/api/payments/webhooks/mock", {
       providerEventId: `evt_${crypto.randomUUID()}`,
       orderId: mismatchOrder.data.order.id,
@@ -243,7 +231,9 @@ test("api and worker complete generation and enforce admin safety rules", async 
     );
     assert.equal(
       storeAfterPayment.creditLedgerEntries.filter(
-        (entry) => entry.sourceId === orderCreated.data.order.id && entry.idempotencyKey === `order-grant:${orderCreated.data.order.id}`
+        (entry) =>
+          entry.sourceId === orderCreated.data.order.id &&
+          entry.idempotencyKey === `order-grant:${orderCreated.data.order.id}`
       ).length,
       1
     );
@@ -255,7 +245,10 @@ test("api and worker complete generation and enforce admin safety rules", async 
 
     await removeOrderCreditGrant(storePath, orderCreated.data.order.id);
     const corruptedPaymentCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
-    assert.equal(corruptedPaymentCredits.data.account.balance, webhookPaid.data.balanceAfter - orderCreated.data.plan.credits);
+    assert.equal(
+      corruptedPaymentCredits.data.account.balance,
+      webhookPaid.data.balanceAfter - orderCreated.data.plan.credits
+    );
 
     const paidOrderReconciliation = await post(baseUrl, "/api/admin/maintenance/reconcile", {}, admin.data.token);
     assert.equal(paidOrderReconciliation.data.maintenance.reconciledPaidOrders, 1);
@@ -264,7 +257,9 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const storeAfterPaidOrderReconcile = await readStore(storePath);
     assert.equal(
       storeAfterPaidOrderReconcile.creditLedgerEntries.filter(
-        (entry) => entry.sourceId === orderCreated.data.order.id && entry.idempotencyKey === `order-grant:${orderCreated.data.order.id}`
+        (entry) =>
+          entry.sourceId === orderCreated.data.order.id &&
+          entry.idempotencyKey === `order-grant:${orderCreated.data.order.id}`
       ).length,
       1
     );
@@ -295,16 +290,13 @@ test("api and worker complete generation and enforce admin safety rules", async 
       beforeEventBackfillCredits.data.account.balance + eventBackfillOrder.data.plan.credits
     );
 
-    const expiredOrder = await post(
-      baseUrl,
-      "/api/orders",
-      { planId: "starter", paymentProvider: "mock" },
-      demoToken
-    );
+    const expiredOrder = await post(baseUrl, "/api/orders", { planId: "starter", paymentProvider: "mock" }, demoToken);
     await markOrderExpired(storePath, expiredOrder.data.order.id);
     const ordersAfterExpiry = await get(baseUrl, "/api/orders", demoToken);
     assert.ok(ordersAfterExpiry.data.maintenance.closedExpiredOrders >= 1);
-    const expiredAfterMaintenance = ordersAfterExpiry.data.orders.find((order) => order.id === expiredOrder.data.order.id);
+    const expiredAfterMaintenance = ordersAfterExpiry.data.orders.find(
+      (order) => order.id === expiredOrder.data.order.id
+    );
     assert.ok(expiredAfterMaintenance);
     assert.equal(expiredAfterMaintenance.status, "CLOSED");
     const closedPay = await fetch(`${baseUrl}/api/orders/${expiredOrder.data.order.id}/pay`, {
@@ -340,7 +332,11 @@ test("api and worker complete generation and enforce admin safety rules", async 
       beforeLateWebhookCredits.data.account.balance + lateWebhookOrder.data.plan.credits
     );
 
-    const adminUserSearch = await get(baseUrl, "/api/admin/users?search=demo%40imagora.local&limit=5", admin.data.token);
+    const adminUserSearch = await get(
+      baseUrl,
+      "/api/admin/users?search=demo%40imagora.local&limit=5",
+      admin.data.token
+    );
     assert.ok(adminUserSearch.data.users.some((user) => user.id === demo.data.user.id));
 
     const suspendedUser = await patch(
@@ -432,8 +428,17 @@ test("api and worker complete generation and enforce admin safety rules", async 
     assert.ok(!visibleImagesAfterHide.data.images.some((image) => image.id === generatedImageId));
 
     const auditLogs = await get(baseUrl, "/api/admin/audit-logs", admin.data.token);
-    for (const action of ["user.status.update", "user.credits.adjust", "plan.create", "plan.update", "image.visibility.update"]) {
-      assert.ok(auditLogs.data.logs.some((entry) => entry.action === action), `Missing audit action: ${action}`);
+    for (const action of [
+      "user.status.update",
+      "user.credits.adjust",
+      "plan.create",
+      "plan.update",
+      "image.visibility.update"
+    ]) {
+      assert.ok(
+        auditLogs.data.logs.some((entry) => entry.action === action),
+        `Missing audit action: ${action}`
+      );
     }
 
     const metrics = await get(baseUrl, "/api/admin/metrics", admin.data.token);

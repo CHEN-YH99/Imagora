@@ -41,6 +41,15 @@ export interface Session {
   expiresAt: string;
 }
 
+export interface PasswordResetToken {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  expiresAt: string;
+  usedAt: string | null;
+  createdAt: string;
+}
+
 export interface UserCreditAccount {
   userId: string;
   balance: number;
@@ -204,6 +213,7 @@ export interface AdminAuditLog {
 export interface StoreData {
   users: User[];
   sessions: Session[];
+  passwordResetTokens: PasswordResetToken[];
   creditAccounts: UserCreditAccount[];
   creditLedgerEntries: CreditLedgerEntry[];
   generationTasks: GenerationTask[];
@@ -245,7 +255,9 @@ export type ErrorCode =
   | "ORDER_NOT_PAYABLE"
   | "RATE_LIMITED"
   | "FEATURE_DISABLED"
-  | "INTERNAL_ERROR";
+  | "INTERNAL_ERROR"
+  | "INVALID_RESET_TOKEN"
+  | "RESET_TOKEN_EXPIRED";
 
 export class AppError extends Error {
   readonly code: ErrorCode;

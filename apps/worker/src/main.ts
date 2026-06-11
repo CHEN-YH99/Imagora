@@ -6,6 +6,10 @@ import { createSafetyProvider } from "@imagora/safety";
 import { createObjectStorage } from "@imagora/storage";
 import type { GeneratedImage, GenerationTask, StoreData } from "@imagora/shared";
 
+const isProduction = process.env.NODE_ENV === "production";
+
+validateProductionConfig();
+
 const store = createStore();
 const provider = createImageGenerationProvider();
 const storage = createObjectStorage();
@@ -39,14 +43,14 @@ async function tick(): Promise<void> {
 }
 
 async function processQueuedJob(job: GenerationQueueJob): Promise<void> {
-  const data = await store.read();
-  refundStaleRunningTasks(data);
-  const task = data.generationTasks.find((item) => item.id === job.taskId && item.status === "PENDING");
-  if (!task) {
-    return;
-  }
-  await processTask(data, task);
-  await store.write(data);
+  await store.update(async (data) => {
+    refundStaleRunningTasks(data);
+    const task = data.generationTasks.find((item) => item.id === job.taskId && item.status === "PENDING");
+    if (!task) {
+      return;
+    }
+    await processTask(data, task);
+  });
 }
 
 async function processTask(data: StoreData, task: GenerationTask): Promise<void> {
@@ -141,7 +145,12 @@ function refundTask(data: StoreData, task: GenerationTask, remark: string): void
   });
 }
 
-async function createImage(task: GenerationTask, index: number, body: string, mimeType: string): Promise<GeneratedImage> {
+async function createImage(
+  task: GenerationTask,
+  index: number,
+  body: string,
+  mimeType: string
+): Promise<GeneratedImage> {
   const id = randomUUID();
   const now = new Date().toISOString();
   const extension = extensionForMimeType(mimeType);
@@ -202,5 +211,39 @@ function extensionForMimeType(mimeType: string): string {
       return "svg";
     default:
       return "bin";
+  }
+}
+
+function validateProductionConfig(): void {
+  if (!isProduction) {
+    return;
+  }
+
+  requireProductionValue("DATABASE_URL");
+  requireProductionValue("REDIS_URL");
+  requireProductionValue("OPENAI_API_KEY");
+  requireProductionValue("S3_ENDPOINT");
+  requireProductionValue("S3_BUCKET");
+  requireProductionValue("S3_ACCESS_KEY_ID");
+  requireProductionValue("S3_SECRET_ACCESS_KEY");
+  requireProductionValue("S3_PUBLIC_BASE_URL");
+  requireProductionSetting("DATA_STORE", "prisma");
+  requireProductionSetting("QUEUE_PROVIDER", "bullmq");
+  requireProductionSetting("AI_PROVIDER", "openai");
+  requireProductionSetting("STORAGE_PROVIDER", "s3", "r2");
+}
+
+function requireProductionValue(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`Unsafe production config: ${name} is required`);
+  }
+  return value;
+}
+
+function requireProductionSetting(name: string, ...allowedValues: string[]): void {
+  const value = requireProductionValue(name);
+  if (!allowedValues.includes(value)) {
+    throw new Error(`Unsafe production config: ${name} must be ${allowedValues.join(" or ")}`);
   }
 }
