@@ -1,0 +1,8 @@
+**/dist/**
+**/.next/**
+**/node_modules/**
+**/*.tsbuildinfo
+**/next-env.d.ts
+packages/database/prisma/generated/**
+package-lock.json
+*.md
