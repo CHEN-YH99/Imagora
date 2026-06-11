@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import cors from "@fastify/cors";
+import pino from "pino";
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
 import { createPaymentProvider, type VerifiedPaymentEvent } from "@imagora/payments";
 import { createGenerationQueue } from "@imagora/queue";
@@ -36,7 +37,28 @@ const safetyProvider = createSafetyProvider();
 const paymentProvider = createPaymentProvider();
 const generationQueue = createGenerationQueue();
 const storage = createObjectStorage();
-const app = Fastify({ logger: true });
+
+// Structured logging setup
+const isProduction = process.env.NODE_ENV === "production";
+const logger = pino({
+  level: process.env.LOG_LEVEL ?? (isProduction ? "info" : "debug"),
+  transport: isProduction
+    ? undefined
+    : {
+        target: "pino-pretty",
+        options: {
+          colorize: true,
+          translateTime: "SYS:standard",
+          ignore: "pid,hostname"
+        }
+      }
+});
+
+const app = Fastify({
+  loggerInstance: logger,
+  requestTimeout: 30000,
+  bodyLimit: 1024 * 100 // 100KB
+});
 const serviceStartedAt = Date.now();
 const routeMetrics = new Map<string, RouteMetric>();
 const rateLimitBuckets = new Map<string, RateLimitBucket>();
@@ -79,40 +101,102 @@ await app.register(cors, {
 });
 
 app.addHook("onRequest", async (request, reply) => {
+  // Request tracing
   request.requestId = request.headers["x-request-id"]?.toString() ?? randomUUID();
   request.startedAt = Date.now();
+  
+  // Extract user ID from session if available
+  const token = sessionToken(request, true);
+  let userId: string | undefined;
+  if (token) {
+    const data = await store.read();
+    const session = data.sessions.find((s) => s.token === token);
+    if (session) {
+      userId = session.userId;
+    }
+  }
+  
+  // Add child logger with context
+  const childLogger = request.log.child({
+    requestId: request.requestId,
+    userId: userId ?? "anonymous",
+    method: request.method,
+    path: request.url,
+    timestamp: new Date().toISOString()
+  });
+  
+  request.log = childLogger;
   reply.header("x-request-id", request.requestId);
   applySecurityHeaders(reply);
   await enforceRateLimit(request, reply);
 });
 
 app.addHook("onResponse", async (request, reply) => {
-  recordRequestMetric(request, reply.statusCode);
+  const duration = Date.now() - (request.startedAt ?? Date.now());
+  const statusCode = reply.statusCode;
+  
+  // Log request completion with metrics
+  request.log.info(
+    {
+      statusCode,
+      duration,
+      method: request.method,
+      path: request.url
+    },
+    `${request.method} ${request.url} ${statusCode} ${duration}ms`
+  );
+  
+  recordRequestMetric(request, statusCode);
 });
 
 app.setErrorHandler((error, request, reply) => {
   const requestId = request.requestId ?? randomUUID();
+  const duration = Date.now() - (request.startedAt ?? Date.now());
+  
   if (error instanceof AppError) {
+    request.log.warn(
+      {
+        errorCode: error.code,
+        statusCode: error.statusCode,
+        details: error.details,
+        duration
+      },
+      error.message
+    );
     return reply.status(error.statusCode).send({
       error: { code: error.code, message: error.message, details: error.details },
       requestId
     });
   }
+  
   if (error instanceof z.ZodError) {
+    request.log.warn({ errorCode: "VALIDATION_ERROR", details: error.flatten(), duration }, "Validation error");
     return reply.status(400).send({
       error: { code: "VALIDATION_ERROR", message: "Invalid request payload", details: error.flatten() },
       requestId
     });
   }
+  
   if (typeof error === "object" && error !== null && "statusCode" in error) {
     const statusCode = typeof error.statusCode === "number" ? error.statusCode : 500;
     const message = error instanceof Error ? error.message : "Request failed";
+    request.log.warn({ statusCode, duration }, message);
     return reply.status(statusCode).send({
       error: { code: statusCode === 401 ? "UNAUTHORIZED" : "VALIDATION_ERROR", message },
       requestId
     });
   }
-  request.log.error(error);
+  
+  // Log unhandled errors
+  request.log.error(
+    {
+      errorType: error instanceof Error ? error.constructor.name : typeof error,
+      stack: error instanceof Error ? error.stack : undefined,
+      duration
+    },
+    "Unhandled error"
+  );
+  
   return reply.status(500).send({
     error: { code: "INTERNAL_ERROR", message: "Unexpected server error" },
     requestId
@@ -197,6 +281,82 @@ app.post("/api/auth/logout", async (request, reply) => {
   });
   clearSessionCookie(reply);
   return envelope(request, { ok: true });
+});
+
+app.post("/api/auth/request-password-reset", async (request) => {
+  const input = requestPasswordResetSchema.parse(request.body);
+  const data = await store.read();
+  const user = data.users.find((u) => u.email === input.email.toLowerCase());
+  
+  // Always return success to prevent email enumeration
+  if (!user) {
+    return envelope(request, { ok: true, message: "If email exists, reset link will be sent" });
+  }
+
+  return store.update(async (data) => {
+    const now = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24 hours
+    const resetToken = randomUUID();
+    const tokenHash = createHash("sha256").update(resetToken).digest("hex");
+
+    // Clean up old reset tokens for this user
+    data.passwordResetTokens = data.passwordResetTokens.filter(
+      (t) => t.userId !== user.id || new Date(t.expiresAt) > new Date()
+    );
+
+    // Add new reset token
+    data.passwordResetTokens.push({
+      id: randomUUID(),
+      userId: user.id,
+      tokenHash,
+      expiresAt,
+      usedAt: null,
+      createdAt: now
+    });
+
+    // TODO: Send email with reset link containing resetToken
+    // SECURITY: never log the raw reset token in production — it grants password-change ability.
+    request.log.info({ userId: user.id }, "Password reset requested");
+    if (!isProduction) {
+      // Dev-only: surface the token locally since email delivery is not wired up yet.
+      request.log.debug({ userId: user.id, resetToken }, "[DEV] password reset token (do not enable in production)");
+    }
+
+    return envelope(request, { ok: true, message: "If email exists, reset link will be sent" });
+  });
+});
+
+app.post("/api/auth/reset-password", async (request) => {
+  const input = resetPasswordSchema.parse(request.body);
+  
+  const data = await store.read();
+  const tokenHash = createHash("sha256").update(input.token).digest("hex");
+  const resetToken = data.passwordResetTokens.find((t) => t.tokenHash === tokenHash && !t.usedAt);
+
+  if (!resetToken || new Date(resetToken.expiresAt) < new Date()) {
+    throw new AppError("INVALID_RESET_TOKEN", "Invalid or expired reset token", 400);
+  }
+
+  return store.update(async (data) => {
+    const user = mustFindUser(data, resetToken.userId);
+    const now = new Date().toISOString();
+
+    user.passwordHash = hashPassword(input.password);
+    user.updatedAt = now;
+
+    // Mark token as used
+    const token = data.passwordResetTokens.find((t) => t.tokenHash === tokenHash);
+    if (token) {
+      token.usedAt = now;
+    }
+
+    // Invalidate all existing sessions for security
+    data.sessions = data.sessions.filter((s) => s.userId !== user.id);
+
+    request.log.info({ userId: user.id }, "Password reset completed");
+
+    return envelope(request, { ok: true, message: "Password reset successfully. Please login with your new password." });
+  });
 });
 
 app.get("/api/auth/me", async (request) => {
@@ -948,6 +1108,15 @@ const loginSchema = z.object({
   password: z.string().min(1)
 });
 
+const requestPasswordResetSchema = z.object({
+  email: z.string().email()
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(1),
+  password: z.string().min(8)
+});
+
 const updateProfileSchema = z.object({
   nickname: z.string().min(1).max(80).optional(),
   avatarUrl: z.string().url().nullable().optional()
@@ -1044,13 +1213,16 @@ function envelope<T>(request: FastifyRequest, data: T): ApiEnvelope<T> {
   return { data, requestId: request.requestId ?? randomUUID() };
 }
 
-function sessionToken(request: FastifyRequest): string {
+function sessionToken(request: FastifyRequest, optional = false): string {
   const cookieToken = cookieValue(request.headers.cookie, sessionCookieName());
   if (cookieToken) {
     return cookieToken;
   }
   const authorization = request.headers.authorization;
   if (!authorization?.startsWith("Bearer ")) {
+    if (optional) {
+      return "";
+    }
     throw new AppError("UNAUTHORIZED", "Missing session token", 401);
   }
   return authorization.slice("Bearer ".length);
