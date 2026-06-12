@@ -179,11 +179,25 @@ export async function apiFetch<T>(
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body)
   });
-  const payload = (await response.json()) as { data?: T; error?: { code?: string; message: string } };
+  const payload = await readApiPayload<T>(response);
   if (!response.ok || !payload.data) {
     throw new Error(formatApiErrorMessage(payload.error?.code, payload.error?.message, response.status));
   }
   return payload.data;
+}
+
+async function readApiPayload<T>(
+  response: Response
+): Promise<{ data?: T; error?: { code?: string; message: string } }> {
+  const text = await response.text();
+  if (!text) {
+    return response.ok ? {} : { error: { message: response.statusText || "Request failed" } };
+  }
+  try {
+    return JSON.parse(text) as { data?: T; error?: { code?: string; message: string } };
+  } catch {
+    return { error: { message: response.ok ? "Invalid JSON response" : response.statusText || "Request failed" } };
+  }
 }
 
 export async function login(email: string, password: string): Promise<{ token: string; user: User }> {

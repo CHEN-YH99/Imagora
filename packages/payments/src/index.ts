@@ -59,6 +59,7 @@ export class StripePaymentProvider implements PaymentProvider {
   private readonly webhookSecret = requiredEnv("STRIPE_WEBHOOK_SECRET");
   private readonly successUrl = process.env.STRIPE_SUCCESS_URL ?? "http://127.0.0.1:3100/orders?paid=1";
   private readonly cancelUrl = process.env.STRIPE_CANCEL_URL ?? "http://127.0.0.1:3100/pricing?canceled=1";
+  private readonly timeoutMs = envNumber("STRIPE_TIMEOUT_MS", 15_000);
 
   async createPayment(input: CreatePaymentInput): Promise<CreatePaymentResult> {
     const body = new URLSearchParams({
@@ -74,6 +75,7 @@ export class StripePaymentProvider implements PaymentProvider {
     });
     const response = await fetch("https://api.stripe.com/v1/checkout/sessions", {
       method: "POST",
+      signal: AbortSignal.timeout(this.timeoutMs),
       headers: {
         Authorization: `Bearer ${this.secretKey}`,
         "Content-Type": "application/x-www-form-urlencoded"
@@ -193,6 +195,11 @@ function requiredEnv(name: string): string {
     throw new Error(`${name} is required`);
   }
   return value;
+}
+
+function envNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function isMockWebhook(value: unknown): value is { providerEventId: string; orderId: string; amountCents: number } {

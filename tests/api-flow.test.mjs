@@ -33,6 +33,25 @@ test("api and worker complete generation and enforce admin safety rules", async 
     });
     const demoToken = demo.data.token;
 
+    const blockedOrigin = await fetch(`${baseUrl}/api/generation/quote`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${demoToken}`,
+        Origin: "https://evil.example"
+      },
+      body: JSON.stringify({
+        prompt: "blocked cross origin write",
+        style: "poster",
+        aspectRatio: "1:1",
+        quantity: 1,
+        quality: "draft"
+      })
+    });
+    const blockedOriginPayload = await blockedOrigin.json();
+    assert.equal(blockedOrigin.status, 403);
+    assert.equal(blockedOriginPayload.error.code, "FORBIDDEN");
+
     const invalidUpload = await fetch(`${baseUrl}/api/uploads/reference-images`, {
       method: "POST",
       headers: {
@@ -48,6 +67,22 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const invalidUploadPayload = await invalidUpload.json();
     assert.equal(invalidUpload.status, 400);
     assert.equal(invalidUploadPayload.error.code, "VALIDATION_ERROR");
+
+    const oversizedInvalidUpload = await fetch(`${baseUrl}/api/uploads/reference-images`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${demoToken}`
+      },
+      body: JSON.stringify({
+        fileName: "large-invalid.png",
+        mimeType: "image/png",
+        contentBase64: Buffer.from("not an image".repeat(20_000)).toString("base64")
+      })
+    });
+    const oversizedInvalidUploadPayload = await oversizedInvalidUpload.json();
+    assert.equal(oversizedInvalidUpload.status, 400);
+    assert.equal(oversizedInvalidUploadPayload.error.code, "VALIDATION_ERROR");
 
     const uploadedReference = await post(
       baseUrl,

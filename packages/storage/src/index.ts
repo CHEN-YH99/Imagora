@@ -53,6 +53,7 @@ export class S3CompatibleObjectStorage implements ObjectStorage {
   private readonly accessKeyId = requiredEnv("S3_ACCESS_KEY_ID");
   private readonly secretAccessKey = requiredEnv("S3_SECRET_ACCESS_KEY");
   private readonly publicBaseUrl = process.env.S3_PUBLIC_BASE_URL?.replace(/\/$/, "");
+  private readonly timeoutMs = envNumber("S3_TIMEOUT_MS", 30_000);
 
   async putObject(input: PutObjectInput): Promise<PutObjectResult> {
     const body = Buffer.from(input.body, input.bodyEncoding ?? "utf8");
@@ -65,6 +66,7 @@ export class S3CompatibleObjectStorage implements ObjectStorage {
     };
     const response = await fetch(url, {
       method: "PUT",
+      signal: AbortSignal.timeout(this.timeoutMs),
       headers: {
         ...headers,
         Authorization: this.authorization("PUT", url, headers)
@@ -113,6 +115,7 @@ export class S3CompatibleObjectStorage implements ObjectStorage {
     };
     const response = await fetch(url, {
       method: "DELETE",
+      signal: AbortSignal.timeout(this.timeoutMs),
       headers: {
         ...headers,
         Authorization: this.authorization("DELETE", url, headers)
@@ -229,4 +232,9 @@ function requiredEnv(name: string): string {
     throw new Error(`${name} is required`);
   }
   return value;
+}
+
+function envNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }

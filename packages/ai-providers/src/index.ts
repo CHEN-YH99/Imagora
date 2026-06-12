@@ -61,10 +61,12 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   readonly modelName = process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-1";
   private readonly apiKey = requiredEnv("OPENAI_API_KEY");
   private readonly baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  private readonly timeoutMs = envNumber("OPENAI_TIMEOUT_MS", 120_000);
 
   async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
     const response = await fetch(`${this.baseUrl}/images/generations`, {
       method: "POST",
+      signal: AbortSignal.timeout(this.timeoutMs),
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
         "Content-Type": "application/json"
@@ -158,6 +160,11 @@ function requiredEnv(name: string): string {
     throw new Error(`${name} is required`);
   }
   return value;
+}
+
+function envNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function createSvg(input: GenerateImageInput, index: number): string {

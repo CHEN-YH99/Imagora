@@ -60,7 +60,7 @@ const logger = pino({
 const app = Fastify({
   loggerInstance: logger,
   requestTimeout: 30000,
-  bodyLimit: 1024 * 100 // 100KB
+  bodyLimit: envNumber("API_BODY_LIMIT_BYTES", 1024 * 100)
 });
 const serviceStartedAt = Date.now();
 const routeMetrics = new Map<string, RouteMetric>();
@@ -141,6 +141,7 @@ app.addHook("onRequest", async (request, reply) => {
   request.log = childLogger;
   reply.header("x-request-id", request.requestId);
   applySecurityHeaders(reply);
+  enforceWriteOrigin(request);
   await enforceRateLimit(request, reply);
 });
 
@@ -503,17 +504,13 @@ app.post("/api/generation/tasks", async (request, reply) => {
     };
   });
   if (result.enqueue) {
-    await generationQueue.enqueueGenerationTask({
-      taskId: result.task.id,
-      userId: user.id,
-      requestedAt: result.requestedAt
-    });
+    await enqueueGenerationTaskOrFail(result.task.id, user.id, result.requestedAt);
     reply.status(201);
   }
   return envelope(request, { task: result.task, balanceAfter: result.balanceAfter });
 });
 
-app.post("/api/uploads/reference-images", async (request, reply) => {
+app.post("/api/uploads/reference-images", { bodyLimit: uploadBodyLimitBytes() }, async (request, reply) => {
   assertFeatureEnabled("uploads");
   const { user } = await requireAuth(request);
   const input = referenceUploadSchema.parse(request.body);
@@ -629,11 +626,7 @@ app.post("/api/generation/tasks/:taskId/retry", async (request, reply) => {
     );
     return { task, balanceAfter: mustFindCreditAccount(data, user.id).balance };
   });
-  await generationQueue.enqueueGenerationTask({
-    taskId: result.task.id,
-    userId: user.id,
-    requestedAt: result.task.createdAt
-  });
+  await enqueueGenerationTaskOrFail(result.task.id, user.id, result.task.createdAt);
   reply.status(201);
   return envelope(request, { task: result.task, balanceAfter: result.balanceAfter });
 });
@@ -1266,6 +1259,26 @@ function envelope<T>(request: FastifyRequest, data: T): ApiEnvelope<T> {
   return { data, requestId: request.requestId ?? randomUUID() };
 }
 
+function uploadBodyLimitBytes(): number {
+  const base64Chars = envNumber("UPLOAD_MAX_BASE64_CHARS", 8_000_000);
+  return Math.max(envNumber("API_BODY_LIMIT_BYTES", 1024 * 100), base64Chars + 16 * 1024);
+}
+
+async function enqueueGenerationTaskOrFail(taskId: string, userId: string, requestedAt: string): Promise<void> {
+  try {
+    await generationQueue.enqueueGenerationTask({ taskId, userId, requestedAt });
+  } catch (error) {
+    await markTaskFailedAndRefund(
+      taskId,
+      "QUEUE_ENQUEUE_FAILED",
+      errorMessage(error, "Generation queue enqueue failed")
+    );
+    throw new AppError("INTERNAL_ERROR", "Generation task could not be queued. Credits were refunded.", 500, {
+      taskId
+    });
+  }
+}
+
 function sessionToken(request: FastifyRequest, optional = false): string {
   const cookieToken = cookieValue(request.headers.cookie, sessionCookieName());
   if (cookieToken) {
@@ -1645,6 +1658,46 @@ function spendCredits(
   });
 }
 
+async function markTaskFailedAndRefund(taskId: string, code: string, message: string): Promise<void> {
+  await store.update((data) => {
+    const task = data.generationTasks.find((item) => item.id === taskId);
+    if (!task || ["SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"].includes(task.status)) {
+      return;
+    }
+    const now = new Date().toISOString();
+    task.status = "FAILED";
+    task.failureCode = code;
+    task.failureMessage = message;
+    task.completedAt = now;
+    task.updatedAt = now;
+    refundTaskCredits(data, task, "Generation task could not be queued");
+  });
+}
+
+function refundTaskCredits(data: StoreData, task: GenerationTask, remark: string): void {
+  const idempotencyKey = `task-refund:${task.id}`;
+  if (data.creditLedgerEntries.some((entry) => entry.idempotencyKey === idempotencyKey)) {
+    return;
+  }
+  const account = mustFindCreditAccount(data, task.userId);
+  const now = new Date().toISOString();
+  account.balance += task.creditCost;
+  account.totalEarned += task.creditCost;
+  account.updatedAt = now;
+  data.creditLedgerEntries.push({
+    id: randomUUID(),
+    userId: task.userId,
+    type: "REFUND",
+    amount: task.creditCost,
+    balanceAfter: account.balance,
+    sourceType: "TASK",
+    sourceId: task.id,
+    idempotencyKey,
+    remark,
+    createdAt: now
+  });
+}
+
 function grantCredits(
   data: StoreData,
   userId: string,
@@ -2010,6 +2063,31 @@ function applySecurityHeaders(reply: FastifyReply): void {
   }
 }
 
+function enforceWriteOrigin(request: FastifyRequest): void {
+  if (
+    ["GET", "HEAD", "OPTIONS"].includes(request.method) ||
+    pathOnly(request.url).startsWith("/api/payments/webhooks/")
+  ) {
+    return;
+  }
+  const origin = headerValue(request.headers.origin);
+  if (!origin) {
+    return;
+  }
+  if (!allowedWriteOrigins().has(origin)) {
+    throw new AppError("FORBIDDEN", "Request origin is not allowed", 403);
+  }
+}
+
+function allowedWriteOrigins(): Set<string> {
+  const values = [process.env.WEB_ORIGIN, process.env.CSRF_ALLOWED_ORIGINS]
+    .filter((value): value is string => Boolean(value))
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+  return new Set(values);
+}
+
 async function enforceRateLimit(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const path = pathOnly(request.url);
   const rule = rateLimitRules.find((item) => item.method === request.method && item.pattern.test(path));
@@ -2354,6 +2432,10 @@ function envBool(name: string, fallback: boolean): boolean {
 
 function round(value: number): number {
   return Number(value.toFixed(2));
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
 }
 
 function webhookSignature(request: FastifyRequest): string | undefined {
