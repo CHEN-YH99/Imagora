@@ -6,9 +6,7 @@ import { LogOut, Sparkles } from "lucide-react";
 import {
   apiFetch,
   formatStatusLabel,
-  getStoredToken,
   logout as apiLogout,
-  setStoredToken,
   type User
 } from "../lib/api";
 
@@ -34,13 +32,13 @@ export function AppFrame({
   const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
-    apiFetch<{ user: User }>("/api/auth/me", { token: getStoredToken() })
+    apiFetch<{ user: User }>("/api/auth/me")
       .then((result) => setUser(result.user))
-      .catch(() => setStoredToken(null));
+      .catch(() => {});
   }, []);
 
   function logout() {
-    void apiLogout(getStoredToken()).catch(() => setStoredToken(null));
+    void apiLogout();
     setUser(null);
   }
 

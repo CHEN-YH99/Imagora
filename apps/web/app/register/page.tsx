@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { UserPlus } from "lucide-react";
-import { register, setStoredToken } from "../../lib/api";
+import { register } from "../../lib/api";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -18,8 +18,7 @@ export default function RegisterPage() {
     setLoading(true);
     setMessage("");
     try {
-      const result = await register(email, password, nickname || email.split("@")[0] || "创作者");
-      setStoredToken(result.token);
+      await register(email, password, nickname || email.split("@")[0] || "创作者");
       router.push("/generate");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "注册失败，请检查信息后重试。");

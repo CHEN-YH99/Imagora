@@ -2,19 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { AppFrame, Panel, StatusPill } from "../../components/AppFrame";
-import { apiFetch, formatMoney, formatPaymentProvider, getStoredToken, type Order } from "../../lib/api";
+import { apiFetch, formatMoney, formatPaymentProvider, type Order } from "../../lib/api";
 
 export default function OrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    const token = getStoredToken();
-    if (!token) {
-      setMessage("请先登录后查看订单。");
-      return;
-    }
-    apiFetch<{ orders: Order[] }>("/api/orders", { token })
+    apiFetch<{ orders: Order[] }>("/api/orders")
       .then((result) => setOrders(result.orders))
       .catch((error) => setMessage(error instanceof Error ? error.message : "订单加载失败，请稍后重试。"));
   }, []);

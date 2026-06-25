@@ -222,12 +222,10 @@ export async function loginDemo(): Promise<{ token: string; user: User }> {
   return login("demo@imagora.local", "Demo123!");
 }
 
-export async function waitForTask(token: string, taskId: string): Promise<{ task: Task; images: GeneratedImage[] }> {
+export async function waitForTask(taskId: string): Promise<{ task: Task; images: GeneratedImage[] }> {
   for (let attempt = 0; attempt < 24; attempt += 1) {
     await sleep(1000);
-    const result = await apiFetch<{ task: Task; images: GeneratedImage[] }>(`/api/generation/tasks/${taskId}`, {
-      token
-    });
+    const result = await apiFetch<{ task: Task; images: GeneratedImage[] }>(`/api/generation/tasks/${taskId}`);
     if (["SUCCEEDED", "FAILED", "BLOCKED", "CANCELED"].includes(result.task.status)) {
       return result;
     }
@@ -235,12 +233,10 @@ export async function waitForTask(token: string, taskId: string): Promise<{ task
   throw new Error("生成任务等待超时，请稍后在历史记录中查看结果。");
 }
 
-export async function logout(token?: string | null): Promise<void> {
+export async function logout(): Promise<void> {
   await apiFetch<{ ok: boolean }>("/api/auth/logout", {
-    method: "POST",
-    token
+    method: "POST"
   });
-  setStoredToken(null);
 }
 
 export function formatMoney(cents: number, currency: string): string {

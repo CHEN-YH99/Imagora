@@ -9,7 +9,6 @@ import {
   formatCredits,
   formatQualityLabel,
   formatStyleLabel,
-  getStoredToken,
   type GeneratedImage,
   type Task
 } from "../../lib/api";
@@ -20,7 +19,6 @@ type TaskDetail = {
 };
 
 export default function HistoryPage() {
-  const [token, setToken] = useState<string | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -28,35 +26,29 @@ export default function HistoryPage() {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    const stored = getStoredToken();
-    setToken(stored);
-    if (!stored) {
-      setMessage("请先登录后查看生成历史。");
-      return;
-    }
-    void loadHistory(stored);
+    void loadHistory();
   }, []);
 
   useEffect(() => {
-    if (!token || !selectedTaskId) {
+    if (!selectedTaskId) {
       return;
     }
-    apiFetch<TaskDetail>(`/api/generation/tasks/${selectedTaskId}`, { token })
+    apiFetch<TaskDetail>(`/api/generation/tasks/${selectedTaskId}`)
       .then((result) => setDetail(result))
       .catch((error) => setMessage(error instanceof Error ? error.message : "任务详情加载失败，请稍后重试。"));
-  }, [selectedTaskId, token]);
+  }, [selectedTaskId]);
 
   const selectedTask = useMemo(
     () => detail?.task ?? tasks.find((task) => task.id === selectedTaskId) ?? tasks[0] ?? null,
     [detail?.task, selectedTaskId, tasks]
   );
 
-  async function loadHistory(currentToken: string) {
+  async function loadHistory() {
     setMessage("");
     try {
       const [taskResult, imageResult] = await Promise.all([
-        apiFetch<{ tasks: Task[] }>("/api/generation/tasks?limit=50", { token: currentToken }),
-        apiFetch<{ images: GeneratedImage[] }>("/api/images?limit=50", { token: currentToken })
+        apiFetch<{ tasks: Task[] }>("/api/generation/tasks?limit=50"),
+        apiFetch<{ images: GeneratedImage[] }>("/api/images?limit=50")
       ]);
       setTasks(taskResult.tasks);
       setImages(imageResult.images);
@@ -72,12 +64,8 @@ export default function HistoryPage() {
   }
 
   async function toggleFavorite(image: GeneratedImage) {
-    if (!token) {
-      return;
-    }
     await apiFetch<{ imageId: string; favorite: boolean }>(`/api/images/${image.id}/favorite`, {
-      method: image.favorite ? "DELETE" : "POST",
-      token
+      method: image.favorite ? "DELETE" : "POST"
     });
     setImages((items) => items.map((item) => (item.id === image.id ? { ...item, favorite: !image.favorite } : item)));
     setDetail((value) =>
@@ -91,12 +79,8 @@ export default function HistoryPage() {
   }
 
   async function downloadImage(image: GeneratedImage) {
-    if (!token) {
-      return;
-    }
     const result = await apiFetch<{ url: string; fileName: string }>(`/api/images/${image.id}/download-url`, {
       method: "POST",
-      token,
       body: {}
     });
     const anchor = document.createElement("a");
@@ -107,12 +91,11 @@ export default function HistoryPage() {
   }
 
   async function deleteImage(image: GeneratedImage) {
-    if (!token || !window.confirm("确定从历史记录中删除这张生成图片？")) {
+    if (!window.confirm("确定从历史记录中删除这张生成图片？")) {
       return;
     }
     await apiFetch<{ imageId: string; deleted: boolean }>(`/api/images/${image.id}`, {
-      method: "DELETE",
-      token
+      method: "DELETE"
     });
     setImages((items) => items.filter((item) => item.id !== image.id));
     setDetail((value) => (value ? { ...value, images: value.images.filter((item) => item.id !== image.id) } : value));
@@ -127,16 +110,14 @@ export default function HistoryPage() {
         <Panel>
           <div className="mb-4 flex items-center justify-between gap-3">
             <h2 className="text-xl font-semibold">任务列表</h2>
-            {token ? (
-              <button
-                className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-2 text-sm text-white/70 hover:bg-white/10"
-                type="button"
-                onClick={() => void loadHistory(token)}
-              >
-                <RefreshCw className="size-4" aria-hidden="true" />
-                刷新
-              </button>
-            ) : null}
+            <button
+              className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-2 text-sm text-white/70 hover:bg-white/10"
+              type="button"
+              onClick={() => void loadHistory()}
+            >
+              <RefreshCw className="size-4" aria-hidden="true" />
+              刷新
+            </button>
           </div>
           <div className="space-y-3">
             {tasks.map((task) => (

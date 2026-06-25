@@ -7,7 +7,6 @@ import {
   formatCredits,
   formatLedgerRemark,
   formatNickname,
-  getStoredToken,
   type CreditAccount,
   type CreditLedgerEntry,
   type User
@@ -20,15 +19,10 @@ export default function AccountPage() {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    const token = getStoredToken();
-    if (!token) {
-      setMessage("请先登录后查看账户信息。");
-      return;
-    }
     Promise.all([
-      apiFetch<{ user: User }>("/api/users/me", { token }),
-      apiFetch<{ account: CreditAccount }>("/api/users/me/credits", { token }),
-      apiFetch<{ entries: CreditLedgerEntry[] }>("/api/users/me/credit-ledger?limit=50", { token })
+      apiFetch<{ user: User }>("/api/users/me"),
+      apiFetch<{ account: CreditAccount }>("/api/users/me/credits"),
+      apiFetch<{ entries: CreditLedgerEntry[] }>("/api/users/me/credit-ledger?limit=50")
     ])
       .then(([userResult, accountResult, ledgerResult]) => {
         setUser(userResult.user);

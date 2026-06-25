@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { LogIn, UserRound } from "lucide-react";
-import { login, setStoredToken } from "../../lib/api";
+import { login } from "../../lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -17,8 +17,7 @@ export default function LoginPage() {
     setLoading(true);
     setMessage("");
     try {
-      const result = await login(email, password);
-      setStoredToken(result.token);
+      await login(email, password);
       router.push("/generate");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "登录失败，请检查账号信息后重试。");

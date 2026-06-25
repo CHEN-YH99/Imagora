@@ -10,7 +10,6 @@ import {
   formatPlanDescription,
   formatPlanName,
   formatStatusLabel,
-  getStoredToken,
   type Plan
 } from "../../lib/api";
 
@@ -27,15 +26,9 @@ export default function PricingPage() {
   }, []);
 
   async function buy(planId: string) {
-    const token = getStoredToken();
-    if (!token) {
-      setMessage("请先登录后再购买积分。");
-      return;
-    }
     try {
       const order = await apiFetch<{ order: { id: string }; checkoutUrl: string | null }>("/api/orders", {
         method: "POST",
-        token,
         body: { planId, paymentProvider }
       });
       if (order.checkoutUrl) {
@@ -46,7 +39,6 @@ export default function PricingPage() {
         `/api/orders/${order.order.id}/pay`,
         {
           method: "POST",
-          token,
           body: {}
         }
       );

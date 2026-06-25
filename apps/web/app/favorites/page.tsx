@@ -3,19 +3,14 @@
 import { useEffect, useState } from "react";
 import { Heart } from "lucide-react";
 import { AppFrame, Panel } from "../../components/AppFrame";
-import { apiFetch, getStoredToken, type GeneratedImage } from "../../lib/api";
+import { apiFetch, type GeneratedImage } from "../../lib/api";
 
 export default function FavoritesPage() {
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    const token = getStoredToken();
-    if (!token) {
-      setMessage("请先登录后查看收藏。");
-      return;
-    }
-    apiFetch<{ images: GeneratedImage[] }>("/api/images?limit=100", { token })
+    apiFetch<{ images: GeneratedImage[] }>("/api/images?limit=100")
       .then((result) => setImages(result.images.filter((image) => image.favorite)))
       .catch((error) => setMessage(error instanceof Error ? error.message : "收藏加载失败，请稍后重试。"));
   }, []);

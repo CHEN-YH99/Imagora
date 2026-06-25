@@ -7,9 +7,7 @@ import { AppFrame, Panel, StatusPill } from "../../components/AppFrame";
 import {
   apiFetch,
   formatCredits,
-  getStoredToken,
   loginDemo,
-  setStoredToken,
   waitForTask,
   type CreditAccount,
   type GeneratedImage,
@@ -47,7 +45,6 @@ export default function GeneratePage() {
 
 function GenerateExperience() {
   const searchParams = useSearchParams();
-  const [token, setToken] = useState<string | null>(null);
   const [prompt, setPrompt] = useState("半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节");
   const [negativePrompt, setNegativePrompt] = useState("低质量、模糊、水印、变形");
   const [style, setStyle] = useState("product_photography");
@@ -64,11 +61,7 @@ function GenerateExperience() {
   const [uploadingReference, setUploadingReference] = useState(false);
 
   useEffect(() => {
-    const stored = getStoredToken();
-    if (stored) {
-      setToken(stored);
-      loadAccount(stored);
-    }
+    loadAccount();
   }, []);
 
   useEffect(() => {
@@ -79,46 +72,41 @@ function GenerateExperience() {
   }, [searchParams]);
 
   useEffect(() => {
-    const current = token;
-    if (!current) {
-      return;
-    }
     apiFetch<{ creditCost: number }>("/api/generation/quote", {
       method: "POST",
-      token: current,
       body: { prompt, negativePrompt, style, aspectRatio, quantity, quality, referenceImageId: referenceImage?.id }
     })
       .then((result) => setQuote(result.creditCost))
       .catch(() => setQuote(0));
-  }, [aspectRatio, negativePrompt, prompt, quality, quantity, referenceImage?.id, style, token]);
+  }, [aspectRatio, negativePrompt, prompt, quality, quantity, referenceImage?.id, style]);
 
-  async function ensureToken(): Promise<string> {
-    if (token) {
-      return token;
+  async function ensureLoggedIn(): Promise<void> {
+    if (account) {
+      return;
     }
-    const result = await loginDemo();
-    setStoredToken(result.token);
-    setToken(result.token);
-    await loadAccount(result.token);
-    return result.token;
+    await loginDemo();
+    await loadAccount();
   }
 
-  async function loadAccount(currentToken: string) {
-    const result = await apiFetch<{ account: CreditAccount }>("/api/users/me/credits", { token: currentToken });
-    setAccount(result.account);
+  async function loadAccount() {
+    try {
+      const result = await apiFetch<{ account: CreditAccount }>("/api/users/me/credits");
+      setAccount(result.account);
+    } catch {
+      setAccount(null);
+    }
   }
 
   async function uploadReference(file: File) {
     setUploadingReference(true);
     setMessage("");
     try {
-      const currentToken = await ensureToken();
+      await ensureLoggedIn();
       const dataUrl = await readFileAsDataUrl(file);
       const result = await apiFetch<{ referenceImage: ReferenceImage; duplicate: boolean }>(
         "/api/uploads/reference-images",
         {
           method: "POST",
-          token: currentToken,
           body: {
             fileName: file.name,
             mimeType: file.type,
@@ -139,10 +127,9 @@ function GenerateExperience() {
     setMessage("");
     setImages([]);
     try {
-      const currentToken = await ensureToken();
+      await ensureLoggedIn();
       const created = await apiFetch<{ task: Task; balanceAfter: number }>("/api/generation/tasks", {
         method: "POST",
-        token: currentToken,
         body: {
           clientRequestId: crypto.randomUUID(),
           prompt,
@@ -156,10 +143,10 @@ function GenerateExperience() {
       });
       setTask(created.task);
       setAccount((value) => (value ? { ...value, balance: created.balanceAfter } : value));
-      const result = await waitForTask(currentToken, created.task.id);
+      const result = await waitForTask(created.task.id);
       setTask(result.task);
       setImages(result.images);
-      await loadAccount(currentToken);
+      await loadAccount();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "生成失败，请稍后重试。");
     } finally {
