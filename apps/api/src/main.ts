@@ -904,6 +904,7 @@ app.get("/api/admin/users", async (request) => {
   const search = query.search?.toLowerCase();
   const users = data.users
     .filter((user) => !query.status || user.status === query.status)
+    .filter((user) => !query.role || user.role === query.role)
     .filter((user) => {
       if (!search) {
         return true;
@@ -913,7 +914,32 @@ app.get("/api/admin/users", async (request) => {
     .sort(descCreated)
     .slice(0, query.limit)
     .map(withoutPassword);
-  return envelope(request, { users });
+  return envelope(request, { users, total: data.users.length });
+});
+
+app.get("/api/admin/users/:userId", async (request) => {
+  await requireAdmin(request);
+  const { userId } = userParamSchema.parse(request.params);
+  const data = await store.read();
+  const user = mustFindUser(data, userId);
+  const account = data.creditAccounts.find((a) => a.userId === userId);
+  const orders = data.orders.filter((o) => o.userId === userId).sort(descCreated).slice(0, 10);
+  const tasks = data.generationTasks.filter((t) => t.userId === userId).sort(descCreated).slice(0, 10);
+  const images = data.generatedImages.filter((img) => img.userId === userId).length;
+
+  return envelope(request, {
+    user: withoutPassword(user),
+    account,
+    stats: {
+      totalOrders: data.orders.filter((o) => o.userId === userId).length,
+      paidOrders: data.orders.filter((o) => o.userId === userId && o.status === "PAID").length,
+      totalTasks: data.generationTasks.filter((t) => t.userId === userId).length,
+      succeededTasks: data.generationTasks.filter((t) => t.userId === userId && t.status === "SUCCEEDED").length,
+      totalImages: images
+    },
+    recentOrders: orders,
+    recentTasks: tasks
+  });
 });
 
 app.patch("/api/admin/users/:userId/status", async (request) => {
@@ -1203,6 +1229,7 @@ const paginationSchema = z.object({
 });
 
 const userStatusSchema = z.enum(["ACTIVE", "SUSPENDED", "DELETED"]);
+const userRoleSchema = z.enum(["USER", "ADMIN"]);
 const taskStatusSchema = z.enum(["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"]);
 const imageVisibilitySchema = z.enum(["PRIVATE", "PUBLIC", "HIDDEN"]);
 const orderStatusSchema = z.enum(["PENDING", "PAID", "CANCELED", "REFUNDED", "CLOSED"]);
@@ -1213,6 +1240,7 @@ const taskQuerySchema = paginationSchema.extend({
 
 const adminUserQuerySchema = paginationSchema.extend({
   status: userStatusSchema.optional(),
+  role: userRoleSchema.optional(),
   search: z.string().trim().max(120).optional()
 });
 
