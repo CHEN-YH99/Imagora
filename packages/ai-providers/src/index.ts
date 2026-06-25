@@ -108,12 +108,100 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   }
 }
 
+/**
+ * Stability AI Provider (Stable Diffusion) - 骨架占位
+ *
+ * 使用前需要配置环境变量：
+ * - STABILITY_API_KEY: Stability AI API 密钥
+ * - STABILITY_ENGINE: 引擎版本（默认 stable-diffusion-xl-1024-v1-0）
+ * - STABILITY_BASE_URL: API 地址（默认 https://api.stability.ai）
+ */
+export class StabilityAiProvider implements ImageGenerationProvider {
+  readonly name = "stability";
+  readonly modelName = process.env.STABILITY_ENGINE ?? "stable-diffusion-xl-1024-v1-0";
+  private readonly apiKey = requiredEnv("STABILITY_API_KEY");
+  private readonly baseUrl = process.env.STABILITY_BASE_URL ?? "https://api.stability.ai";
+  private readonly timeoutMs = envNumber("STABILITY_TIMEOUT_MS", 120_000);
+
+  async generateImage(_input: GenerateImageInput): Promise<GenerateImageResult> {
+    // TODO: 实现 Stability AI 图片生成
+    // 参考文档: https://platform.stability.ai/docs/api-reference
+    throw new Error(
+      "StabilityAiProvider not implemented yet. Install SDK and implement image generation:\n" +
+        `  API: ${this.baseUrl}, Engine: ${this.modelName}, Timeout: ${this.timeoutMs}ms\n` +
+        "  Reference: https://platform.stability.ai/docs/api-reference#tag/v1generation"
+    );
+  }
+}
+
+/**
+ * Midjourney Provider (通过第三方 API) - 骨架占位
+ *
+ * 使用前需要配置环境变量：
+ * - MIDJOURNEY_API_KEY: Midjourney API 密钥
+ * - MIDJOURNEY_BASE_URL: 第三方 API 地址（如 https://api.midjourney.com）
+ * - MIDJOURNEY_TIMEOUT_MS: 超时时间（默认 300000ms / 5分钟）
+ *
+ * 注意：Midjourney 官方没有直接 API，需要使用第三方服务或 Discord Bot
+ */
+export class MidjourneyProvider implements ImageGenerationProvider {
+  readonly name = "midjourney";
+  readonly modelName = "midjourney-v6";
+  private readonly apiKey = requiredEnv("MIDJOURNEY_API_KEY");
+  private readonly baseUrl = requiredEnv("MIDJOURNEY_BASE_URL");
+  private readonly timeoutMs = envNumber("MIDJOURNEY_TIMEOUT_MS", 300_000);
+
+  async generateImage(_input: GenerateImageInput): Promise<GenerateImageResult> {
+    // TODO: 实现 Midjourney 图片生成
+    // Midjourney 生成通常需要轮询，因为生成时间较长
+    throw new Error(
+      "MidjourneyProvider not implemented yet. Implement via third-party API:\n" +
+        `  API: ${this.baseUrl}, Timeout: ${this.timeoutMs}ms\n` +
+        "  Note: Midjourney requires polling for completion. Consider using a queue-based approach."
+    );
+  }
+}
+
+/**
+ * 阿里云通义万相 Provider - 骨架占位
+ *
+ * 使用前需要配置环境变量：
+ * - ALIYUN_ACCESS_KEY_ID: 阿里云 Access Key ID
+ * - ALIYUN_ACCESS_KEY_SECRET: 阿里云 Access Key Secret
+ * - ALIYUN_WANX_ENDPOINT: 通义万相 API 端点（默认 wanx.cn-beijing.aliyuncs.com）
+ * - ALIYUN_WANX_MODEL: 模型版本（默认 wanx-v1）
+ */
+export class AliyunWanxProvider implements ImageGenerationProvider {
+  readonly name = "aliyun-wanx";
+  readonly modelName = process.env.ALIYUN_WANX_MODEL ?? "wanx-v1";
+  private readonly accessKeyId = requiredEnv("ALIYUN_ACCESS_KEY_ID");
+  private readonly accessKeySecret = requiredEnv("ALIYUN_ACCESS_KEY_SECRET");
+  private readonly endpoint = process.env.ALIYUN_WANX_ENDPOINT ?? "wanx.cn-beijing.aliyuncs.com";
+  private readonly timeoutMs = envNumber("ALIYUN_WANX_TIMEOUT_MS", 120_000);
+
+  async generateImage(_input: GenerateImageInput): Promise<GenerateImageResult> {
+    // TODO: 实现阿里云通义万相图片生成
+    // 参考文档: https://help.aliyun.com/zh/dashscope/developer-reference/api-details-9
+    throw new Error(
+      "AliyunWanxProvider not implemented yet. Install @alicloud/wanx SDK:\n" +
+        `  Endpoint: ${this.endpoint}, Model: ${this.modelName}, Timeout: ${this.timeoutMs}ms\n` +
+        "  Reference: https://help.aliyun.com/zh/dashscope/developer-reference/api-details-9"
+    );
+  }
+}
+
 export function createImageGenerationProvider(name = process.env.AI_PROVIDER ?? "mock"): ImageGenerationProvider {
   switch (name) {
     case "mock":
       return new MockImageGenerationProvider();
     case "openai":
       return new OpenAiImageGenerationProvider();
+    case "stability":
+      return new StabilityAiProvider();
+    case "midjourney":
+      return new MidjourneyProvider();
+    case "aliyun-wanx":
+      return new AliyunWanxProvider();
     default:
       throw new Error(`Unsupported AI provider: ${name}`);
   }
