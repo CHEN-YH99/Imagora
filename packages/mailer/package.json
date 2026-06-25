@@ -1,0 +1,17 @@
+{
+  "name": "@imagora/mailer",
+  "version": "0.1.0",
+  "description": "Imagora email service provider abstraction",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.8.4"
+  }
+}

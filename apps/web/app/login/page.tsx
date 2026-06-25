@@ -57,6 +57,11 @@ export default function LoginPage() {
               type="password"
             />
           </label>
+          <div className="flex justify-end">
+            <Link className="text-sm text-white/56 hover:text-mint" href="/forgot-password">
+              忘记密码？
+            </Link>
+          </div>
           {message ? (
             <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p>
           ) : null}

@@ -3,6 +3,7 @@ import { createConnection } from "node:net";
 import cors from "@fastify/cors";
 import pino from "pino";
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
+import { createMailer } from "@imagora/mailer";
 import { createPaymentProvider, type VerifiedPaymentEvent } from "@imagora/payments";
 import { createGenerationQueue } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
@@ -38,6 +39,7 @@ const isProduction = process.env.NODE_ENV === "production";
 validateProductionConfig();
 
 const store = createStore();
+const mailer = createMailer();
 const safetyProvider = createSafetyProvider();
 const paymentProvider = createPaymentProvider();
 const generationQueue = createGenerationQueue();
@@ -309,7 +311,8 @@ app.post("/api/auth/request-password-reset", async (request) => {
 
   return store.update(async (data) => {
     const now = new Date().toISOString();
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24 hours
+    const ttlMinutes = envNumber("PASSWORD_RESET_TOKEN_TTL_MINUTES", 30);
+    const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
     const resetToken = randomUUID();
     const tokenHash = createHash("sha256").update(resetToken).digest("hex");
 
@@ -328,12 +331,25 @@ app.post("/api/auth/request-password-reset", async (request) => {
       createdAt: now
     });
 
-    // TODO: Send email with reset link containing resetToken
-    // SECURITY: never log the raw reset token in production — it grants password-change ability.
-    request.log.info({ userId: user.id }, "Password reset requested");
-    if (!isProduction) {
-      // Dev-only: surface the token locally since email delivery is not wired up yet.
-      request.log.debug({ userId: user.id, resetToken }, "[DEV] password reset token (do not enable in production)");
+    // Send reset email
+    const resetUrl = `${envString("WEB_ORIGIN", "http://127.0.0.1:3100")}/reset-password?token=${resetToken}`;
+    try {
+      await mailer.sendEmail({
+        to: user.email,
+        subject: "重置您的 Imagora 密码",
+        text: `您好，\n\n请点击以下链接重置您的密码（${ttlMinutes} 分钟内有效）：\n\n${resetUrl}\n\n如果您没有请求重置密码，请忽略此邮件。\n\nImagora 团队`,
+        html: `
+          <p>您好，</p>
+          <p>请点击以下链接重置您的密码（${ttlMinutes} 分钟内有效）：</p>
+          <p><a href="${resetUrl}">${resetUrl}</a></p>
+          <p>如果您没有请求重置密码，请忽略此邮件。</p>
+          <p>Imagora 团队</p>
+        `
+      });
+      request.log.info({ userId: user.id }, "Password reset email sent");
+    } catch (error) {
+      request.log.error({ userId: user.id, error }, "Failed to send password reset email");
+      // Don't throw - continue silently to prevent email enumeration
     }
 
     return envelope(request, { ok: true, message: "If email exists, reset link will be sent" });
@@ -1257,6 +1273,15 @@ const safetyRulePatchSchema = safetyRuleSchema.partial();
 
 function envelope<T>(request: FastifyRequest, data: T): ApiEnvelope<T> {
   return { data, requestId: request.requestId ?? randomUUID() };
+}
+
+function envString(name: string, fallback: string): string {
+  return process.env[name] ?? fallback;
+}
+
+function envNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 function uploadBodyLimitBytes(): number {
@@ -2415,11 +2440,6 @@ function countBy<T>(items: T[], selectKey: (item: T) => string): Record<string, 
 
 function pathOnly(url: string): string {
   return url.split("?")[0] ?? url;
-}
-
-function envNumber(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 function envBool(name: string, fallback: boolean): boolean {

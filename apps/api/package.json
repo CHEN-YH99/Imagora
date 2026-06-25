@@ -13,6 +13,7 @@
   "dependencies": {
     "@fastify/cors": "^10.0.2",
     "@imagora/database": "0.1.0",
+    "@imagora/mailer": "0.1.0",
     "@imagora/payments": "0.1.0",
     "@imagora/queue": "0.1.0",
     "@imagora/safety": "0.1.0",
