@@ -122,12 +122,97 @@ export class StripePaymentProvider implements PaymentProvider {
   }
 }
 
+/**
+ * 微信支付 Provider - 骨架占位
+ *
+ * 使用前需要配置环境变量：
+ * - WECHAT_PAY_APP_ID: 微信公众号/小程序 AppID
+ * - WECHAT_PAY_MCH_ID: 商户号
+ * - WECHAT_PAY_API_KEY: API 密钥（v2）或证书序列号（v3）
+ * - WECHAT_PAY_API_VERSION: API 版本（默认 v3）
+ * - WECHAT_PAY_NOTIFY_URL: 支付结果通知地址
+ */
+export class WechatPayProvider implements PaymentProvider {
+  readonly name = "wechat";
+  private readonly appId = requiredEnv("WECHAT_PAY_APP_ID");
+  private readonly mchId = requiredEnv("WECHAT_PAY_MCH_ID");
+  private readonly apiKey = requiredEnv("WECHAT_PAY_API_KEY");
+  private readonly apiVersion = process.env.WECHAT_PAY_API_VERSION ?? "v3";
+  private readonly notifyUrl = requiredEnv("WECHAT_PAY_NOTIFY_URL");
+
+  async createPayment(_input: CreatePaymentInput): Promise<CreatePaymentResult> {
+    // TODO: 实现微信支付统一下单
+    // V3 API 参考: https://pay.weixin.qq.com/wiki/doc/apiv3/apis/chapter3_1_1.shtml
+    throw new Error(
+      "WechatPayProvider not implemented yet. Install wechatpay-node-v3 SDK:\n" +
+        `  AppID: ${this.appId}, MchID: ${this.mchId}, Version: ${this.apiVersion}\n` +
+        "  Reference: https://pay.weixin.qq.com/wiki/doc/apiv3/open/pay/chapter2_1.shtml"
+    );
+  }
+
+  async verifyWebhook(_payload: unknown, _signature: string | undefined): Promise<VerifiedPaymentEvent> {
+    // TODO: 实现微信支付回调验证
+    // V3 需要验证签名和解密报文
+    throw new Error(
+      "WechatPayProvider webhook verification not implemented yet.\n" +
+        `  Notify URL: ${this.notifyUrl}\n` +
+        "  V3 signature verification: https://pay.weixin.qq.com/wiki/doc/apiv3/wechatpay/wechatpay4_1.shtml"
+    );
+  }
+}
+
+/**
+ * 支付宝 Provider - 骨架占位
+ *
+ * 使用前需要配置环境变量：
+ * - ALIPAY_APP_ID: 应用 APPID
+ * - ALIPAY_PRIVATE_KEY: 应用私钥（RSA2）
+ * - ALIPAY_PUBLIC_KEY: 支付宝公钥
+ * - ALIPAY_GATEWAY: 支付宝网关地址（默认 https://openapi.alipay.com/gateway.do）
+ * - ALIPAY_NOTIFY_URL: 异步通知地址
+ * - ALIPAY_RETURN_URL: 同步跳转地址
+ */
+export class AlipayProvider implements PaymentProvider {
+  readonly name = "alipay";
+  private readonly appId = requiredEnv("ALIPAY_APP_ID");
+  private readonly privateKey = requiredEnv("ALIPAY_PRIVATE_KEY");
+  private readonly publicKey = requiredEnv("ALIPAY_PUBLIC_KEY");
+  private readonly gateway = process.env.ALIPAY_GATEWAY ?? "https://openapi.alipay.com/gateway.do";
+  private readonly notifyUrl = requiredEnv("ALIPAY_NOTIFY_URL");
+  private readonly returnUrl = requiredEnv("ALIPAY_RETURN_URL");
+
+  async createPayment(_input: CreatePaymentInput): Promise<CreatePaymentResult> {
+    // TODO: 实现支付宝电脑网站支付或手机网站支付
+    // alipay.trade.page.pay (电脑) 或 alipay.trade.wap.pay (手机)
+    throw new Error(
+      "AlipayProvider not implemented yet. Install alipay-sdk:\n" +
+        `  AppID: ${this.appId}, Gateway: ${this.gateway}\n` +
+        `  NotifyURL: ${this.notifyUrl}, ReturnURL: ${this.returnUrl}\n` +
+        "  Reference: https://opendocs.alipay.com/open/270/105898"
+    );
+  }
+
+  async verifyWebhook(_payload: unknown, _signature: string | undefined): Promise<VerifiedPaymentEvent> {
+    // TODO: 实现支付宝异步通知验证
+    // 需要验证 RSA2 签名
+    throw new Error(
+      "AlipayProvider webhook verification not implemented yet.\n" +
+        "  Signature algorithm: RSA2\n" +
+        "  Reference: https://opendocs.alipay.com/open/270/105902"
+    );
+  }
+}
+
 export function createPaymentProvider(name = process.env.PAYMENT_PROVIDER ?? "mock"): PaymentProvider {
   switch (name) {
     case "mock":
       return new MockPaymentProvider();
     case "stripe":
       return new StripePaymentProvider();
+    case "wechat":
+      return new WechatPayProvider();
+    case "alipay":
+      return new AlipayProvider();
     default:
       throw new Error(`Unsupported payment provider: ${name}`);
   }

@@ -166,6 +166,98 @@ export class S3CompatibleObjectStorage implements ObjectStorage {
   }
 }
 
+/**
+ * 阿里云 OSS Provider - 骨架占位
+ *
+ * 使用前需要配置环境变量：
+ * - ALIYUN_OSS_ACCESS_KEY_ID: 阿里云 Access Key ID
+ * - ALIYUN_OSS_ACCESS_KEY_SECRET: 阿里云 Access Key Secret
+ * - ALIYUN_OSS_REGION: OSS 区域（如 oss-cn-hangzhou）
+ * - ALIYUN_OSS_BUCKET: OSS Bucket 名称
+ * - ALIYUN_OSS_ENDPOINT: OSS 端点（可选，默认根据 region 生成）
+ */
+export class AliyunOssStorage implements ObjectStorage {
+  readonly name = "aliyun-oss";
+  private readonly accessKeyId = requiredEnv("ALIYUN_OSS_ACCESS_KEY_ID");
+  private readonly accessKeySecret = requiredEnv("ALIYUN_OSS_ACCESS_KEY_SECRET");
+  private readonly region = requiredEnv("ALIYUN_OSS_REGION");
+  private readonly bucket = requiredEnv("ALIYUN_OSS_BUCKET");
+  private readonly endpoint = process.env.ALIYUN_OSS_ENDPOINT ?? `https://${this.bucket}.${this.region}.aliyuncs.com`;
+
+  async putObject(_input: PutObjectInput): Promise<PutObjectResult> {
+    // TODO: 实现阿里云 OSS 文件上传
+    // 参考文档: https://help.aliyun.com/document_detail/111265.html
+    throw new Error(
+      "AliyunOssStorage not implemented yet. Install ali-oss SDK:\n" +
+        `  Region: ${this.region}, Bucket: ${this.bucket}, Endpoint: ${this.endpoint}\n` +
+        "  Reference: https://help.aliyun.com/document_detail/111265.html"
+    );
+  }
+
+  async getSignedUrl(_key: string, _expiresInSeconds: number): Promise<string> {
+    // TODO: 实现阿里云 OSS 签名 URL
+    // 参考文档: https://help.aliyun.com/document_detail/111350.html
+    throw new Error(
+      "AliyunOssStorage signed URL not implemented yet.\n" +
+        "  Reference: https://help.aliyun.com/document_detail/111350.html"
+    );
+  }
+
+  async deleteObject(_key: string): Promise<void> {
+    // TODO: 实现阿里云 OSS 文件删除
+    // 参考文档: https://help.aliyun.com/document_detail/111266.html
+    throw new Error(
+      "AliyunOssStorage delete not implemented yet.\n" +
+        "  Reference: https://help.aliyun.com/document_detail/111266.html"
+    );
+  }
+}
+
+/**
+ * 腾讯云 COS Provider - 骨架占位
+ *
+ * 使用前需要配置环境变量：
+ * - TENCENT_COS_SECRET_ID: 腾讯云 SecretId
+ * - TENCENT_COS_SECRET_KEY: 腾讯云 SecretKey
+ * - TENCENT_COS_REGION: COS 区域（如 ap-guangzhou）
+ * - TENCENT_COS_BUCKET: COS Bucket 名称（格式：bucket-appid）
+ */
+export class TencentCosStorage implements ObjectStorage {
+  readonly name = "tencent-cos";
+  private readonly secretId = requiredEnv("TENCENT_COS_SECRET_ID");
+  private readonly secretKey = requiredEnv("TENCENT_COS_SECRET_KEY");
+  private readonly region = requiredEnv("TENCENT_COS_REGION");
+  private readonly bucket = requiredEnv("TENCENT_COS_BUCKET");
+
+  async putObject(_input: PutObjectInput): Promise<PutObjectResult> {
+    // TODO: 实现腾讯云 COS 文件上传
+    // 参考文档: https://cloud.tencent.com/document/product/436/64960
+    throw new Error(
+      "TencentCosStorage not implemented yet. Install cos-nodejs-sdk-v5:\n" +
+        `  Region: ${this.region}, Bucket: ${this.bucket}\n` +
+        "  Reference: https://cloud.tencent.com/document/product/436/64960"
+    );
+  }
+
+  async getSignedUrl(_key: string, _expiresInSeconds: number): Promise<string> {
+    // TODO: 实现腾讯云 COS 签名 URL
+    // 参考文档: https://cloud.tencent.com/document/product/436/64963
+    throw new Error(
+      "TencentCosStorage signed URL not implemented yet.\n" +
+        "  Reference: https://cloud.tencent.com/document/product/436/64963"
+    );
+  }
+
+  async deleteObject(_key: string): Promise<void> {
+    // TODO: 实现腾讯云 COS 文件删除
+    // 参考文档: https://cloud.tencent.com/document/product/436/64961
+    throw new Error(
+      "TencentCosStorage delete not implemented yet.\n" +
+        "  Reference: https://cloud.tencent.com/document/product/436/64961"
+    );
+  }
+}
+
 export function createObjectStorage(name = process.env.STORAGE_PROVIDER ?? "inline"): ObjectStorage {
   switch (name) {
     case "inline":
@@ -173,6 +265,10 @@ export function createObjectStorage(name = process.env.STORAGE_PROVIDER ?? "inli
     case "s3":
     case "r2":
       return new S3CompatibleObjectStorage();
+    case "aliyun-oss":
+      return new AliyunOssStorage();
+    case "tencent-cos":
+      return new TencentCosStorage();
     default:
       throw new Error(`Unsupported storage provider: ${name}`);
   }
