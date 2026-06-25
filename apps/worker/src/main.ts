@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import sharp from "sharp";
 import { createImageGenerationProvider } from "@imagora/ai-providers";
 import { createStore } from "@imagora/database";
 import { startGenerationWorker, type GenerationQueueJob } from "@imagora/queue";
@@ -162,11 +163,12 @@ async function createImage(
     bodyEncoding: isBase64Mime(mimeType) ? "base64" : "utf8",
     mimeType
   });
+  const thumbBody = await thumbnailBody(task, body, mimeType);
   await storage.putObject({
     key: thumbnailKey,
-    body: thumbnailBody(task, body, mimeType),
-    bodyEncoding: isBase64Mime(mimeType) ? "base64" : "utf8",
-    mimeType
+    body: thumbBody,
+    bodyEncoding: "base64", // 缩略图统一使用 JPEG base64
+    mimeType: "image/jpeg"
   });
   return {
     id,
@@ -186,13 +188,34 @@ async function createImage(
   };
 }
 
-function thumbnailBody(task: GenerationTask, body: string, mimeType: string): string {
-  if (mimeType !== "image/svg+xml") {
-    return body;
+async function thumbnailBody(task: GenerationTask, body: string, mimeType: string): Promise<string> {
+  // SVG: 简单调整尺寸
+  if (mimeType === "image/svg+xml") {
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 ${task.width} ${task.height}">${body
+      .replace(/^<svg[^>]*>/, "")
+      .replace(/<\/svg>$/, "")}</svg>`;
   }
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 ${task.width} ${task.height}">${body
-    .replace(/^<svg[^>]*>/, "")
-    .replace(/<\/svg>$/, "")}</svg>`;
+
+  // 位图格式：使用 sharp 生成真实缩略图
+  if (isBase64Mime(mimeType)) {
+    try {
+      const buffer = Buffer.from(body, "base64");
+      const thumbnailBuffer = await sharp(buffer)
+        .resize(320, 320, {
+          fit: "inside",
+          withoutEnlargement: true
+        })
+        .jpeg({ quality: 80 })
+        .toBuffer();
+      return thumbnailBuffer.toString("base64");
+    } catch (error) {
+      console.error("Failed to generate thumbnail, using original image:", error);
+      return body;
+    }
+  }
+
+  // 其他格式：直接返回原图
+  return body;
 }
 
 function isBase64Mime(mimeType: string): boolean {
