@@ -18,6 +18,7 @@ export interface User {
   avatarUrl: string | null;
   role: UserRole;
   status: UserStatus;
+  emailVerifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
   lastLoginAt: string | null;
@@ -30,8 +31,18 @@ export interface PublicUser {
   avatarUrl: string | null;
   role: UserRole;
   status: UserStatus;
+  emailVerifiedAt: string | null;
   createdAt: string;
   lastLoginAt: string | null;
+}
+
+export interface EmailVerificationToken {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  expiresAt: string;
+  usedAt: string | null;
+  createdAt: string;
 }
 
 export interface Session {
@@ -214,6 +225,7 @@ export interface StoreData {
   users: User[];
   sessions: Session[];
   passwordResetTokens: PasswordResetToken[];
+  emailVerificationTokens: EmailVerificationToken[];
   creditAccounts: UserCreditAccount[];
   creditLedgerEntries: CreditLedgerEntry[];
   generationTasks: GenerationTask[];
@@ -318,6 +330,7 @@ export function publicUser(user: User): PublicUser {
     avatarUrl: user.avatarUrl,
     role: user.role,
     status: user.status,
+    emailVerifiedAt: user.emailVerifiedAt,
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt
   };

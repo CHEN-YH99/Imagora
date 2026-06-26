@@ -85,11 +85,13 @@ model User {
   avatarUrl      String?             @map("avatar_url")
   role           UserRole            @default(USER)
   status         UserStatus          @default(ACTIVE)
+  emailVerifiedAt DateTime?          @map("email_verified_at")
   createdAt      DateTime            @default(now()) @map("created_at")
   updatedAt      DateTime            @updatedAt @map("updated_at")
   lastLoginAt    DateTime?           @map("last_login_at")
   sessions       Session[]
   passwordResetTokens PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
   creditAccount  UserCreditAccount?
   ledgerEntries  CreditLedgerEntry[]
   tasks          GenerationTask[]
@@ -101,6 +103,19 @@ model User {
   adminAuditLogs AdminAuditLog[]     @relation("AdminAuditActor")
 
   @@map("users")
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("email_verification_tokens")
 }
 
 model Session {

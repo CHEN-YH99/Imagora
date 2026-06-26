@@ -118,19 +118,52 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
  */
 export class StabilityAiProvider implements ImageGenerationProvider {
   readonly name = "stability";
-  readonly modelName = process.env.STABILITY_ENGINE ?? "stable-diffusion-xl-1024-v1-0";
+  readonly modelName = process.env.STABILITY_ENGINE ?? "core";
   private readonly apiKey = requiredEnv("STABILITY_API_KEY");
   private readonly baseUrl = process.env.STABILITY_BASE_URL ?? "https://api.stability.ai";
   private readonly timeoutMs = envNumber("STABILITY_TIMEOUT_MS", 120_000);
 
-  async generateImage(_input: GenerateImageInput): Promise<GenerateImageResult> {
-    // TODO: 实现 Stability AI 图片生成
-    // 参考文档: https://platform.stability.ai/docs/api-reference
-    throw new Error(
-      "StabilityAiProvider not implemented yet. Install SDK and implement image generation:\n" +
-        `  API: ${this.baseUrl}, Engine: ${this.modelName}, Timeout: ${this.timeoutMs}ms\n` +
-        "  Reference: https://platform.stability.ai/docs/api-reference#tag/v1generation"
-    );
+  async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
+    const endpoint = `${this.baseUrl}/v2beta/stable-image/generate/${this.modelName}`;
+    const images: ProviderImage[] = [];
+    for (let index = 0; index < input.quantity; index += 1) {
+      const form = new FormData();
+      form.append("prompt", buildPrompt(input));
+      form.append("aspect_ratio", stabilityAspectRatio(input.aspectRatio));
+      form.append("output_format", "png");
+      if (input.negativePrompt) {
+        form.append("negative_prompt", input.negativePrompt);
+      }
+      const response = await fetch(endpoint, {
+        method: "POST",
+        signal: AbortSignal.timeout(this.timeoutMs),
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          Accept: "application/json"
+        },
+        body: form
+      });
+      const payload = (await response.json().catch(() => ({}))) as StabilityImageResponse;
+      if (!response.ok) {
+        const message = payload.errors?.[0] ?? payload.name ?? `Stability AI failed with ${response.status}`;
+        throw new Error(message);
+      }
+      if (!payload.image) {
+        throw new Error("Stability AI response did not include image data");
+      }
+      images.push({
+        bytes: payload.image,
+        mimeType: "image/png",
+        width: input.width,
+        height: input.height,
+        index
+      });
+    }
+    return {
+      providerRequestId: `stability_${input.taskId}`,
+      images,
+      raw: { provider: this.name, model: this.modelName }
+    };
   }
 }
 
@@ -207,10 +240,57 @@ export function createImageGenerationProvider(name = process.env.AI_PROVIDER ?? 
   }
 }
 
+export interface ProviderMetadata {
+  name: string;
+  modelName: string;
+}
+
+export function getActiveProviderMetadata(name = process.env.AI_PROVIDER ?? "mock"): ProviderMetadata {
+  switch (name) {
+    case "mock":
+      return { name: "mock", modelName: "imagora-mock-v1" };
+    case "openai":
+      return { name: "openai", modelName: process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-1" };
+    case "stability":
+      return { name: "stability", modelName: process.env.STABILITY_ENGINE ?? "stable-diffusion-xl-1024-v1-0" };
+    case "midjourney":
+      return { name: "midjourney", modelName: "midjourney-v6" };
+    case "aliyun-wanx":
+      return { name: "aliyun-wanx", modelName: process.env.ALIYUN_WANX_MODEL ?? "wanx-v1" };
+    default:
+      throw new Error(`Unsupported AI provider: ${name}`);
+  }
+}
+
 interface OpenAiImageResponse {
   id?: string;
   data?: Array<{ b64_json?: string }>;
   error?: { message?: string };
+}
+
+interface StabilityImageResponse {
+  image?: string;
+  finish_reason?: string;
+  seed?: number;
+  name?: string;
+  errors?: string[];
+}
+
+function stabilityAspectRatio(aspectRatio: AspectRatio): string {
+  switch (aspectRatio) {
+    case "1:1":
+      return "1:1";
+    case "3:4":
+      return "3:4";
+    case "4:3":
+      return "4:3";
+    case "9:16":
+      return "9:16";
+    case "16:9":
+      return "16:9";
+    default:
+      return "1:1";
+  }
 }
 
 function buildPrompt(input: GenerateImageInput): string {

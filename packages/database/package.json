@@ -16,7 +16,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prisma:validate": "node scripts/prisma-cli.mjs validate",
     "prisma:generate": "node scripts/prisma-cli.mjs generate",
-    "prisma:push": "node scripts/prisma-cli.mjs db push"
+    "prisma:push": "node scripts/prisma-cli.mjs db push",
+    "prisma:migrate-deploy": "node scripts/prisma-cli.mjs migrate deploy",
+    "prisma:migrate-dev": "node scripts/prisma-cli.mjs migrate dev",
+    "prisma:migrate-reset": "node scripts/prisma-cli.mjs migrate reset --force"
   },
   "dependencies": {
     "@imagora/shared": "0.1.0",

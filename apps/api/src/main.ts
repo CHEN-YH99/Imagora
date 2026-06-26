@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import cors from "@fastify/cors";
 import pino from "pino";
+import { getActiveProviderMetadata } from "@imagora/ai-providers";
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
 import { createMailer } from "@imagora/mailer";
 import { createPaymentProvider, type VerifiedPaymentEvent } from "@imagora/payments";
@@ -44,6 +45,7 @@ const safetyProvider = createSafetyProvider();
 const paymentProvider = createPaymentProvider();
 const generationQueue = createGenerationQueue();
 const storage = createObjectStorage();
+const providerMetadata = getActiveProviderMetadata();
 
 const logger = pino({
   level: process.env.LOG_LEVEL ?? (isProduction ? "info" : "debug"),
@@ -499,8 +501,8 @@ app.post("/api/generation/tasks", async (request, reply) => {
       height: dimension.height,
       quantity: input.quantity,
       quality: input.quality,
-      modelProvider: "mock",
-      modelName: "imagora-mock-v1",
+      modelProvider: providerMetadata.name,
+      modelName: providerMetadata.modelName,
       status: "PENDING",
       creditCost: cost,
       failureCode: null,

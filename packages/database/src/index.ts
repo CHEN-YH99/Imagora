@@ -107,6 +107,7 @@ export class PrismaStore implements Store {
       users,
       sessions,
       passwordResetTokens,
+      emailVerificationTokens,
       creditAccounts,
       creditLedgerEntries,
       generationTasks,
@@ -123,6 +124,7 @@ export class PrismaStore implements Store {
       this.prisma.user.findMany(),
       this.prisma.session.findMany(),
       this.prisma.passwordResetToken.findMany(),
+      this.prisma.emailVerificationToken.findMany(),
       this.prisma.userCreditAccount.findMany(),
       this.prisma.creditLedgerEntry.findMany(),
       this.prisma.generationTask.findMany(),
@@ -146,6 +148,7 @@ export class PrismaStore implements Store {
         avatarUrl: user.avatarUrl,
         role: user.role,
         status: user.status,
+        emailVerifiedAt: user.emailVerifiedAt?.toISOString() ?? null,
         createdAt: user.createdAt.toISOString(),
         updatedAt: user.updatedAt.toISOString(),
         lastLoginAt: user.lastLoginAt?.toISOString() ?? null
@@ -157,6 +160,14 @@ export class PrismaStore implements Store {
         expiresAt: session.expiresAt.toISOString()
       })),
       passwordResetTokens: passwordResetTokens.map((token) => ({
+        id: token.id,
+        userId: token.userId,
+        tokenHash: token.tokenHash,
+        expiresAt: token.expiresAt.toISOString(),
+        usedAt: token.usedAt?.toISOString() ?? null,
+        createdAt: token.createdAt.toISOString()
+      })),
+      emailVerificationTokens: emailVerificationTokens.map((token) => ({
         id: token.id,
         userId: token.userId,
         tokenHash: token.tokenHash,
@@ -329,6 +340,7 @@ export class PrismaStore implements Store {
       await tx.creditLedgerEntry.deleteMany();
       await tx.userCreditAccount.deleteMany();
       await tx.passwordResetToken.deleteMany();
+      await tx.emailVerificationToken.deleteMany();
       await tx.session.deleteMany();
       await tx.plan.deleteMany();
       await tx.user.deleteMany();
@@ -343,6 +355,7 @@ export class PrismaStore implements Store {
             avatarUrl: user.avatarUrl,
             role: user.role,
             status: user.status,
+            emailVerifiedAt: user.emailVerifiedAt ? toDate(user.emailVerifiedAt) : null,
             createdAt: toDate(user.createdAt),
             updatedAt: toDate(user.updatedAt),
             lastLoginAt: user.lastLoginAt ? toDate(user.lastLoginAt) : null
@@ -379,6 +392,18 @@ export class PrismaStore implements Store {
       if (data.passwordResetTokens.length) {
         await tx.passwordResetToken.createMany({
           data: data.passwordResetTokens.map((token) => ({
+            id: token.id,
+            userId: token.userId,
+            tokenHash: token.tokenHash,
+            expiresAt: toDate(token.expiresAt),
+            usedAt: token.usedAt ? toDate(token.usedAt) : null,
+            createdAt: toDate(token.createdAt)
+          }))
+        });
+      }
+      if (data.emailVerificationTokens.length) {
+        await tx.emailVerificationToken.createMany({
+          data: data.emailVerificationTokens.map((token) => ({
             id: token.id,
             userId: token.userId,
             tokenHash: token.tokenHash,
@@ -629,6 +654,7 @@ export function createSeedData(): StoreData {
         avatarUrl: null,
         role: "ADMIN",
         status: "ACTIVE",
+        emailVerifiedAt: now,
         createdAt: now,
         updatedAt: now,
         lastLoginAt: null
@@ -641,6 +667,7 @@ export function createSeedData(): StoreData {
         avatarUrl: null,
         role: "USER",
         status: "ACTIVE",
+        emailVerifiedAt: now,
         createdAt: now,
         updatedAt: now,
         lastLoginAt: null
@@ -648,6 +675,7 @@ export function createSeedData(): StoreData {
     ],
     sessions: [],
     passwordResetTokens: [],
+    emailVerificationTokens: [],
     creditAccounts: [
       { userId: adminId, balance: 9999, totalEarned: 9999, totalSpent: 0, updatedAt: now },
       { userId: demoId, balance: 1240, totalEarned: 1240, totalSpent: 0, updatedAt: now }
@@ -682,6 +710,7 @@ function createBootstrapAdminData(email: string, password: string): StoreData {
         avatarUrl: null,
         role: "ADMIN",
         status: "ACTIVE",
+        emailVerifiedAt: now,
         createdAt: now,
         updatedAt: now,
         lastLoginAt: null
@@ -689,6 +718,7 @@ function createBootstrapAdminData(email: string, password: string): StoreData {
     ],
     sessions: [],
     passwordResetTokens: [],
+    emailVerificationTokens: [],
     creditAccounts: [{ userId: adminId, balance: 9999, totalEarned: 9999, totalSpent: 0, updatedAt: now }],
     creditLedgerEntries: [seedLedger(adminId, 9999, "Initial admin credits", now)],
     generationTasks: [],
@@ -819,6 +849,7 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
     users: data.users ?? [],
     sessions: data.sessions ?? [],
     passwordResetTokens: data.passwordResetTokens ?? [],
+    emailVerificationTokens: data.emailVerificationTokens ?? [],
     creditAccounts: data.creditAccounts ?? [],
     creditLedgerEntries: data.creditLedgerEntries ?? [],
     generationTasks: (data.generationTasks ?? []).map((task) => ({

@@ -9,6 +9,41 @@ export interface Mailer {
   sendEmail(input: SendEmailInput): Promise<void>;
 }
 
+export interface VerificationEmailInput {
+  to: string;
+  nickname: string;
+  verifyUrl: string;
+}
+
+export function buildVerificationEmail(input: VerificationEmailInput): SendEmailInput {
+  const { to, nickname, verifyUrl } = input;
+  const subject = "验证你的 Imagora 邮箱";
+  const text = `你好 ${nickname}，\n\n` +
+    `感谢注册 Imagora。请点击下方链接完成邮箱验证，验证后将自动到账 120 积分：\n` +
+    `${verifyUrl}\n\n` +
+    `链接将在 24 小时后失效。如果不是你本人操作，请忽略本邮件。\n\n— Imagora`;
+  const html = `<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;line-height:1.6;color:#1a1a1a;max-width:560px;margin:0 auto;padding:32px 24px;">
+  <h1 style="font-size:20px;margin:0 0 16px;">你好，${escapeHtml(nickname)}</h1>
+  <p>感谢注册 Imagora。请点击下方按钮完成邮箱验证，验证后将自动到账 <strong>120 积分</strong>。</p>
+  <p style="margin:24px 0;">
+    <a href="${verifyUrl}" style="display:inline-block;padding:10px 20px;background:#0f172a;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">验证邮箱</a>
+  </p>
+  <p style="font-size:13px;color:#666;">如果按钮无法点击，请复制以下链接到浏览器：</p>
+  <p style="font-size:13px;color:#666;word-break:break-all;">${verifyUrl}</p>
+  <p style="font-size:13px;color:#999;margin-top:32px;">链接将在 24 小时后失效。如果不是你本人操作，请忽略本邮件。</p>
+</div>`;
+  return { to, subject, html, text };
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 /**
  * ConsoleMailer - 开发环境用，将邮件内容输出到控制台
  * 生产环境不应使用此实现
