@@ -18,7 +18,8 @@ export interface VerificationEmailInput {
 export function buildVerificationEmail(input: VerificationEmailInput): SendEmailInput {
   const { to, nickname, verifyUrl } = input;
   const subject = "验证你的 Imagora 邮箱";
-  const text = `你好 ${nickname}，\n\n` +
+  const text =
+    `你好 ${nickname}，\n\n` +
     `感谢注册 Imagora。请点击下方链接完成邮箱验证，验证后将自动到账 120 积分：\n` +
     `${verifyUrl}\n\n` +
     `链接将在 24 小时后失效。如果不是你本人操作，请忽略本邮件。\n\n— Imagora`;
@@ -162,8 +163,6 @@ export function createMailer(): Mailer {
     case "aliyun":
       return new AliyunMailer();
     default:
-      throw new Error(
-        `Unknown MAILER_PROVIDER: ${provider}. Valid options: console, smtp, aliyun`
-      );
+      throw new Error(`Unknown MAILER_PROVIDER: ${provider}. Valid options: console, smtp, aliyun`);
   }
 }

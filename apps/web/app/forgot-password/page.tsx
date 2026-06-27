@@ -40,9 +40,7 @@ export default function ForgotPasswordPage() {
           返回登录
         </Link>
         <h1 className="mt-6 text-3xl font-semibold">重置密码</h1>
-        <p className="mt-2 text-sm leading-6 text-white/62">
-          输入您的注册邮箱，我们将发送密码重置链接到您的邮箱。
-        </p>
+        <p className="mt-2 text-sm leading-6 text-white/62">输入您的注册邮箱，我们将发送密码重置链接到您的邮箱。</p>
         <div className="mt-6 space-y-4">
           <label className="block text-sm text-white/70">
             邮箱
@@ -57,9 +55,7 @@ export default function ForgotPasswordPage() {
           {message ? (
             <p
               className={`rounded-2xl border p-3 text-sm ${
-                success
-                  ? "border-mint/40 bg-mint/10 text-mint"
-                  : "border-ember/40 bg-ember/10 text-ember"
+                success ? "border-mint/40 bg-mint/10 text-mint" : "border-ember/40 bg-ember/10 text-ember"
               }`}
             >
               {message}

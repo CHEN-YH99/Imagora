@@ -244,6 +244,7 @@ app.post("/api/auth/register", async (request, reply) => {
       passwordHash: hashPassword(input.password),
       nickname: input.nickname ?? email.split("@")[0] ?? "Creator",
       avatarUrl: null,
+      emailVerifiedAt: null,
       role: "USER",
       status: "ACTIVE",
       createdAt: now,
@@ -925,8 +926,14 @@ app.get("/api/admin/users/:userId", async (request) => {
   const data = await store.read();
   const user = mustFindUser(data, userId);
   const account = data.creditAccounts.find((a) => a.userId === userId);
-  const orders = data.orders.filter((o) => o.userId === userId).sort(descCreated).slice(0, 10);
-  const tasks = data.generationTasks.filter((t) => t.userId === userId).sort(descCreated).slice(0, 10);
+  const orders = data.orders
+    .filter((o) => o.userId === userId)
+    .sort(descCreated)
+    .slice(0, 10);
+  const tasks = data.generationTasks
+    .filter((t) => t.userId === userId)
+    .sort(descCreated)
+    .slice(0, 10);
   const images = data.generatedImages.filter((img) => img.userId === userId).length;
 
   return envelope(request, {

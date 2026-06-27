@@ -3,12 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { LogOut, Sparkles } from "lucide-react";
-import {
-  apiFetch,
-  formatStatusLabel,
-  logout as apiLogout,
-  type User
-} from "../lib/api";
+import { apiFetch, formatStatusLabel, logout as apiLogout, type User } from "../lib/api";
 
 const navItems = [
   { href: "/generate", label: "生成" },

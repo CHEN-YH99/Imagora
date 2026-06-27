@@ -1,0 +1,28 @@
+
+> @imagora/api@0.1.0 dev
+> npm --prefix ../.. run build:packages && tsx --env-file=../../.env src/main.ts
+
+
+> imagora@0.1.0 build:packages
+> npm --workspace packages/shared run build && npm --workspace packages/database run build && npm --workspace packages/ai-providers run build && npm --workspace packages/storage run build && npm --workspace packages/payments run build && npm --workspace packages/safety run build && npm --workspace packages/queue run build
+
+
+> @imagora/shared@0.1.0 build
+> tsc -p tsconfig.json
+
+
+> @imagora/database@0.1.0 build
+> tsc -p tsconfig.json
+
+
+> @imagora/ai-providers@0.1.0 build
+> tsc -p tsconfig.json
+
+
+> @imagora/storage@0.1.0 build
+> tsc -p tsconfig.json
+
+
+> @imagora/payments@0.1.0 build
+> tsc -p tsconfig.json
+

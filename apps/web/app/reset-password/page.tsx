@@ -107,9 +107,7 @@ function ResetPasswordForm() {
           {message ? (
             <p
               className={`rounded-2xl border p-3 text-sm ${
-                success
-                  ? "border-mint/40 bg-mint/10 text-mint"
-                  : "border-ember/40 bg-ember/10 text-ember"
+                success ? "border-mint/40 bg-mint/10 text-mint" : "border-ember/40 bg-ember/10 text-ember"
               }`}
             >
               {message}
