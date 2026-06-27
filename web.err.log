@@ -1,0 +1,5 @@
+Persisting failed: Unable to commit operations
+
+Caused by:
+    拒绝访问。 (os error 5)
+Persisting is disabled for this session due to an unrecoverable error. Stopping the background persisting process.

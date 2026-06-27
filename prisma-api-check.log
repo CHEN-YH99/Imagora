@@ -1,9 +1,0 @@
-{"level":30,"time":1780984280445,"pid":49024,"hostname":"DESKTOP-8612IP1","msg":"Server listening at http://127.0.0.1:4801"}
-{"level":30,"time":1780984283170,"pid":49024,"hostname":"DESKTOP-8612IP1","reqId":"req-1","req":{"method":"GET","url":"/health","host":"127.0.0.1:4801","remoteAddress":"127.0.0.1","remotePort":59993},"msg":"incoming request"}
-{"level":30,"time":1780984283174,"pid":49024,"hostname":"DESKTOP-8612IP1","reqId":"req-1","res":{"statusCode":200},"responseTime":3.202400028705597,"msg":"request completed"}
-{"level":30,"time":1780984283198,"pid":49024,"hostname":"DESKTOP-8612IP1","reqId":"req-2","req":{"method":"POST","url":"/api/auth/login","host":"127.0.0.1:4801","remoteAddress":"127.0.0.1","remotePort":59994},"msg":"incoming request"}
-{"level":30,"time":1780984283342,"pid":49024,"hostname":"DESKTOP-8612IP1","reqId":"req-2","res":{"statusCode":200},"responseTime":144.38230001926422,"msg":"request completed"}
-{"level":30,"time":1780984283351,"pid":49024,"hostname":"DESKTOP-8612IP1","reqId":"req-3","req":{"method":"POST","url":"/api/generation/tasks","host":"127.0.0.1:4801","remoteAddress":"127.0.0.1","remotePort":60008},"msg":"incoming request"}
-{"level":30,"time":1780984283412,"pid":49024,"hostname":"DESKTOP-8612IP1","reqId":"req-3","res":{"statusCode":201},"responseTime":60.61939996480942,"msg":"request completed"}
-{"level":30,"time":1780984286420,"pid":49024,"hostname":"DESKTOP-8612IP1","reqId":"req-4","req":{"method":"GET","url":"/api/generation/tasks/551b2392-1eb1-437b-a1f8-4319a5124bea","host":"127.0.0.1:4801","remoteAddress":"127.0.0.1","remotePort":60016},"msg":"incoming request"}
-{"level":30,"time":1780984286427,"pid":49024,"hostname":"DESKTOP-8612IP1","reqId":"req-4","res":{"statusCode":200},"responseTime":6.207900047302246,"msg":"request completed"}

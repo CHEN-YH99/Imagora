@@ -1,0 +1,725 @@
+
+> @imagora/api@0.1.0 start
+> node --env-file=../../.env dist/main.js
+
+[2026-06-27 14:33:42.095 +0800] [32mINFO[39m: [36mServer listening at http://127.0.0.1:4100[39m
+[ConsoleMailer] Sending email:
+  To: smoke1542767268@imagora.local
+  Subject: 验证你的 Imagora 邮箱
+  Body (text):
+你好 Smoke，
+
+感谢注册 Imagora。请点击下方链接完成邮箱验证，验证后将自动到账 120 积分：
+http://127.0.0.1:3100/verify-email?token=d51e4656-b838-4777-996b-eb59577dacb5
+
+链接将在 24 小时后失效。如果不是你本人操作，请忽略本邮件。
+
+— Imagora
+  Body (html):
+<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;line-height:1.6;color:#1a1a1a;max-width:560px;margin:0 auto;padding:32px 24px;">
+  <h1 style="font-size:20px;margin:0 0 16px;">你好，Smoke</h1>
+  <p>感谢注册 Imagora。请点击下方按钮完成邮箱验证，验证后将自动到账 <strong>120 积分</strong>。</p>
+  <p style="margin:24px 0;">
+    <a href="http://127.0.0.1:3100/verify-email?token=d51e4656-b838-4777-996b-eb59577dacb5" style="display:inline-block;padding:10px 20px;background:#0f172a;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">验证邮箱</a>
+  </p>
+  <p style="font-size:13px;color:#666;">如果按钮无法点击，请复制以下链接到浏览器：</p>
+  <p style="font-size:13px;color:#666;word-break:break-all;">http://127.0.0.1:3100/verify-email?token=d51e4656-b838-4777-996b-eb59577dacb5</p>
+  <p style="font-size:13px;color:#999;margin-top:32px;">链接将在 24 小时后失效。如果不是你本人操作，请忽略本邮件。</p>
+</div>
+[ConsoleMailer] Email sent (logged only, not actually delivered)
+[2026-06-27 14:34:36.252 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-1"
+    req: {
+      "method": "POST",
+      "url": "/api/auth/register",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 60140
+    }
+[2026-06-27 14:34:36.684 +0800] [32mINFO[39m: [36mVerification email sent[39m
+    reqId: "req-1"
+    requestId: "85d1d1be-bd91-441e-ab01-179eb1b6b7ce"
+    userId: "3081e113-4bb5-41ca-8e97-1fc7a6c2067e"
+    method: "POST"
+    path: "/api/auth/register"
+[2026-06-27 14:34:36.686 +0800] [32mINFO[39m: [36mPOST /api/auth/register 201 433ms[39m
+    reqId: "req-1"
+    requestId: "85d1d1be-bd91-441e-ab01-179eb1b6b7ce"
+    userId: "anonymous"
+    method: "POST"
+    path: "/api/auth/register"
+    statusCode: 201
+    duration: 433
+[2026-06-27 14:34:36.686 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-1"
+    res: {
+      "statusCode": 201
+    }
+    responseTime: 433.46789997816086
+[ConsoleMailer] Sending email:
+  To: smoke546679805@imagora.local
+  Subject: 验证你的 Imagora 邮箱
+  Body (text):
+你好 Smoke，
+
+感谢注册 Imagora。请点击下方链接完成邮箱验证，验证后将自动到账 120 积分：
+http://127.0.0.1:3100/verify-email?token=072025d9-1918-47e9-bcc1-7f31d573a4ed
+
+链接将在 24 小时后失效。如果不是你本人操作，请忽略本邮件。
+
+— Imagora
+  Body (html):
+<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;line-height:1.6;color:#1a1a1a;max-width:560px;margin:0 auto;padding:32px 24px;">
+  <h1 style="font-size:20px;margin:0 0 16px;">你好，Smoke</h1>
+  <p>感谢注册 Imagora。请点击下方按钮完成邮箱验证，验证后将自动到账 <strong>120 积分</strong>。</p>
+  <p style="margin:24px 0;">
+    <a href="http://127.0.0.1:3100/verify-email?token=072025d9-1918-47e9-bcc1-7f31d573a4ed" style="display:inline-block;padding:10px 20px;background:#0f172a;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">验证邮箱</a>
+  </p>
+  <p style="font-size:13px;color:#666;">如果按钮无法点击，请复制以下链接到浏览器：</p>
+  <p style="font-size:13px;color:#666;word-break:break-all;">http://127.0.0.1:3100/verify-email?token=072025d9-1918-47e9-bcc1-7f31d573a4ed</p>
+  <p style="font-size:13px;color:#999;margin-top:32px;">链接将在 24 小时后失效。如果不是你本人操作，请忽略本邮件。</p>
+</div>
+[ConsoleMailer] Email sent (logged only, not actually delivered)
+[2026-06-27 14:35:00.438 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-2"
+    req: {
+      "method": "POST",
+      "url": "/api/auth/register",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 60167
+    }
+[2026-06-27 14:35:00.870 +0800] [32mINFO[39m: [36mVerification email sent[39m
+    reqId: "req-2"
+    requestId: "6a06da01-fad6-4f0a-bb1e-a41d3fbb8b1f"
+    userId: "27f4dea1-990e-4477-97fd-a95b5a72f599"
+    method: "POST"
+    path: "/api/auth/register"
+[2026-06-27 14:35:00.870 +0800] [32mINFO[39m: [36mPOST /api/auth/register 201 432ms[39m
+    reqId: "req-2"
+    requestId: "6a06da01-fad6-4f0a-bb1e-a41d3fbb8b1f"
+    userId: "anonymous"
+    method: "POST"
+    path: "/api/auth/register"
+    statusCode: 201
+    duration: 432
+[2026-06-27 14:35:00.870 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-2"
+    res: {
+      "statusCode": 201
+    }
+    responseTime: 432.12900000810623
+[2026-06-27 14:35:00.883 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-3"
+    req: {
+      "method": "GET",
+      "url": "/api/users/me",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 60167
+    }
+[2026-06-27 14:35:00.898 +0800] [32mINFO[39m: [36mGET /api/users/me 200 15ms[39m
+    reqId: "req-3"
+    requestId: "d8de73db-43b7-49e3-93d2-41bfa0bbe73c"
+    userId: "27f4dea1-990e-4477-97fd-a95b5a72f599"
+    method: "GET"
+    path: "/api/users/me"
+    statusCode: 200
+    duration: 15
+[2026-06-27 14:35:00.898 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-3"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 14.579699993133545
+[2026-06-27 14:35:00.900 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-4"
+    req: {
+      "method": "GET",
+      "url": "/api/plans",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 60167
+    }
+[2026-06-27 14:35:00.911 +0800] [32mINFO[39m: [36mGET /api/plans 200 11ms[39m
+    reqId: "req-4"
+    requestId: "837d9c39-4433-425c-bab0-c37e05d3f2ac"
+    userId: "27f4dea1-990e-4477-97fd-a95b5a72f599"
+    method: "GET"
+    path: "/api/plans"
+    statusCode: 200
+    duration: 11
+[2026-06-27 14:35:00.911 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-4"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 10.993800044059753
+[2026-06-27 14:35:00.919 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-5"
+    req: {
+      "method": "POST",
+      "url": "/api/generation/tasks",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 60167
+    }
+[2026-06-27 14:35:00.987 +0800] [32mINFO[39m: [36mPOST /api/generation/tasks 201 68ms[39m
+    reqId: "req-5"
+    requestId: "6fa0f68f-0094-4f6d-96e3-25e9d11247c6"
+    userId: "27f4dea1-990e-4477-97fd-a95b5a72f599"
+    method: "POST"
+    path: "/api/generation/tasks"
+    statusCode: 201
+    duration: 68
+[2026-06-27 14:35:00.987 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-5"
+    res: {
+      "statusCode": 201
+    }
+    responseTime: 67.20390003919601
+[2026-06-27 14:35:02.010 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-6"
+    req: {
+      "method": "GET",
+      "url": "/api/generation/tasks/2ead9ade-fd78-4cd2-a561-69ee78d11f5b",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 60167
+    }
+[2026-06-27 14:35:02.023 +0800] [32mINFO[39m: [36mGET /api/generation/tasks/2ead9ade-fd78-4cd2-a561-69ee78d11f5b 200 13ms[39m
+    reqId: "req-6"
+    requestId: "510b41f3-8aa3-4ab9-bb53-aeaf40b32c56"
+    userId: "27f4dea1-990e-4477-97fd-a95b5a72f599"
+    method: "GET"
+    path: "/api/generation/tasks/2ead9ade-fd78-4cd2-a561-69ee78d11f5b"
+    statusCode: 200
+    duration: 13
+[2026-06-27 14:35:02.023 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-6"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 13.425800025463104
+[2026-06-27 14:35:03.034 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-7"
+    req: {
+      "method": "GET",
+      "url": "/api/generation/tasks/2ead9ade-fd78-4cd2-a561-69ee78d11f5b",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 60167
+    }
+[2026-06-27 14:35:03.045 +0800] [32mINFO[39m: [36mGET /api/generation/tasks/2ead9ade-fd78-4cd2-a561-69ee78d11f5b 200 11ms[39m
+    reqId: "req-7"
+    requestId: "fce089b3-9867-44a2-965c-0be0dea21e9f"
+    userId: "27f4dea1-990e-4477-97fd-a95b5a72f599"
+    method: "GET"
+    path: "/api/generation/tasks/2ead9ade-fd78-4cd2-a561-69ee78d11f5b"
+    statusCode: 200
+    duration: 11
+[2026-06-27 14:35:03.045 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-7"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 11.209600031375885
+[2026-06-27 14:35:03.048 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-8"
+    req: {
+      "method": "GET",
+      "url": "/api/generation/tasks?page=1&pageSize=5",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 60167
+    }
+[2026-06-27 14:35:03.058 +0800] [32mINFO[39m: [36mGET /api/generation/tasks?page=1&pageSize=5 200 10ms[39m
+    reqId: "req-8"
+    requestId: "4cf117ba-de86-4956-a4fc-5ba182dd74d8"
+    userId: "27f4dea1-990e-4477-97fd-a95b5a72f599"
+    method: "GET"
+    path: "/api/generation/tasks?page=1&pageSize=5"
+    statusCode: 200
+    duration: 10
+[2026-06-27 14:35:03.058 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-8"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 10.061299979686737
+[2026-06-27 14:35:03.060 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-9"
+    req: {
+      "method": "GET",
+      "url": "/api/images?page=1&pageSize=5",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 60167
+    }
+[2026-06-27 14:35:03.071 +0800] [32mINFO[39m: [36mGET /api/images?page=1&pageSize=5 200 11ms[39m
+    reqId: "req-9"
+    requestId: "fc621412-eb72-4f3e-8993-c9a6459e8c78"
+    userId: "27f4dea1-990e-4477-97fd-a95b5a72f599"
+    method: "GET"
+    path: "/api/images?page=1&pageSize=5"
+    statusCode: 200
+    duration: 11
+[2026-06-27 14:35:03.071 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-9"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 10.963200032711029
+[2026-06-27 14:35:03.072 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-a"
+    req: {
+      "method": "GET",
+      "url": "/api/orders?page=1&pageSize=5",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 60167
+    }
+[2026-06-27 14:35:03.141 +0800] [32mINFO[39m: [36mGET /api/orders?page=1&pageSize=5 200 69ms[39m
+    reqId: "req-a"
+    requestId: "b1f4a2c4-b8e3-4201-ae2b-f2a30d2efd34"
+    userId: "27f4dea1-990e-4477-97fd-a95b5a72f599"
+    method: "GET"
+    path: "/api/orders?page=1&pageSize=5"
+    statusCode: 200
+    duration: 69
+[2026-06-27 14:35:03.141 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-a"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 68.89279997348785
+[2026-06-27 14:35:57.027 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-b"
+    req: {
+      "method": "POST",
+      "url": "/api/auth/login",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61102
+    }
+[2026-06-27 14:35:57.150 +0800] [32mINFO[39m: [36mPOST /api/auth/login 200 123ms[39m
+    reqId: "req-b"
+    requestId: "d6994805-fad4-4589-9c28-f3ad0e53c744"
+    userId: "anonymous"
+    method: "POST"
+    path: "/api/auth/login"
+    statusCode: 200
+    duration: 123
+[2026-06-27 14:35:57.150 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-b"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 123.1632000207901
+[2026-06-27 14:35:57.159 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-c"
+    req: {
+      "method": "GET",
+      "url": "/api/admin/dashboard",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61102
+    }
+[2026-06-27 14:35:57.228 +0800] [32mINFO[39m: [36mGET /api/admin/dashboard 200 69ms[39m
+    reqId: "req-c"
+    requestId: "2c25f620-84ff-4206-bac8-4813c4b78337"
+    userId: "cd2258b1-2fe7-4c3b-9d1e-80ff57e7623d"
+    method: "GET"
+    path: "/api/admin/dashboard"
+    statusCode: 200
+    duration: 69
+[2026-06-27 14:35:57.228 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-c"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 69.01259994506836
+[2026-06-27 14:35:57.232 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-d"
+    req: {
+      "method": "GET",
+      "url": "/api/admin/metrics",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61102
+    }
+[2026-06-27 14:35:57.302 +0800] [32mINFO[39m: [36mGET /api/admin/metrics 200 70ms[39m
+    reqId: "req-d"
+    requestId: "04f7b3a7-63f7-4e5d-92e6-cfdf6161868c"
+    userId: "cd2258b1-2fe7-4c3b-9d1e-80ff57e7623d"
+    method: "GET"
+    path: "/api/admin/metrics"
+    statusCode: 200
+    duration: 70
+[2026-06-27 14:35:57.302 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-d"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 69.73360002040863
+[2026-06-27 14:35:57.309 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-e"
+    req: {
+      "method": "GET",
+      "url": "/api/admin/users?page=1&pageSize=5",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61102
+    }
+[2026-06-27 14:35:57.320 +0800] [32mINFO[39m: [36mGET /api/admin/users?page=1&pageSize=5 200 11ms[39m
+    reqId: "req-e"
+    requestId: "4932d0a7-8951-4f54-9946-bfc27d1578d2"
+    userId: "cd2258b1-2fe7-4c3b-9d1e-80ff57e7623d"
+    method: "GET"
+    path: "/api/admin/users?page=1&pageSize=5"
+    statusCode: 200
+    duration: 11
+[2026-06-27 14:35:57.320 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-e"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 10.861100018024445
+[2026-06-27 14:35:57.328 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-f"
+    req: {
+      "method": "GET",
+      "url": "/api/admin/users/27f4dea1-990e-4477-97fd-a95b5a72f599",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61102
+    }
+[2026-06-27 14:35:57.340 +0800] [32mINFO[39m: [36mGET /api/admin/users/27f4dea1-990e-4477-97fd-a95b5a72f599 200 12ms[39m
+    reqId: "req-f"
+    requestId: "9d6cca54-02ee-443a-9b2a-aad3776e71bb"
+    userId: "cd2258b1-2fe7-4c3b-9d1e-80ff57e7623d"
+    method: "GET"
+    path: "/api/admin/users/27f4dea1-990e-4477-97fd-a95b5a72f599"
+    statusCode: 200
+    duration: 12
+[2026-06-27 14:35:57.340 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-f"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 12.29390001296997
+[2026-06-27 16:09:28.653 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-g"
+    req: {
+      "method": "GET",
+      "url": "/health",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 52854
+    }
+[2026-06-27 16:09:28.657 +0800] [32mINFO[39m: [36mGET /health 200 3ms[39m
+    reqId: "req-g"
+    requestId: "5c86a036-91f0-49da-8ba4-4271a3284b0a"
+    userId: "anonymous"
+    method: "GET"
+    path: "/health"
+    statusCode: 200
+    duration: 3
+[2026-06-27 16:09:28.657 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-g"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 2.862399995326996
+[2026-06-27 16:10:02.540 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-h"
+    req: {
+      "method": "GET",
+      "url": "/health",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 52909
+    }
+[2026-06-27 16:10:02.541 +0800] [32mINFO[39m: [36mGET /health 200 0ms[39m
+    reqId: "req-h"
+    requestId: "2189c5d6-d762-45c3-a0ff-a4950eb73108"
+    userId: "anonymous"
+    method: "GET"
+    path: "/health"
+    statusCode: 200
+    duration: 0
+[2026-06-27 16:10:02.541 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-h"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 0.3463999629020691
+[2026-06-27 16:10:02.546 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-i"
+    req: {
+      "method": "GET",
+      "url": "/api/features",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 52910
+    }
+[2026-06-27 16:10:02.547 +0800] [32mINFO[39m: [36mGET /api/features 200 1ms[39m
+    reqId: "req-i"
+    requestId: "51a7bbd5-34b0-45f5-9f8e-c8849902f97b"
+    userId: "anonymous"
+    method: "GET"
+    path: "/api/features"
+    statusCode: 200
+    duration: 1
+[2026-06-27 16:10:02.547 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-i"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 0.6809000372886658
+[2026-06-27 16:10:02.550 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-j"
+    req: {
+      "method": "POST",
+      "url": "/api/auth/login",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 52909
+    }
+[2026-06-27 16:10:02.666 +0800] [33mWARN[39m: [36mInvalid email or password[39m
+    reqId: "req-j"
+    requestId: "a255fff0-5ea2-4c88-983b-bdba5ad4b4d1"
+    userId: "anonymous"
+    method: "POST"
+    path: "/api/auth/login"
+    errorCode: "UNAUTHORIZED"
+    statusCode: 401
+    duration: 116
+[2026-06-27 16:10:02.667 +0800] [32mINFO[39m: [36mPOST /api/auth/login 401 117ms[39m
+    reqId: "req-j"
+    requestId: "a255fff0-5ea2-4c88-983b-bdba5ad4b4d1"
+    userId: "anonymous"
+    method: "POST"
+    path: "/api/auth/login"
+    statusCode: 401
+    duration: 117
+[2026-06-27 16:10:02.667 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-j"
+    res: {
+      "statusCode": 401
+    }
+    responseTime: 116.67040002346039
+[2026-06-27 16:10:59.414 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-k"
+    req: {
+      "method": "GET",
+      "url": "/health",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61774
+    }
+[2026-06-27 16:10:59.415 +0800] [32mINFO[39m: [36mGET /health 200 1ms[39m
+    reqId: "req-k"
+    requestId: "5467c79b-6277-4ebe-aa45-b41675b21598"
+    userId: "anonymous"
+    method: "GET"
+    path: "/health"
+    statusCode: 200
+    duration: 1
+[2026-06-27 16:10:59.415 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-k"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 0.5353000164031982
+[2026-06-27 16:10:59.421 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-l"
+    req: {
+      "method": "GET",
+      "url": "/api/features",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61775
+    }
+[2026-06-27 16:10:59.422 +0800] [32mINFO[39m: [36mGET /api/features 200 1ms[39m
+    reqId: "req-l"
+    requestId: "46ab6026-be62-4850-9086-43fa615aa8f5"
+    userId: "anonymous"
+    method: "GET"
+    path: "/api/features"
+    statusCode: 200
+    duration: 1
+[2026-06-27 16:10:59.422 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-l"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 0.42820000648498535
+[2026-06-27 16:10:59.424 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-m"
+    req: {
+      "method": "POST",
+      "url": "/api/auth/login",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61774
+    }
+[2026-06-27 16:10:59.534 +0800] [32mINFO[39m: [36mPOST /api/auth/login 200 110ms[39m
+    reqId: "req-m"
+    requestId: "b39739c4-d8c3-4ca9-8b85-dcfc7c8e9aa9"
+    userId: "anonymous"
+    method: "POST"
+    path: "/api/auth/login"
+    statusCode: 200
+    duration: 110
+[2026-06-27 16:10:59.534 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-m"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 110.05610001087189
+[2026-06-27 16:10:59.535 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-n"
+    req: {
+      "method": "GET",
+      "url": "/api/admin/metrics",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61775
+    }
+[2026-06-27 16:10:59.616 +0800] [32mINFO[39m: [36mGET /api/admin/metrics 200 81ms[39m
+    reqId: "req-n"
+    requestId: "44ac449c-9348-49ca-ad59-28fb5516bde2"
+    userId: "cd2258b1-2fe7-4c3b-9d1e-80ff57e7623d"
+    method: "GET"
+    path: "/api/admin/metrics"
+    statusCode: 200
+    duration: 81
+[2026-06-27 16:10:59.616 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-n"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 80.24690002202988
+[ConsoleMailer] Sending email:
+  To: runtime-check-772418@imagora.local
+  Subject: 验证你的 Imagora 邮箱
+  Body (text):
+你好 Runtime Check，
+
+感谢注册 Imagora。请点击下方链接完成邮箱验证，验证后将自动到账 120 积分：
+http://127.0.0.1:3100/verify-email?token=02a66256-f60a-4b79-a364-b79022690f3b
+
+链接将在 24 小时后失效。如果不是你本人操作，请忽略本邮件。
+
+— Imagora
+  Body (html):
+<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;line-height:1.6;color:#1a1a1a;max-width:560px;margin:0 auto;padding:32px 24px;">
+  <h1 style="font-size:20px;margin:0 0 16px;">你好，Runtime Check</h1>
+  <p>感谢注册 Imagora。请点击下方按钮完成邮箱验证，验证后将自动到账 <strong>120 积分</strong>。</p>
+  <p style="margin:24px 0;">
+    <a href="http://127.0.0.1:3100/verify-email?token=02a66256-f60a-4b79-a364-b79022690f3b" style="display:inline-block;padding:10px 20px;background:#0f172a;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">验证邮箱</a>
+  </p>
+  <p style="font-size:13px;color:#666;">如果按钮无法点击，请复制以下链接到浏览器：</p>
+  <p style="font-size:13px;color:#666;word-break:break-all;">http://127.0.0.1:3100/verify-email?token=02a66256-f60a-4b79-a364-b79022690f3b</p>
+  <p style="font-size:13px;color:#999;margin-top:32px;">链接将在 24 小时后失效。如果不是你本人操作，请忽略本邮件。</p>
+</div>
+[ConsoleMailer] Email sent (logged only, not actually delivered)
+[2026-06-27 16:11:51.588 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-o"
+    req: {
+      "method": "POST",
+      "url": "/api/auth/register",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61838
+    }
+[2026-06-27 16:11:52.013 +0800] [32mINFO[39m: [36mVerification email sent[39m
+    reqId: "req-o"
+    requestId: "be1b99ef-73b5-4e0e-9017-1763a5e54af3"
+    userId: "dc0b7fb4-3f06-45a1-b22f-480b1944b344"
+    method: "POST"
+    path: "/api/auth/register"
+[2026-06-27 16:11:52.014 +0800] [32mINFO[39m: [36mPOST /api/auth/register 201 426ms[39m
+    reqId: "req-o"
+    requestId: "be1b99ef-73b5-4e0e-9017-1763a5e54af3"
+    userId: "anonymous"
+    method: "POST"
+    path: "/api/auth/register"
+    statusCode: 201
+    duration: 426
+[2026-06-27 16:11:52.014 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-o"
+    res: {
+      "statusCode": 201
+    }
+    responseTime: 426.01139998435974
+[2026-06-27 16:11:52.034 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-p"
+    req: {
+      "method": "POST",
+      "url": "/api/generation/tasks",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61839
+    }
+[2026-06-27 16:11:52.095 +0800] [32mINFO[39m: [36mPOST /api/generation/tasks 201 61ms[39m
+    reqId: "req-p"
+    requestId: "be0985da-17d9-4518-a1d5-646acc0cc682"
+    userId: "dc0b7fb4-3f06-45a1-b22f-480b1944b344"
+    method: "POST"
+    path: "/api/generation/tasks"
+    statusCode: 201
+    duration: 61
+[2026-06-27 16:11:52.095 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-p"
+    res: {
+      "statusCode": 201
+    }
+    responseTime: 61.1729000210762
+[2026-06-27 16:11:53.108 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-q"
+    req: {
+      "method": "GET",
+      "url": "/api/generation/tasks/1b979362-147d-4339-9a10-9ea4e363a9f8",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61843
+    }
+[2026-06-27 16:11:53.121 +0800] [32mINFO[39m: [36mGET /api/generation/tasks/1b979362-147d-4339-9a10-9ea4e363a9f8 200 13ms[39m
+    reqId: "req-q"
+    requestId: "f18acacc-eb37-4ed0-af62-ac6ba0d9f22b"
+    userId: "dc0b7fb4-3f06-45a1-b22f-480b1944b344"
+    method: "GET"
+    path: "/api/generation/tasks/1b979362-147d-4339-9a10-9ea4e363a9f8"
+    statusCode: 200
+    duration: 13
+[2026-06-27 16:11:53.121 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-q"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 13.585599958896637
+[2026-06-27 16:12:03.251 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-r"
+    req: {
+      "method": "GET",
+      "url": "/health",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 61864
+    }
+[2026-06-27 16:12:03.252 +0800] [32mINFO[39m: [36mGET /health 200 1ms[39m
+    reqId: "req-r"
+    requestId: "a323cb06-0c85-4d86-869a-a1a8e5615d91"
+    userId: "anonymous"
+    method: "GET"
+    path: "/health"
+    statusCode: 200
+    duration: 1
+[2026-06-27 16:12:03.252 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-r"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 0.3446999788284302

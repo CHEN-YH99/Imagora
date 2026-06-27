@@ -4,7 +4,7 @@ import cors from "@fastify/cors";
 import pino from "pino";
 import { getActiveProviderMetadata } from "@imagora/ai-providers";
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
-import { createMailer } from "@imagora/mailer";
+import { buildVerificationEmail, createMailer } from "@imagora/mailer";
 import { createPaymentProvider, type VerifiedPaymentEvent } from "@imagora/payments";
 import { createGenerationQueue } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
@@ -232,7 +232,7 @@ app.get("/api/features", async (request) => envelope(request, { features: featur
 
 app.post("/api/auth/register", async (request, reply) => {
   const input = registerSchema.parse(request.body);
-  return store.update(async (data) => {
+  const result = await store.update(async (data) => {
     const email = input.email.toLowerCase();
     if (data.users.some((user) => user.email === email)) {
       throw new AppError("CONFLICT", "Email is already registered", 409);
@@ -251,9 +251,21 @@ app.post("/api/auth/register", async (request, reply) => {
       updatedAt: now,
       lastLoginAt: now
     };
-    const token = randomUUID();
+    const sessionToken = randomUUID();
+    const verifyTokenPlain = randomUUID();
+    const verifyTokenHash = createHash("sha256").update(verifyTokenPlain).digest("hex");
+    const verifyTtlHours = envNumber("EMAIL_VERIFICATION_TOKEN_TTL_HOURS", 24);
+    const verifyExpiresAt = new Date(Date.now() + verifyTtlHours * 60 * 60 * 1000).toISOString();
     data.users.push(user);
-    data.sessions.push({ token, userId: user.id, createdAt: now, expiresAt: addDays(now, 14) });
+    data.sessions.push({ token: sessionToken, userId: user.id, createdAt: now, expiresAt: addDays(now, 14) });
+    data.emailVerificationTokens.push({
+      id: randomUUID(),
+      userId: user.id,
+      tokenHash: verifyTokenHash,
+      expiresAt: verifyExpiresAt,
+      usedAt: null,
+      createdAt: now
+    });
     data.creditAccounts.push({ userId: user.id, balance: 120, totalEarned: 120, totalSpent: 0, updatedAt: now });
     data.creditLedgerEntries.push({
       id: randomUUID(),
@@ -267,10 +279,22 @@ app.post("/api/auth/register", async (request, reply) => {
       remark: "Welcome credits",
       createdAt: now
     });
-    setSessionCookie(reply, token, addDays(now, 14));
+    setSessionCookie(reply, sessionToken, addDays(now, 14));
     reply.status(201);
-    return envelope(request, { token, user: publicUser(user) });
+    return { sessionToken, user, verifyTokenPlain };
   });
+
+  const verifyUrl = `${envString("WEB_ORIGIN", "http://127.0.0.1:3100")}/verify-email?token=${result.verifyTokenPlain}`;
+  try {
+    await mailer.sendEmail(
+      buildVerificationEmail({ to: result.user.email, nickname: result.user.nickname, verifyUrl })
+    );
+    request.log.info({ userId: result.user.id }, "Verification email sent");
+  } catch (error) {
+    request.log.error({ userId: result.user.id, error }, "Failed to send verification email");
+  }
+
+  return envelope(request, { token: result.sessionToken, user: publicUser(result.user) });
 });
 
 app.post("/api/auth/login", async (request, reply) => {
@@ -1205,6 +1229,10 @@ const requestPasswordResetSchema = z.object({
 const resetPasswordSchema = z.object({
   token: z.string().min(1),
   password: z.string().min(8)
+});
+
+const verifyEmailSchema = z.object({
+  token: z.string().min(1)
 });
 
 const updateProfileSchema = z.object({

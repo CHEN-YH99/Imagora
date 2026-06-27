@@ -1,0 +1,11 @@
+
+> @imagora/web@0.1.0 dev
+> next dev -p 3100
+
+▲ Next.js 16.3.0-canary.48 (Turbopack)
+- Local:         http://localhost:3100
+- Network:       http://192.168.0.102:3100
+✓ Ready in 347ms
+
+ GET / 200 in 1792ms (next.js: 1641ms, application-code: 151ms)
+ GET / 200 in 45ms (next.js: 3ms, application-code: 42ms)
