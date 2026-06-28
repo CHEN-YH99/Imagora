@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { type FormEvent, Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Lock } from "lucide-react";
@@ -41,15 +41,14 @@ function ResetPasswordForm() {
     }
   }, [searchParams]);
 
-  async function submit() {
-    if (password !== confirmPassword) {
-      setMessage("两次输入的密码不一致。");
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const validationMessage = validateResetPasswordForm(token, password, confirmPassword);
+    if (validationMessage) {
+      setMessage(validationMessage);
       return;
     }
-    if (password.length < 8) {
-      setMessage("密码至少需要 8 个字符。");
-      return;
-    }
+
     setLoading(true);
     setMessage("");
     try {
@@ -80,17 +79,21 @@ function ResetPasswordForm() {
           返回登录
         </Link>
         <h1 className="mt-6 text-3xl font-semibold">设置新密码</h1>
-        <p className="mt-2 text-sm leading-6 text-white/62">请输入您的新密码。</p>
-        <div className="mt-6 space-y-4">
+        <p className="mt-2 text-sm leading-6 text-white/62">请输入符合安全策略的新密码。</p>
+        <form className="mt-6 space-y-4" noValidate onSubmit={submit}>
           <label className="block text-sm text-white/70">
             新密码
             <input
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              type="password"
+              autoComplete="new-password"
               disabled={!token || success}
-              placeholder="至少 8 个字符"
+              maxLength={128}
+              minLength={12}
+              placeholder="至少 12 位，包含字母和数字"
+              required
+              type="password"
             />
           </label>
           <label className="block text-sm text-white/70">
@@ -99,16 +102,22 @@ function ResetPasswordForm() {
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={confirmPassword}
               onChange={(event) => setConfirmPassword(event.target.value)}
-              type="password"
+              autoComplete="new-password"
               disabled={!token || success}
+              maxLength={128}
+              minLength={12}
               placeholder="再次输入新密码"
+              required
+              type="password"
             />
           </label>
           {message ? (
             <p
+              aria-live="polite"
               className={`rounded-2xl border p-3 text-sm ${
                 success ? "border-mint/40 bg-mint/10 text-mint" : "border-ember/40 bg-ember/10 text-ember"
               }`}
+              role={success ? "status" : "alert"}
             >
               {message}
             </p>
@@ -116,16 +125,71 @@ function ResetPasswordForm() {
           {!success && token ? (
             <button
               className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
-              type="button"
-              disabled={loading || !password.trim() || !confirmPassword.trim()}
-              onClick={submit}
+              type="submit"
+              disabled={loading || !password || !confirmPassword}
             >
               <Lock className="size-4" aria-hidden="true" />
               {loading ? "重置中..." : "重置密码"}
             </button>
           ) : null}
-        </div>
+        </form>
       </section>
     </main>
   );
+}
+
+function validateResetPasswordForm(token: string, password: string, confirmPassword: string): string | null {
+  if (!token) {
+    return "重置链接无效，请重新申请。";
+  }
+  if (!password) {
+    return "请输入新密码。";
+  }
+  if (password.length < 12) {
+    return "密码至少需要 12 位。";
+  }
+  if (password.length > 128) {
+    return "密码长度不能超过 128 位。";
+  }
+  if (password.trim() !== password) {
+    return "密码开头和结尾不能包含空格。";
+  }
+  if (hasControlCharacter(password)) {
+    return "密码包含不支持的字符。";
+  }
+  if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+    return "密码需要同时包含字母和数字。";
+  }
+  if (commonPasswordBlocklist.has(normalizePasswordForBlocklist(password))) {
+    return "密码过于常见，请更换更安全的密码。";
+  }
+  if (!confirmPassword) {
+    return "请再次输入新密码。";
+  }
+  if (password !== confirmPassword) {
+    return "两次输入的密码不一致。";
+  }
+  return null;
+}
+
+const commonPasswordBlocklist = new Set([
+  "123456",
+  "12345678",
+  "123456789",
+  "imagora",
+  "imagora123",
+  "password",
+  "password123",
+  "qwerty123"
+]);
+
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  });
+}
+
+function normalizePasswordForBlocklist(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }

@@ -1369,10 +1369,12 @@ const requestPasswordResetSchema = z.object({
   email: emailSchema
 });
 
-const resetPasswordSchema = z.object({
-  token: z.string().min(1),
-  password: z.string().min(8)
-});
+const resetPasswordSchema = z
+  .object({
+    token: z.string().min(1),
+    password: newPasswordSchema
+  })
+  .strict();
 
 const updateProfileSchema = z.object({
   nickname: z.string().min(1).max(80).optional(),

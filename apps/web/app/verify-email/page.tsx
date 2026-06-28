@@ -52,12 +52,16 @@ function VerifyEmailForm() {
     <main className="flex min-h-screen items-center justify-center bg-ink px-4 text-white">
       <section className="w-full max-w-md rounded-[1.5rem] border border-white/12 bg-white/7 p-6 text-center">
         {status === "pending" ? (
-          <p className="py-8 text-sm text-white/60">{message}</p>
+          <p aria-live="polite" className="py-8 text-sm text-white/60" role="status">
+            {message}
+          </p>
         ) : status === "success" ? (
           <>
             <CheckCircle className="mx-auto size-12 text-mint" aria-hidden="true" />
             <h1 className="mt-4 text-2xl font-semibold">邮箱验证成功</h1>
-            <p className="mt-2 text-sm text-white/62">{message}</p>
+            <p aria-live="polite" className="mt-2 text-sm text-white/62" role="status">
+              {message}
+            </p>
             <Link
               className="focus-ring mt-6 inline-flex w-full items-center justify-center rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors hover:bg-volt"
               href="/generate"
@@ -69,7 +73,9 @@ function VerifyEmailForm() {
           <>
             <XCircle className="mx-auto size-12 text-ember" aria-hidden="true" />
             <h1 className="mt-4 text-2xl font-semibold">验证失败</h1>
-            <p className="mt-2 text-sm text-white/62">{message}</p>
+            <p aria-live="polite" className="mt-2 text-sm text-white/62" role="alert">
+              {message}
+            </p>
             <Link
               className="focus-ring mt-6 inline-flex w-full items-center justify-center rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors hover:bg-volt"
               href="/login"

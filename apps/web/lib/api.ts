@@ -1,4 +1,5 @@
 const defaultApiBaseUrl = "http://127.0.0.1:4100";
+const defaultRequestTimeoutMs = 15_000;
 
 export const apiBaseUrl = resolveApiBaseUrl();
 
@@ -163,21 +164,38 @@ export async function apiFetch<T>(
   options: {
     method?: "GET" | "POST" | "PATCH" | "DELETE";
     body?: unknown;
+    timeoutMs?: number;
   } = {}
 ): Promise<T> {
-  const response = await fetch(`${resolveApiBaseUrl()}${path}`, {
-    method: options.method ?? "GET",
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body)
-  });
-  const payload = await readApiPayload<T>(response);
-  if (!response.ok || !payload.data) {
-    throw new Error(formatApiErrorMessage(payload.error?.code, payload.error?.message, response.status));
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? defaultRequestTimeoutMs);
+
+  try {
+    const response = await fetch(`${resolveApiBaseUrl()}${path}`, {
+      method: options.method ?? "GET",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      signal: controller.signal,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body)
+    });
+    const payload = await readApiPayload<T>(response);
+    if (!response.ok || !payload.data) {
+      throw new Error(formatApiErrorMessage(payload.error?.code, payload.error?.message, response.status));
+    }
+    return payload.data;
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error("请求超时，请检查网络后重试。");
+    }
+    if (error instanceof TypeError) {
+      throw new Error("网络连接失败，请检查网络后重试。");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-  return payload.data;
 }
 
 export function resolveApiBaseUrl(): string {
@@ -423,6 +441,8 @@ const apiErrorCodeMap: Record<string, string> = {
   FORBIDDEN: "当前账号没有权限执行此操作。",
   INSUFFICIENT_CREDITS: "积分余额不足，请充值后再提交生成。",
   INTERNAL_ERROR: "服务暂时异常，请稍后重试。",
+  INVALID_RESET_TOKEN: "重置链接无效或已过期，请重新申请。",
+  INVALID_VERIFY_TOKEN: "验证链接无效或已过期，请重新申请验证邮件。",
   NOT_FOUND: "请求的资源不存在或已被移除。",
   ORDER_NOT_PAYABLE: "该订单当前不可支付，请重新创建订单。",
   PLAN_UNAVAILABLE: "该套餐当前不可购买，请选择其他套餐。",
@@ -555,6 +575,10 @@ export function formatApiErrorMessage(code: string | undefined, message: string 
     return apiErrorMessageMap[message];
   }
   return status ? `请求失败，请稍后重试。（${status}）` : "请求失败，请稍后重试。";
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }
 
 function sleep(ms: number): Promise<void> {

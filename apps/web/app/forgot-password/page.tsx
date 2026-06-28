@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { type FormEvent, useState } from "react";
 import Link from "next/link";
 import { Mail } from "lucide-react";
 import { apiFetch } from "../../lib/api";
@@ -11,7 +11,15 @@ export default function ForgotPasswordPage() {
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
 
-  async function submit() {
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const validationMessage = validateForgotPasswordForm(email);
+    if (validationMessage) {
+      setSuccess(false);
+      setMessage(validationMessage);
+      return;
+    }
+
     setLoading(true);
     setMessage("");
     setSuccess(false);
@@ -41,22 +49,27 @@ export default function ForgotPasswordPage() {
         </Link>
         <h1 className="mt-6 text-3xl font-semibold">重置密码</h1>
         <p className="mt-2 text-sm leading-6 text-white/62">输入您的注册邮箱，我们将发送密码重置链接到您的邮箱。</p>
-        <div className="mt-6 space-y-4">
+        <form className="mt-6 space-y-4" noValidate onSubmit={submit}>
           <label className="block text-sm text-white/70">
             邮箱
             <input
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              type="email"
+              autoComplete="email"
               disabled={success}
+              maxLength={254}
+              required
+              type="email"
             />
           </label>
           {message ? (
             <p
+              aria-live="polite"
               className={`rounded-2xl border p-3 text-sm ${
                 success ? "border-mint/40 bg-mint/10 text-mint" : "border-ember/40 bg-ember/10 text-ember"
               }`}
+              role={success ? "status" : "alert"}
             >
               {message}
             </p>
@@ -64,9 +77,8 @@ export default function ForgotPasswordPage() {
           {!success ? (
             <button
               className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
-              type="button"
+              type="submit"
               disabled={loading || !email.trim()}
-              onClick={submit}
             >
               <Mail className="size-4" aria-hidden="true" />
               {loading ? "发送中..." : "发送重置链接"}
@@ -79,8 +91,19 @@ export default function ForgotPasswordPage() {
               返回登录
             </Link>
           )}
-        </div>
+        </form>
       </section>
     </main>
   );
+}
+
+function validateForgotPasswordForm(email: string): string | null {
+  const normalizedEmail = email.trim();
+  if (!normalizedEmail) {
+    return "请输入邮箱。";
+  }
+  if (normalizedEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    return "请输入有效的邮箱地址。";
+  }
+  return null;
 }

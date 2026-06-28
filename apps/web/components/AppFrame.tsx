@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { LogOut, Sparkles } from "lucide-react";
 import { apiFetch, formatStatusLabel, logout as apiLogout, type User } from "../lib/api";
 
@@ -25,6 +25,11 @@ export function AppFrame({
   children: React.ReactNode;
 }) {
   const [user, setUser] = useState<User | null>(null);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const [logoutLoading, setLogoutLoading] = useState(false);
+  const [logoutMessage, setLogoutMessage] = useState("");
+  const logoutTitleId = useId();
+  const logoutDescriptionId = useId();
 
   useEffect(() => {
     apiFetch<{ user: User }>("/api/auth/me")
@@ -32,9 +37,50 @@ export function AppFrame({
       .catch(() => {});
   }, []);
 
-  function logout() {
-    void apiLogout();
-    setUser(null);
+  useEffect(() => {
+    if (!logoutConfirmOpen) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !logoutLoading) {
+        setLogoutConfirmOpen(false);
+        setLogoutMessage("");
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [logoutConfirmOpen, logoutLoading]);
+
+  function requestLogout() {
+    setLogoutMessage("");
+    setLogoutConfirmOpen(true);
+  }
+
+  function cancelLogout() {
+    if (logoutLoading) {
+      return;
+    }
+    setLogoutConfirmOpen(false);
+    setLogoutMessage("");
+  }
+
+  async function confirmLogout() {
+    if (logoutLoading) {
+      return;
+    }
+    setLogoutLoading(true);
+    setLogoutMessage("");
+    try {
+      await apiLogout();
+      setUser(null);
+      setLogoutConfirmOpen(false);
+    } catch (error) {
+      setLogoutMessage(error instanceof Error ? error.message : "退出失败，请稍后重试。");
+    } finally {
+      setLogoutLoading(false);
+    }
   }
 
   return (
@@ -64,7 +110,7 @@ export function AppFrame({
                 <span className="truncate">{user.email}</span>
                 <button
                   type="button"
-                  onClick={logout}
+                  onClick={requestLogout}
                   className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-2 text-white/72 transition-colors duration-200 hover:bg-white/10 hover:text-white"
                 >
                   <LogOut className="size-4" aria-hidden="true" />
@@ -91,6 +137,63 @@ export function AppFrame({
         </div>
         {children}
       </section>
+
+      {logoutConfirmOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm"
+          onClick={cancelLogout}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              cancelLogout();
+            }
+          }}
+          role="presentation"
+        >
+          <section
+            aria-describedby={logoutDescriptionId}
+            aria-labelledby={logoutTitleId}
+            aria-modal="true"
+            className="w-full max-w-sm rounded-[1.25rem] border border-white/12 bg-ink p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <h2 className="text-lg font-semibold text-white" id={logoutTitleId}>
+              确认退出登录？
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-white/66" id={logoutDescriptionId}>
+              退出后需要重新登录才能访问生成历史、收藏和账户信息。
+            </p>
+            {logoutMessage ? (
+              <p
+                aria-live="polite"
+                className="mt-4 rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember"
+                role="alert"
+              >
+                {logoutMessage}
+              </p>
+            ) : null}
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                className="focus-ring rounded-full border border-white/12 px-4 py-2 text-sm text-white/72 transition-colors duration-200 hover:bg-white/10 hover:text-white disabled:opacity-60"
+                autoFocus
+                disabled={logoutLoading}
+                onClick={cancelLogout}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="focus-ring rounded-full bg-ember px-4 py-2 text-sm font-semibold text-white transition-colors duration-200 hover:bg-ember/80 disabled:opacity-60"
+                disabled={logoutLoading}
+                onClick={() => void confirmLogout()}
+                type="button"
+              >
+                {logoutLoading ? "退出中..." : "确认退出"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, Suspense, useState } from "react";
+import { type ClipboardEvent, type FormEvent, Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { UserPlus } from "lucide-react";
@@ -31,6 +31,11 @@ function RegisterForm() {
 
   const promptParam = searchParams.get("prompt");
   const fromDemo = searchParams.get("from") === "demo";
+
+  function handleConfirmPasswordPaste(event: ClipboardEvent<HTMLInputElement>) {
+    event.preventDefault();
+    setMessage("请手动输入确认密码，不能直接粘贴。");
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -105,6 +110,7 @@ function RegisterForm() {
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={confirmPassword}
               onChange={(event) => setConfirmPassword(event.target.value)}
+              onPaste={handleConfirmPasswordPaste}
               autoComplete="new-password"
               maxLength={128}
               minLength={12}
@@ -113,7 +119,13 @@ function RegisterForm() {
             />
           </label>
           {message ? (
-            <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p>
+            <p
+              aria-live="polite"
+              className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember"
+              role="alert"
+            >
+              {message}
+            </p>
           ) : null}
           <button
             className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
@@ -155,8 +167,21 @@ function validateRegisterForm(email: string, password: string, confirmPassword: 
   if (password.trim() !== password) {
     return "密码开头和结尾不能包含空格。";
   }
+  if (hasControlCharacter(password)) {
+    return "密码包含不支持的字符。";
+  }
   if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
     return "密码需要同时包含字母和数字。";
+  }
+  if (commonPasswordBlocklist.has(normalizePasswordForBlocklist(password))) {
+    return "密码过于常见，请更换更安全的密码。";
+  }
+  const emailName = normalizedEmail.split("@")[0]?.toLowerCase() ?? "";
+  if (emailName.length >= 4 && password.toLowerCase().includes(emailName)) {
+    return "密码不能包含邮箱名称。";
+  }
+  if (!confirmPassword) {
+    return "请再次输入密码。";
   }
   if (password !== confirmPassword) {
     return "两次输入的密码不一致。";
@@ -166,4 +191,26 @@ function validateRegisterForm(email: string, password: string, confirmPassword: 
 
 function isEmailLike(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+const commonPasswordBlocklist = new Set([
+  "123456",
+  "12345678",
+  "123456789",
+  "imagora",
+  "imagora123",
+  "password",
+  "password123",
+  "qwerty123"
+]);
+
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || code === 127;
+  });
+}
+
+function normalizePasswordForBlocklist(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }

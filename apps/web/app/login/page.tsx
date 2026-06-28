@@ -111,7 +111,11 @@ function LoginForm() {
             <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
               <div className="flex min-h-[72px] items-center justify-center overflow-hidden rounded-2xl border border-white/12 bg-white">
                 {captcha?.imageSvg ? (
-                  <div aria-hidden="true" dangerouslySetInnerHTML={{ __html: captcha.imageSvg }} />
+                  <img
+                    alt="图片验证码"
+                    className="h-full max-h-[72px] w-full object-contain"
+                    src={`data:image/svg+xml;utf8,${encodeURIComponent(captcha.imageSvg)}`}
+                  />
                 ) : (
                   <span className="text-sm text-ink/60">{captchaLoading ? "加载中..." : "加载失败"}</span>
                 )}
@@ -142,7 +146,13 @@ function LoginForm() {
             </Link>
           </div>
           {message ? (
-            <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p>
+            <p
+              aria-live="polite"
+              className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember"
+              role="alert"
+            >
+              {message}
+            </p>
           ) : null}
           <button
             className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"

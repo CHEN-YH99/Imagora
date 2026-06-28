@@ -153,6 +153,18 @@ test("auth validates registration and login payloads at browser boundaries", asy
     assert.equal(weakPassword.status, 400);
     assert.equal(weakPassword.payload.error.code, "VALIDATION_ERROR");
 
+    const weakResetPassword = await rawAuthPost(
+      baseUrl,
+      "/api/auth/reset-password",
+      {
+        token: "missing-token",
+        password: "password"
+      },
+      origin
+    );
+    assert.equal(weakResetPassword.status, 400);
+    assert.equal(weakResetPassword.payload.error.code, "VALIDATION_ERROR");
+
     const email = `Mixed-${crypto.randomUUID()}@IMAGORA.LOCAL`;
     const registered = await authPost(
       baseUrl,

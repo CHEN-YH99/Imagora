@@ -21,12 +21,43 @@ test("web exposes image detail workflow from history and favorites", async () =>
 });
 
 test("web auth pages validate inputs and registration does not ask for nickname", async () => {
+  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const apiMain = await readFile(join(root, "apps/api/src/main.ts"), "utf8");
+  const appFrame = await readFile(join(root, "apps/web/components/AppFrame.tsx"), "utf8");
+  const forgotPasswordPage = await readFile(join(root, "apps/web/app/forgot-password/page.tsx"), "utf8");
   const loginPage = await readFile(join(root, "apps/web/app/login/page.tsx"), "utf8");
+  const nextConfig = await readFile(join(root, "apps/web/next.config.mjs"), "utf8");
   const registerPage = await readFile(join(root, "apps/web/app/register/page.tsx"), "utf8");
+  const resetPasswordPage = await readFile(join(root, "apps/web/app/reset-password/page.tsx"), "utf8");
+  const verifyEmailPage = await readFile(join(root, "apps/web/app/verify-email/page.tsx"), "utf8");
 
+  assert.match(appFrame, /role="dialog"/);
+  assert.match(appFrame, /确认退出/);
+  assert.match(appFrame, /await apiLogout/);
+  assert.match(appFrame, /autoFocus/);
   assert.match(loginPage, /validateLoginForm/);
+  assert.match(loginPage, /role="alert"/);
+  assert.match(loginPage, /data:image\/svg\+xml;utf8/);
+  assert.doesNotMatch(loginPage, /dangerouslySetInnerHTML/);
   assert.match(registerPage, /validateRegisterForm/);
   assert.match(registerPage, /confirmPassword/);
+  assert.match(registerPage, /onPaste=\{handleConfirmPasswordPaste\}/);
+  assert.match(registerPage, /event\.preventDefault\(\)/);
+  assert.match(registerPage, /role="alert"/);
+  assert.match(registerPage, /commonPasswordBlocklist/);
   assert.doesNotMatch(registerPage, /昵称/);
   assert.doesNotMatch(registerPage, /nickname/);
+  assert.match(resetPasswordPage, /validateResetPasswordForm/);
+  assert.match(resetPasswordPage, /密码至少需要 12 位/);
+  assert.match(resetPasswordPage, /role=\{success \? "status" : "alert"\}/);
+  assert.match(forgotPasswordPage, /validateForgotPasswordForm/);
+  assert.match(forgotPasswordPage, /role=\{success \? "status" : "alert"\}/);
+  assert.match(verifyEmailPage, /role="status"/);
+  assert.match(apiClient, /AbortController/);
+  assert.match(apiClient, /请求超时，请检查网络后重试。/);
+  assert.match(apiClient, /INVALID_RESET_TOKEN/);
+  assert.match(apiMain, /password: newPasswordSchema/);
+  assert.match(nextConfig, /X-Content-Type-Options/);
+  assert.match(nextConfig, /X-Frame-Options/);
+  assert.match(nextConfig, /Permissions-Policy/);
 });
