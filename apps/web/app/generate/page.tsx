@@ -65,9 +65,18 @@ function GenerateExperience() {
   }, []);
 
   useEffect(() => {
-    const promptFromHistory = searchParams.get("prompt");
-    if (promptFromHistory) {
-      setPrompt(promptFromHistory);
+    const p = searchParams.get("prompt");
+    const s = searchParams.get("style");
+    const ar = searchParams.get("aspectRatio");
+    const q = searchParams.get("quality");
+    const qty = searchParams.get("quantity");
+    if (p) setPrompt(p);
+    if (s && ["realistic", "illustration", "anime", "product_photography", "poster"].includes(s)) setStyle(s);
+    if (ar && ["1:1", "3:4", "4:3", "9:16", "16:9"].includes(ar)) setAspectRatio(ar);
+    if (q && ["draft", "standard", "high"].includes(q)) setQuality(q);
+    if (qty) {
+      const n = Number(qty);
+      if (Number.isInteger(n) && n >= 1 && n <= 4) setQuantity(n);
     }
   }, [searchParams]);
 

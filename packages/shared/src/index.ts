@@ -270,7 +270,8 @@ export type ErrorCode =
   | "FEATURE_DISABLED"
   | "INTERNAL_ERROR"
   | "INVALID_RESET_TOKEN"
-  | "RESET_TOKEN_EXPIRED";
+  | "RESET_TOKEN_EXPIRED"
+  | "INVALID_VERIFY_TOKEN";
 
 export class AppError extends Error {
   readonly code: ErrorCode;

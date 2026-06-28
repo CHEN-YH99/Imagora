@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, BarChart3, Coins, Eye, EyeOff, Plus, RefreshCw, Save, Shield } from "lucide-react";
+import { AlertTriangle, BarChart3, Coins, Eye, EyeOff, Plus, RefreshCw, Save, Shield, X } from "lucide-react";
 import { AppFrame, Panel, StatusPill } from "../../components/AppFrame";
 import {
   apiFetch,
@@ -29,6 +29,20 @@ import {
   type Task,
   type User
 } from "../../lib/api";
+
+type UserDetail = {
+  user: User;
+  account: { balance: number; totalEarned: number; totalSpent: number } | undefined;
+  stats: {
+    totalOrders: number;
+    paidOrders: number;
+    totalTasks: number;
+    succeededTasks: number;
+    totalImages: number;
+  };
+  recentOrders: Order[];
+  recentTasks: Task[];
+};
 
 type AuditLog = {
   id: string;
@@ -93,6 +107,9 @@ export default function AdminPage() {
   const [taskStatusFilter, setTaskStatusFilter] = useState<"ALL" | Task["status"]>("ALL");
   const [orderStatusFilter, setOrderStatusFilter] = useState<"ALL" | Order["status"]>("ALL");
   const [imageVisibilityFilter, setImageVisibilityFilter] = useState<"ALL" | GeneratedImage["visibility"]>("ALL");
+  const [orderSearch, setOrderSearch] = useState("");
+  const [userDetail, setUserDetail] = useState<UserDetail | null>(null);
+  const [userDetailLoading, setUserDetailLoading] = useState(false);
   const [creditAdjustments, setCreditAdjustments] = useState<Record<string, CreditAdjustmentDraft>>({});
   const [planDraft, setPlanDraft] = useState<PlanFormState>(emptyPlanForm);
   const [planEdits, setPlanEdits] = useState<
@@ -102,6 +119,19 @@ export default function AdminPage() {
   useEffect(() => {
     load();
   }, [taskStatusFilter, orderStatusFilter, imageVisibilityFilter]);
+
+  async function openUserDetail(userId: string) {
+    setUserDetailLoading(true);
+    setUserDetail(null);
+    try {
+      const result = await apiFetch<UserDetail>(`/api/admin/users/${userId}`);
+      setUserDetail(result);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "用户详情加载失败。");
+    } finally {
+      setUserDetailLoading(false);
+    }
+  }
 
   async function loginAdmin() {
     setLoading(true);
@@ -327,6 +357,7 @@ export default function AdminPage() {
     .slice(0, 12);
   const visibleOrders = orders
     .filter((order) => orderStatusFilter === "ALL" || order.status === orderStatusFilter)
+    .filter((order) => !orderSearch.trim() || order.orderNo.toLowerCase().includes(orderSearch.trim().toLowerCase()))
     .slice(0, 12);
   const visibleImages = images
     .filter((image) => imageVisibilityFilter === "ALL" || image.visibility === imageVisibilityFilter)
@@ -470,6 +501,13 @@ export default function AdminPage() {
                     <StatusPill>
                       {formatStatusLabel(user.role)} · {formatStatusLabel(user.status)}
                     </StatusPill>
+                    <button
+                      className="focus-ring cursor-pointer rounded-full border border-white/12 bg-white/8 px-3 py-2 text-xs font-semibold text-white transition-colors hover:border-mint/70"
+                      type="button"
+                      onClick={() => void openUserDetail(user.id)}
+                    >
+                      详情
+                    </button>
                     {user.role !== "ADMIN" ? (
                       <button
                         className="focus-ring cursor-pointer rounded-full border border-white/12 bg-white/8 px-3 py-2 text-xs font-semibold text-white transition-colors hover:border-mint/70"
@@ -597,19 +635,28 @@ export default function AdminPage() {
         <Panel>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-xl font-semibold">订单管理</h2>
-            <select
-              className="focus-ring rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-              value={orderStatusFilter}
-              onChange={(event) => setOrderStatusFilter(event.target.value as "ALL" | Order["status"])}
-              aria-label="按订单状态筛选"
-            >
-              <option value="ALL">全部状态</option>
-              <option value="PENDING">待处理</option>
-              <option value="PAID">已支付</option>
-              <option value="CLOSED">已关闭</option>
-              <option value="CANCELED">已取消</option>
-              <option value="REFUNDED">已退款</option>
-            </select>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                className="focus-ring rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                value={orderSearch}
+                onChange={(event) => setOrderSearch(event.target.value)}
+                placeholder="搜索订单号"
+                aria-label="搜索订单号"
+              />
+              <select
+                className="focus-ring rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                value={orderStatusFilter}
+                onChange={(event) => setOrderStatusFilter(event.target.value as "ALL" | Order["status"])}
+                aria-label="按订单状态筛选"
+              >
+                <option value="ALL">全部状态</option>
+                <option value="PENDING">待处理</option>
+                <option value="PAID">已支付</option>
+                <option value="CLOSED">已关闭</option>
+                <option value="CANCELED">已取消</option>
+                <option value="REFUNDED">已退款</option>
+              </select>
+            </div>
           </div>
           <div className="space-y-3">
             {visibleOrders.map((order) => (
@@ -805,6 +852,96 @@ export default function AdminPage() {
           </div>
         </Panel>
       </div>
+      {userDetail ? (
+        <div className="fixed inset-0 z-50 flex items-start justify-end bg-black/60 p-4" onClick={() => setUserDetail(null)}>
+          <aside
+            className="h-full w-full max-w-md overflow-y-auto rounded-[1.5rem] border border-white/12 bg-ink p-6"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-5 flex items-center justify-between gap-3">
+              <h2 className="text-xl font-semibold">用户详情</h2>
+              <button
+                className="focus-ring inline-flex size-8 items-center justify-center rounded-full border border-white/12 text-white/60 hover:bg-white/10"
+                type="button"
+                onClick={() => setUserDetail(null)}
+                aria-label="关闭"
+              >
+                <X className="size-4" aria-hidden="true" />
+              </button>
+            </div>
+            <div className="space-y-4 text-sm">
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="font-medium">{userDetail.user.email}</p>
+                <p className="mt-1 text-white/54">{formatNickname(userDetail.user.nickname)}</p>
+                <div className="mt-2 flex gap-2">
+                  <StatusPill>{userDetail.user.role}</StatusPill>
+                  <StatusPill>{userDetail.user.status}</StatusPill>
+                </div>
+              </div>
+              {userDetail.account ? (
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-white/50">积分余额</p>
+                  <p className="mt-1 text-2xl font-semibold text-volt">{formatCredits(userDetail.account.balance)}</p>
+                  <p className="mt-1 text-xs text-white/40">
+                    累计获得 {formatCredits(userDetail.account.totalEarned)} · 累计消耗 {formatCredits(userDetail.account.totalSpent)}
+                  </p>
+                </div>
+              ) : null}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-center">
+                  <p className="text-lg font-semibold">{userDetail.stats.totalTasks}</p>
+                  <p className="mt-1 text-xs text-white/50">任务</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-center">
+                  <p className="text-lg font-semibold">{userDetail.stats.paidOrders}</p>
+                  <p className="mt-1 text-xs text-white/50">订单</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-center">
+                  <p className="text-lg font-semibold">{userDetail.stats.totalImages}</p>
+                  <p className="mt-1 text-xs text-white/50">图片</p>
+                </div>
+              </div>
+              {userDetail.recentOrders.length > 0 ? (
+                <div>
+                  <p className="mb-2 text-white/50">最近订单</p>
+                  <div className="space-y-2">
+                    {userDetail.recentOrders.map((order) => (
+                      <div key={order.id} className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-3">
+                        <div>
+                          <p className="text-xs font-medium">{order.orderNo}</p>
+                          <p className="mt-0.5 text-xs text-white/40">{formatMoney(order.amountCents, order.currency)}</p>
+                        </div>
+                        <StatusPill>{order.status}</StatusPill>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {userDetail.recentTasks.length > 0 ? (
+                <div>
+                  <p className="mb-2 text-white/50">最近任务</p>
+                  <div className="space-y-2">
+                    {userDetail.recentTasks.map((task) => (
+                      <div key={task.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                        <p className="line-clamp-1 text-xs text-white/70">{task.prompt}</p>
+                        <div className="mt-1 flex items-center gap-2">
+                          <StatusPill>{task.status}</StatusPill>
+                          <span className="text-xs text-white/40">{formatCredits(task.creditCost)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </aside>
+        </div>
+      ) : null}
+      {userDetailLoading ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <p className="rounded-2xl border border-white/12 bg-ink px-6 py-4 text-sm text-white/70">正在加载用户详情...</p>
+        </div>
+      ) : null}
     </AppFrame>
   );
 }

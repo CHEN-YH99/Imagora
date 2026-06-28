@@ -419,6 +419,59 @@ app.post("/api/auth/reset-password", async (request) => {
   });
 });
 
+app.post("/api/auth/verify-email", async (request) => {
+  const input = z.object({ token: z.string().min(1) }).parse(request.body);
+  const tokenHash = createHash("sha256").update(input.token).digest("hex");
+  const data = await store.read();
+  const verifyToken = data.emailVerificationTokens.find((t) => t.tokenHash === tokenHash && !t.usedAt);
+  if (!verifyToken || new Date(verifyToken.expiresAt) < new Date()) {
+    throw new AppError("INVALID_VERIFY_TOKEN", "Invalid or expired verification token", 400);
+  }
+  return store.update(async (data) => {
+    const user = mustFindUser(data, verifyToken.userId);
+    const now = new Date().toISOString();
+    user.emailVerifiedAt = now;
+    user.updatedAt = now;
+    const token = data.emailVerificationTokens.find((t) => t.tokenHash === tokenHash);
+    if (token) {
+      token.usedAt = now;
+    }
+    request.log.info({ userId: user.id }, "Email verified");
+    return envelope(request, { ok: true, email: user.email });
+  });
+});
+
+app.post("/api/auth/resend-verification", async (request) => {
+  const { user } = await requireAuth(request);
+  if (user.emailVerifiedAt) {
+    return envelope(request, { ok: true, message: "Email is already verified" });
+  }
+  return store.update(async (data) => {
+    const now = new Date().toISOString();
+    const verifyTokenPlain = randomUUID();
+    const verifyTokenHash = createHash("sha256").update(verifyTokenPlain).digest("hex");
+    const verifyTtlHours = envNumber("EMAIL_VERIFICATION_TOKEN_TTL_HOURS", 24);
+    const verifyExpiresAt = new Date(Date.now() + verifyTtlHours * 60 * 60 * 1000).toISOString();
+    data.emailVerificationTokens = data.emailVerificationTokens.filter((t) => t.userId !== user.id || t.usedAt);
+    data.emailVerificationTokens.push({
+      id: randomUUID(),
+      userId: user.id,
+      tokenHash: verifyTokenHash,
+      expiresAt: verifyExpiresAt,
+      usedAt: null,
+      createdAt: now
+    });
+    const verifyUrl = `${envString("WEB_ORIGIN", "http://127.0.0.1:3100")}/verify-email?token=${verifyTokenPlain}`;
+    try {
+      await mailer.sendEmail(buildVerificationEmail({ to: user.email, nickname: user.nickname, verifyUrl }));
+      request.log.info({ userId: user.id }, "Verification email resent");
+    } catch (error) {
+      request.log.error({ userId: user.id, error }, "Failed to resend verification email");
+    }
+    return envelope(request, { ok: true, message: "Verification email sent" });
+  });
+});
+
 app.get("/api/auth/me", async (request) => {
   const { user } = await requireAuth(request);
   return envelope(request, { user: publicUser(user) });
