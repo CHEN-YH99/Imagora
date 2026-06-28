@@ -68,12 +68,24 @@ test("auth remains usable in local development when prisma database is unavailab
     const baseUrl = `http://127.0.0.1:${port}`;
     await waitForHealth(baseUrl);
 
+    const browserOrigin = "http://localhost:3100";
+    const preflight = await fetch(`${baseUrl}/api/auth/register`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: browserOrigin,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type"
+      }
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get("access-control-allow-origin"), browserOrigin);
+
     const email = `local-${crypto.randomUUID()}@imagora.local`;
     const password = "LocalStrong123!";
-    const registered = await authPost(baseUrl, "/api/auth/register", { email, password }, "http://127.0.0.1:3100");
+    const registered = await authPost(baseUrl, "/api/auth/register", { email, password }, browserOrigin);
     assert.equal(registered.data.user.email, email);
 
-    const fallbackCaptcha = await getCaptcha(baseUrl, "http://127.0.0.1:3100");
+    const fallbackCaptcha = await getCaptcha(baseUrl, browserOrigin);
     const loggedIn = await authPost(
       baseUrl,
       "/api/auth/login",
@@ -83,7 +95,7 @@ test("auth remains usable in local development when prisma database is unavailab
         captchaId: fallbackCaptcha.data.captchaId,
         captchaAnswer: fallbackCaptcha.data.answer
       },
-      "http://127.0.0.1:3100"
+      browserOrigin
     );
     assert.equal(loggedIn.data.user.email, email);
   } finally {

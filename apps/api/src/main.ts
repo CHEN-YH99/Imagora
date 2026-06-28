@@ -121,7 +121,7 @@ app.addContentTypeParser("application/json", { parseAs: "string" }, (request, bo
 });
 
 await app.register(cors, {
-  origin: process.env.WEB_ORIGIN ?? true,
+  origin: [...allowedWriteOrigins()],
   credentials: true
 });
 
@@ -2410,18 +2410,55 @@ function enforceWriteOrigin(request: FastifyRequest): void {
   if (!origin) {
     return;
   }
-  if (!allowedWriteOrigins().has(origin)) {
+  if (!allowedWriteOrigins().has(normalizeOrigin(origin))) {
     throw new AppError("FORBIDDEN", "Request origin is not allowed", 403);
   }
 }
 
 function allowedWriteOrigins(): Set<string> {
-  const values = [process.env.WEB_ORIGIN, process.env.CSRF_ALLOWED_ORIGINS]
+  const values = [process.env.WEB_ORIGIN || "http://127.0.0.1:3100", process.env.CSRF_ALLOWED_ORIGINS]
     .filter((value): value is string => Boolean(value))
     .flatMap((value) => value.split(","))
-    .map((value) => value.trim().replace(/\/$/, ""))
+    .map(normalizeOrigin)
     .filter(Boolean);
-  return new Set(values);
+  const origins = new Set(values);
+  addLocalDevelopmentOrigins(origins);
+  return origins;
+}
+
+function normalizeOrigin(value: string): string {
+  return value.trim().replace(/\/$/, "");
+}
+
+function addLocalDevelopmentOrigins(origins: Set<string>): void {
+  if (isProduction) {
+    return;
+  }
+  origins.add("http://127.0.0.1:3100");
+  origins.add("http://localhost:3100");
+  for (const origin of [...origins]) {
+    const alias = localDevelopmentOriginAlias(origin);
+    if (alias) {
+      origins.add(alias);
+    }
+  }
+}
+
+function localDevelopmentOriginAlias(origin: string): string | null {
+  try {
+    const url = new URL(origin);
+    if (url.hostname === "127.0.0.1") {
+      url.hostname = "localhost";
+      return normalizeOrigin(url.origin);
+    }
+    if (url.hostname === "localhost") {
+      url.hostname = "127.0.0.1";
+      return normalizeOrigin(url.origin);
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 async function enforceRateLimit(request: FastifyRequest, reply: FastifyReply): Promise<void> {

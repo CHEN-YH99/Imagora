@@ -1,4 +1,6 @@
-export const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4100";
+const defaultApiBaseUrl = "http://127.0.0.1:4100";
+
+export const apiBaseUrl = resolveApiBaseUrl();
 
 export type User = {
   id: string;
@@ -163,7 +165,7 @@ export async function apiFetch<T>(
     body?: unknown;
   } = {}
 ): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await fetch(`${resolveApiBaseUrl()}${path}`, {
     method: options.method ?? "GET",
     credentials: "include",
     headers: {
@@ -176,6 +178,37 @@ export async function apiFetch<T>(
     throw new Error(formatApiErrorMessage(payload.error?.code, payload.error?.message, response.status));
   }
   return payload.data;
+}
+
+export function resolveApiBaseUrl(): string {
+  const configured = normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_BASE_URL);
+  if (typeof window === "undefined") {
+    return configured ?? defaultApiBaseUrl;
+  }
+  if (!isLocalHostname(window.location.hostname)) {
+    return configured ?? defaultApiBaseUrl;
+  }
+  if (!configured) {
+    return `${window.location.protocol}//${window.location.hostname}:4100`;
+  }
+  try {
+    const url = new URL(configured);
+    if (!isLocalHostname(url.hostname)) {
+      return configured;
+    }
+    return `${url.protocol}//${window.location.hostname}:${url.port || "4100"}`;
+  } catch {
+    return configured;
+  }
+}
+
+function normalizeApiBaseUrl(value: string | undefined): string | null {
+  const normalized = value?.trim().replace(/\/$/, "");
+  return normalized || null;
+}
+
+function isLocalHostname(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1";
 }
 
 async function readApiPayload<T>(

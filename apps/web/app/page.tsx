@@ -25,7 +25,7 @@ import {
   X,
   Zap
 } from "lucide-react";
-import { formatCredits } from "../lib/api";
+import { apiBaseUrl, formatCredits } from "../lib/api";
 
 type StyleOption = {
   id: string;
@@ -204,8 +204,6 @@ const stageClasses = [
 
 // demo 展示用的静态色块，每个对应一种风格
 const demoArtClasses = ["art-cinematic", "art-product", "art-anime", "art-poster", "art-architecture", "art-isometric"];
-
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4100";
 
 export default function HomePage() {
   const router = useRouter();
