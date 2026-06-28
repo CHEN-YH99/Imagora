@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
 import {
   ArrowRight,
@@ -24,7 +25,7 @@ import {
   X,
   Zap
 } from "lucide-react";
-import { formatApiErrorMessage, formatCredits, formatStatusLabel } from "../lib/api";
+import { formatCredits } from "../lib/api";
 
 type StyleOption = {
   id: string;
@@ -37,19 +38,6 @@ type StyleOption = {
 };
 
 type Quality = "1k" | "2k" | "4k";
-
-type ApiImage = {
-  id: string;
-  publicUrl: string;
-  width: number;
-  height: number;
-};
-
-type ApiTask = {
-  id: string;
-  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "BLOCKED";
-  failureMessage: string | null;
-};
 
 const modelOptions = [
   { value: "gpt-image-2", label: "GPT Image 2" },
@@ -124,12 +112,48 @@ const styleOptions: StyleOption[] = [
 ];
 
 const galleryItems = [
-  { title: "霓虹雨巷", style: "电影写实", prompt: "雨夜赛博巷道，霓虹反射，35mm 电影镜头", cost: 16, artClass: "art-cinematic" },
-  { title: "陶瓷质感耳机", style: "产品摄影", prompt: "白瓷无线耳机，薄荷色光带，干净棚拍", cost: 14, artClass: "art-product" },
-  { title: "太阳能信使", style: "动漫插画", prompt: "未来城市信使，明亮发光披风，动画封面", cost: 12, artClass: "art-anime" },
-  { title: "音乐节主视觉", style: "海报设计", prompt: "音乐节主视觉，撞色几何，留出标题版位", cost: 18, artClass: "art-poster" },
-  { title: "海岸创作室", style: "空间概念", prompt: "海边创作工作室，玻璃立面，晨光进入空间", cost: 16, artClass: "art-architecture" },
-  { title: "创作流程图", style: "等距图形", prompt: "智能创作流程等距插图，节点清晰，活力配色", cost: 10, artClass: "art-isometric" }
+  {
+    title: "霓虹雨巷",
+    style: "电影写实",
+    prompt: "雨夜赛博巷道，霓虹反射，35mm 电影镜头",
+    cost: 16,
+    artClass: "art-cinematic"
+  },
+  {
+    title: "陶瓷质感耳机",
+    style: "产品摄影",
+    prompt: "白瓷无线耳机，薄荷色光带，干净棚拍",
+    cost: 14,
+    artClass: "art-product"
+  },
+  {
+    title: "太阳能信使",
+    style: "动漫插画",
+    prompt: "未来城市信使，明亮发光披风，动画封面",
+    cost: 12,
+    artClass: "art-anime"
+  },
+  {
+    title: "音乐节主视觉",
+    style: "海报设计",
+    prompt: "音乐节主视觉，撞色几何，留出标题版位",
+    cost: 18,
+    artClass: "art-poster"
+  },
+  {
+    title: "海岸创作室",
+    style: "空间概念",
+    prompt: "海边创作工作室，玻璃立面，晨光进入空间",
+    cost: 16,
+    artClass: "art-architecture"
+  },
+  {
+    title: "创作流程图",
+    style: "等距图形",
+    prompt: "智能创作流程等距插图，节点清晰，活力配色",
+    cost: 10,
+    artClass: "art-isometric"
+  }
 ];
 
 const promptExamples = [
@@ -178,7 +202,13 @@ const stageClasses = [
   "stage-isometric"
 ];
 
+// demo 展示用的静态色块，每个对应一种风格
+const demoArtClasses = ["art-cinematic", "art-product", "art-anime", "art-poster", "art-architecture", "art-isometric"];
+
+const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4100";
+
 export default function HomePage() {
+  const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [selectedModel, setSelectedModel] = useState("gpt-image-2");
@@ -186,53 +216,36 @@ export default function HomePage() {
   const [quality, setQuality] = useState<Quality>("2k");
   const [quantity, setQuantity] = useState(2);
   const [prompt, setPrompt] = useState(promptExamples[0] ?? "");
-  const [apiMessage, setApiMessage] = useState("生成服务已就绪，可以提交预览任务。");
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generatedImages, setGeneratedImages] = useState<ApiImage[]>([]);
-  const [balance, setBalance] = useState(1240);
+  const [demoProgress, setDemoProgress] = useState(0);
+  const [demoPhase, setDemoPhase] = useState<"idle" | "running" | "done">("idle");
 
+  // 检测真实登录状态，不依赖 demo 账号
   useEffect(() => {
-    apiFetch<{ user: { id: string } }>("/api/auth/me", { method: "GET" })
-      .then(() => setIsLoggedIn(true))
-      .catch(() => setIsLoggedIn(false));
+    fetch(`${apiBaseUrl}/api/auth/me`, { credentials: "include" })
+      .then((r) => {
+        if (r.ok) setIsLoggedIn(true);
+      })
+      .catch(() => {});
   }, []);
 
   const creditCost = useMemo(() => Math.ceil(8 * qualityMultiplier[quality] * quantity), [quality, quantity]);
 
   async function handleGenerate() {
-    setIsGenerating(true);
-    setGeneratedImages([]);
-    setApiMessage("正在连接生成服务...");
-    try {
-      await loginDemo();
-      const created = await apiFetch<{ task: ApiTask; balanceAfter: number }>("/api/generation/tasks", {
-        method: "POST",
-        body: {
-          clientRequestId: crypto.randomUUID(),
-          prompt,
-          negativePrompt: "低质量、模糊、变形、水印",
-          style: "realistic",
-          aspectRatio,
-          quantity,
-          quality: mapQuality(quality),
-          model: selectedModel
-        }
-      });
-      setBalance(created.balanceAfter);
-      setApiMessage(`任务${formatStatusLabel(created.task.status)}，已预留 ${formatCredits(creditCost)}。`);
-      const result = await waitForTask(created.task.id);
-      if (result.task.status === "SUCCEEDED") {
-        setGeneratedImages(result.images);
-        setApiMessage(`生成完成，已交付 ${result.images.length} 张图片。`);
-      } else {
-        setApiMessage(result.task.failureMessage ?? `任务已结束：${formatStatusLabel(result.task.status)}。`);
-      }
-    } catch (error) {
-      setApiMessage(error instanceof Error ? error.message : "生成失败，请稍后重试。");
-    } finally {
-      setIsGenerating(false);
+    if (!prompt.trim() || demoPhase === "running") return;
+    // 模拟进度动画，完成后跳转注册页并携带提示词
+    setDemoPhase("running");
+    setDemoProgress(0);
+    for (const step of [12, 28, 47, 63, 81, 100]) {
+      await sleep(350);
+      setDemoProgress(step);
     }
+    setDemoPhase("done");
+    await sleep(500);
+    router.push(`/register?from=demo&prompt=${encodeURIComponent(prompt)}`);
   }
+
+  const isRunning = demoPhase === "running";
+  const isDone = demoPhase === "done";
 
   return (
     <main className="min-h-screen bg-ink text-white">
@@ -263,7 +276,6 @@ export default function HomePage() {
             ))}
           </div>
 
-          {/* 桌面端右侧按钮：已登录→工作台，未登录→登录+注册 */}
           <div className="hidden items-center gap-2 md:flex">
             {isLoggedIn ? (
               <a
@@ -303,7 +315,6 @@ export default function HomePage() {
           </button>
         </nav>
 
-        {/* 移动端菜单 */}
         {menuOpen ? (
           <div className="mx-auto mt-2 max-w-7xl rounded-3xl border border-white/15 bg-ink/94 p-3 shadow-2xl shadow-black/40 backdrop-blur-xl md:hidden">
             {[
@@ -373,7 +384,7 @@ export default function HomePage() {
             面向创作者、电商运营和内容团队，提供风格选择、比例设置、批量生成、质量控制和积分预估，让图片生产流程清晰可控。
           </p>
 
-          {/* Hero CTA：已登录→工作台，未登录→注册+试用 */}
+          {/* Hero CTA */}
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
             {isLoggedIn ? (
               <a
@@ -403,15 +414,18 @@ export default function HomePage() {
             )}
           </div>
 
-          {/* 内嵌生成器 */}
+          {/* ── 内嵌 Demo 生成器 ── */}
           <div id="generator" className="glass-panel accent-border mt-9 w-full max-w-4xl rounded-[2rem] p-3 text-left">
-            <label className="sr-only" htmlFor="prompt">提示词</label>
+            <label className="sr-only" htmlFor="prompt">
+              提示词
+            </label>
             <div className="flex flex-col gap-3 md:flex-row">
               <textarea
                 id="prompt"
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                className="focus-ring min-h-28 flex-1 resize-none rounded-[1.35rem] border border-white/12 bg-black/34 px-5 py-4 text-base leading-7 text-white placeholder:text-white/40"
+                disabled={isRunning || isDone}
+                className="focus-ring min-h-28 flex-1 resize-none rounded-[1.35rem] border border-white/12 bg-black/34 px-5 py-4 text-base leading-7 text-white placeholder:text-white/40 disabled:opacity-60"
                 maxLength={420}
                 placeholder="描述你想生成的图片内容、主体、风格、光线和用途..."
               />
@@ -422,9 +436,12 @@ export default function HomePage() {
                     value={selectedModel}
                     onChange={(e) => setSelectedModel(e.target.value)}
                     aria-label="选择模型"
+                    disabled={isRunning || isDone}
                   >
                     {modelOptions.map((o) => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
                     ))}
                   </select>
                   <select
@@ -432,9 +449,12 @@ export default function HomePage() {
                     value={aspectRatio}
                     onChange={(e) => setAspectRatio(e.target.value)}
                     aria-label="选择比例"
+                    disabled={isRunning || isDone}
                   >
                     {aspectRatioOptions.map((o) => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
                     ))}
                   </select>
                   <div className="grid grid-cols-2 gap-2">
@@ -444,30 +464,37 @@ export default function HomePage() {
                         className="focus-ring rounded-full px-2 text-white/70 hover:bg-white/10 hover:text-white"
                         type="button"
                         aria-label="减少生成数量"
+                        disabled={isRunning || isDone}
                         onClick={() => setQuantity((v) => Math.max(1, v - 1))}
-                      >-</button>
+                      >
+                        -
+                      </button>
                       {quantity}
                       <button
                         className="focus-ring rounded-full px-2 text-white/70 hover:bg-white/10 hover:text-white"
                         type="button"
                         aria-label="增加生成数量"
+                        disabled={isRunning || isDone}
                         onClick={() => setQuantity((v) => Math.min(4, v + 1))}
-                      >+</button>
+                      >
+                        +
+                      </button>
                     </span>
                   </div>
                 </div>
                 <button
                   type="button"
-                  disabled={isGenerating || !prompt.trim()}
-                  onClick={handleGenerate}
+                  disabled={isRunning || isDone || !prompt.trim()}
+                  onClick={() => void handleGenerate()}
                   className="focus-ring mt-4 inline-flex items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Wand2 className="size-4" aria-hidden="true" />
-                  {isGenerating ? "生成中..." : "生成预览"}
+                  {isRunning ? "生成中..." : isDone ? "跳转中..." : "生成预览"}
                 </button>
               </div>
             </div>
 
+            {/* 画质 + 积分 */}
             <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto] md:items-center">
               <div className="flex flex-wrap gap-2">
                 {(["1k", "2k", "4k"] as Quality[]).map((item) => (
@@ -475,12 +502,9 @@ export default function HomePage() {
                     key={item}
                     type="button"
                     aria-pressed={quality === item}
+                    disabled={isRunning || isDone}
                     onClick={() => setQuality(item)}
-                    className={`focus-ring rounded-full border px-4 py-2 text-sm transition-colors duration-200 ${
-                      quality === item
-                        ? "border-mint bg-mint text-ink"
-                        : "border-white/14 bg-white/8 text-white/72 hover:bg-white/14 hover:text-white"
-                    }`}
+                    className={`focus-ring rounded-full border px-4 py-2 text-sm transition-colors duration-200 disabled:opacity-50 ${quality === item ? "border-mint bg-mint text-ink" : "border-white/14 bg-white/8 text-white/72 hover:bg-white/14 hover:text-white"}`}
                   >
                     {item.toUpperCase()}
                   </button>
@@ -492,44 +516,37 @@ export default function HomePage() {
                   {formatCredits(creditCost)}
                 </span>
                 <span className="h-4 w-px bg-white/18" aria-hidden="true" />
-                <span>余额 {balance.toLocaleString("zh-CN")}</span>
+                <span className="text-white/50">注册后使用</span>
               </div>
             </div>
 
+            {/* 状态区：进度条 / demo 图 / 跳转提示 */}
             <div className="mt-3 rounded-[1.25rem] border border-white/12 bg-black/24 p-4">
-              <p className="text-sm text-white/70">{apiMessage}</p>
-              {generatedImages.length > 0 ? (
-                <>
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    {generatedImages.map((image) => (
-                      <img
-                        key={image.id}
-                        src={image.publicUrl}
-                        alt="Imagora 生成结果"
-                        className="aspect-square w-full rounded-2xl border border-white/12 object-cover"
-                        width={image.width}
-                        height={image.height}
-                      />
+              {isRunning ? (
+                <div>
+                  <p className="mb-3 text-sm text-white/70">正在生成预览图，完成后引导注册...</p>
+                  <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                    <div
+                      className="h-full rounded-full bg-mint transition-all duration-300"
+                      style={{ width: `${demoProgress}%` }}
+                    />
+                  </div>
+                  <p className="mt-2 text-right text-xs text-white/40">{demoProgress}%</p>
+                </div>
+              ) : isDone ? (
+                <div>
+                  <p className="mb-3 text-sm text-white/70">预览已生成，正在跳转注册页面...</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {demoArtClasses.slice(0, quantity > 3 ? 4 : quantity > 2 ? 3 : quantity).map((cls) => (
+                      <div key={cls} className={`gallery-art ${cls} rounded-xl`} aria-hidden="true" />
                     ))}
                   </div>
-                  {/* 生成后引导：未登录时显示注册提示 */}
-                  {!isLoggedIn ? (
-                    <div className="mt-4 flex flex-col items-center gap-3 rounded-2xl border border-mint/30 bg-mint/8 p-4 text-center sm:flex-row sm:text-left">
-                      <div className="flex-1">
-                        <p className="font-semibold text-white">注册账号，永久保存这张图</p>
-                        <p className="mt-1 text-sm text-white/60">登录用户可查看历史、收藏、下载原图，并获得 120 欢迎积分。</p>
-                      </div>
-                      <a
-                        href="/register"
-                        className="focus-ring shrink-0 inline-flex items-center gap-2 rounded-full bg-mint px-5 py-2.5 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-volt"
-                      >
-                        <UserPlus className="size-4" aria-hidden="true" />
-                        免费注册
-                      </a>
-                    </div>
-                  ) : null}
-                </>
-              ) : null}
+                </div>
+              ) : (
+                <p className="text-sm text-white/70">
+                  生成服务已就绪，输入提示词后点击生成预览。注册后可保存结果并获得 120 欢迎积分。
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -543,7 +560,11 @@ export default function HomePage() {
               <button
                 key={`${item}-${index}`}
                 type="button"
-                onClick={() => setPrompt(item)}
+                onClick={() => {
+                  setDemoPhase("idle");
+                  setDemoProgress(0);
+                  setPrompt(item);
+                }}
                 className="focus-ring inline-flex max-w-96 items-center gap-3 rounded-full border border-white/12 bg-white/8 px-5 py-3 text-left text-sm text-white/72 transition-colors duration-200 hover:border-mint/60 hover:bg-white/12 hover:text-white"
               >
                 <Copy className="size-4 shrink-0 text-cyanx" aria-hidden="true" />
@@ -575,22 +596,38 @@ export default function HomePage() {
                       <h3 className="truncate text-lg font-semibold text-white">{item.title}</h3>
                       <p className="mt-1 text-sm text-white/58">{item.style}</p>
                     </div>
-                    <span className="shrink-0 rounded-full bg-white/10 px-3 py-1 text-sm text-volt">{item.cost} 积分</span>
+                    <span className="shrink-0 rounded-full bg-white/10 px-3 py-1 text-sm text-volt">
+                      {item.cost} 积分
+                    </span>
                   </div>
                   <p className="line-clamp-2 min-h-12 text-sm leading-6 text-white/68">{item.prompt}</p>
                   <div className="flex flex-wrap gap-2">
-                    <button type="button" className="focus-ring inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-mint">
-                      <Download className="size-4" aria-hidden="true" />下载
-                    </button>
-                    <button type="button" className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/12 px-4 py-2 text-sm text-white/76 transition-colors duration-200 hover:bg-white/10 hover:text-white">
-                      <Heart className="size-4" aria-hidden="true" />收藏
+                    <button
+                      type="button"
+                      className="focus-ring inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-mint"
+                    >
+                      <Download className="size-4" aria-hidden="true" />
+                      下载
                     </button>
                     <button
                       type="button"
-                      onClick={() => setPrompt(item.prompt)}
                       className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/12 px-4 py-2 text-sm text-white/76 transition-colors duration-200 hover:bg-white/10 hover:text-white"
                     >
-                      <RefreshCw className="size-4" aria-hidden="true" />复用
+                      <Heart className="size-4" aria-hidden="true" />
+                      收藏
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDemoPhase("idle");
+                        setDemoProgress(0);
+                        setPrompt(item.prompt);
+                        window.scrollTo({ top: 0, behavior: "smooth" });
+                      }}
+                      className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/12 px-4 py-2 text-sm text-white/76 transition-colors duration-200 hover:bg-white/10 hover:text-white"
+                    >
+                      <RefreshCw className="size-4" aria-hidden="true" />
+                      复用
                     </button>
                   </div>
                 </div>
@@ -615,13 +652,19 @@ export default function HomePage() {
                 type="button"
                 className="focus-ring group min-h-56 rounded-[1.35rem] border border-white/12 bg-white/7 p-4 text-left transition-colors duration-200 hover:border-white/24 hover:bg-white/10"
               >
-                <div className={`gallery-art ${item.artClass} min-h-28`} role="img" aria-label={`${item.label}风格预览`} />
+                <div
+                  className={`gallery-art ${item.artClass} min-h-28`}
+                  role="img"
+                  aria-label={`${item.label}风格预览`}
+                />
                 <div className="mt-4 flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <p className="text-sm text-white/58">{item.name}</p>
                     <h3 className="mt-1 text-xl font-semibold text-white">{item.label}</h3>
                   </div>
-                  <span className={`shrink-0 rounded-full bg-gradient-to-r ${item.accentClass} px-3 py-1 text-sm font-semibold text-ink`}>
+                  <span
+                    className={`shrink-0 rounded-full bg-gradient-to-r ${item.accentClass} px-3 py-1 text-sm font-semibold text-ink`}
+                  >
                     {item.cost} 积分
                   </span>
                 </div>
@@ -652,10 +695,17 @@ export default function HomePage() {
               <button
                 key={item}
                 type="button"
-                onClick={() => setPrompt(item)}
+                onClick={() => {
+                  setDemoPhase("idle");
+                  setDemoProgress(0);
+                  setPrompt(item);
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                }}
                 className="focus-ring group flex items-start gap-4 rounded-[1.25rem] border border-white/12 bg-white/7 p-4 text-left transition-colors duration-200 hover:border-mint/60 hover:bg-white/10"
               >
-                <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-ink">{index + 1}</span>
+                <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-ink">
+                  {index + 1}
+                </span>
                 <span className="min-w-0 flex-1 text-sm leading-7 text-white/74 group-hover:text-white">{item}</span>
                 <ArrowRight className="mt-2 size-4 shrink-0 text-white/44 group-hover:text-mint" aria-hidden="true" />
               </button>
@@ -664,7 +714,7 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── 流程说明 ── */}
+      {/* ── 创作流程 ── */}
       <section className="border-y border-white/10 bg-white/[0.035] px-4 py-20 sm:py-24">
         <div className="mx-auto max-w-7xl">
           <SectionHeading
@@ -673,10 +723,18 @@ export default function HomePage() {
             description="生成入口、积分预估、队列状态、失败退还和资产操作都保持清晰，让创作团队能稳定管理每一次图片生产。"
           />
           <div className="mt-10 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <FlowCard icon={Palette} title="提示词与风格" text="提示词、负向提示词、风格和比例结构化配置，降低参数管理成本。" />
+            <FlowCard
+              icon={Palette}
+              title="提示词与风格"
+              text="提示词、负向提示词、风格和比例结构化配置，降低参数管理成本。"
+            />
             <FlowCard icon={Coins} title="积分预估" text="提交前展示预计消耗和账户余额，帮助用户明确预算和生成成本。" />
             <FlowCard icon={Gauge} title="异步队列" text="清晰呈现排队、生成中、完成和失败状态，适合批量图片生产。" />
-            <FlowCard icon={ShieldCheck} title="安全与退回" text="安全拦截、系统失败和积分退回可追踪，减少资产生产风险。" />
+            <FlowCard
+              icon={ShieldCheck}
+              title="安全与退回"
+              text="安全拦截、系统失败和积分退回可追踪，减少资产生产风险。"
+            />
           </div>
         </div>
       </section>
@@ -700,7 +758,9 @@ export default function HomePage() {
                     <h3 className="text-2xl font-semibold text-white">{plan.name}</h3>
                     <p className="mt-2 text-sm text-white/58">{plan.note}</p>
                   </div>
-                  {plan.highlight ? <span className="rounded-full bg-mint px-3 py-1 text-sm font-semibold text-ink">推荐</span> : null}
+                  {plan.highlight ? (
+                    <span className="rounded-full bg-mint px-3 py-1 text-sm font-semibold text-ink">推荐</span>
+                  ) : null}
                 </div>
                 <div className="mt-8 flex items-end gap-3">
                   <span className="text-5xl font-semibold text-white">{plan.price}</span>
@@ -718,7 +778,6 @@ export default function HomePage() {
                     </li>
                   ))}
                 </ul>
-                {/* 套餐按钮：已登录→工作台，未登录→注册 */}
                 <a
                   href={isLoggedIn ? "/generate" : "/register"}
                   className={`focus-ring mt-8 inline-flex w-full items-center justify-center gap-2 rounded-full px-5 py-3 text-sm font-semibold transition-colors duration-200 ${plan.highlight ? "bg-mint text-ink hover:bg-volt" : "bg-white text-ink hover:bg-mint"}`}
@@ -807,51 +866,8 @@ function FlowCard({ icon: Icon, title, text }: { icon: LucideIcon; title: string
   );
 }
 
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4100";
-
-async function loginDemo(): Promise<void> {
-  await apiFetch<{ user: { id: string } }>("/api/auth/login", {
-    method: "POST",
-    body: { email: "demo@imagora.local", password: "Demo123!" }
-  });
-}
-
-async function waitForTask(taskId: string): Promise<{ task: ApiTask; images: ApiImage[] }> {
-  for (let attempt = 0; attempt < 18; attempt += 1) {
-    await sleep(1200);
-    const result = await apiFetch<{ task: ApiTask; images: ApiImage[] }>(`/api/generation/tasks/${taskId}`, { method: "GET" });
-    if (["SUCCEEDED", "FAILED", "BLOCKED", "CANCELED"].includes(result.task.status)) {
-      return result;
-    }
-  }
-  throw new Error("生成任务等待超时，请稍后在历史记录中查看结果。");
-}
-
-async function apiFetch<T>(
-  path: string,
-  options: { method: "GET" | "POST" | "PATCH" | "DELETE"; body?: unknown }
-): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    method: options.method,
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: options.body ? JSON.stringify(options.body) : undefined
-  });
-  const payload = (await response.json()) as { data?: T; error?: { code?: string; message: string } };
-  if (!response.ok || !payload.data) {
-    throw new Error(formatApiErrorMessage(payload.error?.code, payload.error?.message, response.status));
-  }
-  return payload.data;
-}
-
-function mapQuality(value: Quality): "draft" | "standard" | "high" {
-  switch (value) {
-    case "1k": return "draft";
-    case "4k": return "high";
-    default: return "standard";
-  }
-}
-
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => { setTimeout(resolve, ms); });
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

@@ -853,7 +853,10 @@ export default function AdminPage() {
         </Panel>
       </div>
       {userDetail ? (
-        <div className="fixed inset-0 z-50 flex items-start justify-end bg-black/60 p-4" onClick={() => setUserDetail(null)}>
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-end bg-black/60 p-4"
+          onClick={() => setUserDetail(null)}
+        >
           <aside
             className="h-full w-full max-w-md overflow-y-auto rounded-[1.5rem] border border-white/12 bg-ink p-6"
             onClick={(event) => event.stopPropagation()}
@@ -883,7 +886,8 @@ export default function AdminPage() {
                   <p className="text-white/50">积分余额</p>
                   <p className="mt-1 text-2xl font-semibold text-volt">{formatCredits(userDetail.account.balance)}</p>
                   <p className="mt-1 text-xs text-white/40">
-                    累计获得 {formatCredits(userDetail.account.totalEarned)} · 累计消耗 {formatCredits(userDetail.account.totalSpent)}
+                    累计获得 {formatCredits(userDetail.account.totalEarned)} · 累计消耗{" "}
+                    {formatCredits(userDetail.account.totalSpent)}
                   </p>
                 </div>
               ) : null}
@@ -906,10 +910,15 @@ export default function AdminPage() {
                   <p className="mb-2 text-white/50">最近订单</p>
                   <div className="space-y-2">
                     {userDetail.recentOrders.map((order) => (
-                      <div key={order.id} className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-3">
+                      <div
+                        key={order.id}
+                        className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-3"
+                      >
                         <div>
                           <p className="text-xs font-medium">{order.orderNo}</p>
-                          <p className="mt-0.5 text-xs text-white/40">{formatMoney(order.amountCents, order.currency)}</p>
+                          <p className="mt-0.5 text-xs text-white/40">
+                            {formatMoney(order.amountCents, order.currency)}
+                          </p>
                         </div>
                         <StatusPill>{order.status}</StatusPill>
                       </div>
@@ -939,7 +948,9 @@ export default function AdminPage() {
       ) : null}
       {userDetailLoading ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <p className="rounded-2xl border border-white/12 bg-ink px-6 py-4 text-sm text-white/70">正在加载用户详情...</p>
+          <p className="rounded-2xl border border-white/12 bg-ink px-6 py-4 text-sm text-white/70">
+            正在加载用户详情...
+          </p>
         </div>
       ) : null}
     </AppFrame>

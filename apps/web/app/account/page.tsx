@@ -168,10 +168,7 @@ export default function AccountPage() {
             <Panel>
               <div className="mb-4 flex items-center justify-between gap-3">
                 <h2 className="text-lg font-semibold">最近订单</h2>
-                <Link
-                  className="focus-ring text-sm text-white/50 transition-colors hover:text-white"
-                  href="/orders"
-                >
+                <Link className="focus-ring text-sm text-white/50 transition-colors hover:text-white" href="/orders">
                   查看全部
                 </Link>
               </div>
@@ -184,7 +181,8 @@ export default function AccountPage() {
                     <div>
                       <p className="text-sm font-medium">{order.orderNo}</p>
                       <p className="mt-0.5 text-xs text-white/46">
-                        {formatMoney(order.amountCents, order.currency)} · {formatPaymentProvider(order.paymentProvider)}
+                        {formatMoney(order.amountCents, order.currency)} ·{" "}
+                        {formatPaymentProvider(order.paymentProvider)}
                       </p>
                     </div>
                     <StatusPill>{order.status}</StatusPill>

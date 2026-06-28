@@ -4,7 +4,12 @@
 **/*.tsbuildinfo
 **/next-env.d.ts
 packages/database/prisma/generated/**
+.npm-cache/**
+.agents/**
 .claude/**
 .codex/**
+*.log
+__pycache__/**
+*.py[cod]
 package-lock.json
 *.md

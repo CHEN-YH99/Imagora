@@ -1,25 +1,47 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { UserPlus } from "lucide-react";
 import { register } from "../../lib/api";
 
 export default function RegisterPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center bg-ink px-4 text-white">
+          <p className="text-sm text-white/60">加载中...</p>
+        </main>
+      }
+    >
+      <RegisterForm />
+    </Suspense>
+  );
+}
+
+function RegisterForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [nickname, setNickname] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
+  const promptParam = searchParams.get("prompt");
+  const fromDemo = searchParams.get("from") === "demo";
+
   async function submit() {
     setLoading(true);
     setMessage("");
     try {
       await register(email, password, nickname || email.split("@")[0] || "创作者");
-      router.push("/generate");
+      if (promptParam) {
+        router.push(`/generate?prompt=${encodeURIComponent(promptParam)}`);
+      } else {
+        router.push("/generate");
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "注册失败，请检查信息后重试。");
     } finally {
@@ -34,9 +56,16 @@ export default function RegisterPage() {
           返回 Imagora
         </Link>
         <h1 className="mt-6 text-3xl font-semibold">创建账号</h1>
-        <p className="mt-2 text-sm leading-6 text-white/62">
-          新用户可获得欢迎积分，用于体验图片生成、历史记录和下载流程。
-        </p>
+        {fromDemo && promptParam ? (
+          <div className="mt-3 rounded-2xl border border-mint/30 bg-mint/8 px-4 py-3">
+            <p className="text-sm text-white/80">注册后将直接生成你的图片：</p>
+            <p className="mt-1 line-clamp-2 text-sm text-white/60">{promptParam}</p>
+          </div>
+        ) : (
+          <p className="mt-2 text-sm leading-6 text-white/62">
+            新用户可获得欢迎积分，用于体验图片生成、历史记录和下载流程。
+          </p>
+        )}
         <div className="mt-6 space-y-4">
           <label className="block text-sm text-white/70">
             邮箱
@@ -74,7 +103,7 @@ export default function RegisterPage() {
             onClick={submit}
           >
             <UserPlus className="size-4" aria-hidden="true" />
-            {loading ? "创建中..." : "创建账号"}
+            {loading ? "创建中..." : fromDemo ? "注册并生成图片" : "创建账号"}
           </button>
           <p className="text-center text-sm text-white/56">
             已有账号？{" "}

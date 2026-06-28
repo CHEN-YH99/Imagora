@@ -95,7 +95,13 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
       providerRequestId: payload.id ?? `openai_${input.taskId}`,
       images: items.map((item, index) => {
         if (!item.b64_json) throw new Error(`OpenAI ${model} response missing b64_json`);
-        return { bytes: item.b64_json, mimeType: "image/png" as const, width: input.width, height: input.height, index };
+        return {
+          bytes: item.b64_json,
+          mimeType: "image/png" as const,
+          width: input.width,
+          height: input.height,
+          index
+        };
       }),
       raw: { provider: this.name, model }
     };
