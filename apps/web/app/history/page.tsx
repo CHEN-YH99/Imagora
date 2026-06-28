@@ -168,7 +168,7 @@ export default function HistoryPage() {
                 </button>
                 <Link
                   className="focus-ring inline-flex items-center gap-2 rounded-full bg-mint px-3 py-2 text-sm font-semibold text-ink hover:bg-volt"
-                  href={`/generate?prompt=${encodeURIComponent(selectedTask.prompt)}&style=${encodeURIComponent(selectedTask.style)}&aspectRatio=${encodeURIComponent(selectedTask.aspectRatio)}&quality=${encodeURIComponent(selectedTask.quality)}&quantity=${selectedTask.quantity}`}
+                  href={`/generate?prompt=${encodeURIComponent(selectedTask.prompt)}&aspectRatio=${encodeURIComponent(selectedTask.aspectRatio)}&quality=${encodeURIComponent(selectedTask.quality)}&quantity=${selectedTask.quantity}&model=${encodeURIComponent(selectedTask.modelName ?? "gpt-image-2")}`}
                 >
                   <RefreshCw className="size-4" aria-hidden="true" />
                   再次生成

@@ -1,4 +1,4 @@
-import type { AspectRatio, Quality, StyleId } from "@imagora/shared";
+import type { AspectRatio, ModelId, Quality, StyleId } from "@imagora/shared";
 
 export interface GenerateImageInput {
   taskId: string;
@@ -10,6 +10,7 @@ export interface GenerateImageInput {
   height: number;
   quantity: number;
   quality: Quality;
+  model?: ModelId;
   referenceImageUrl?: string | null;
 }
 
@@ -64,15 +65,19 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   private readonly timeoutMs = envNumber("OPENAI_TIMEOUT_MS", 120_000);
 
   async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
+    // model 字段优先，其次 env 配置，最后默认 gpt-image-1
+    const model = input.model && input.model !== "mock" ? input.model : this.modelName;
+    return model === "gpt-image-2" ? this.generateWithImageTwo(input) : this.generateWithImageOne(input, model);
+  }
+
+  // gpt-image-1：支持 n>1，用 response_format: b64_json
+  private async generateWithImageOne(input: GenerateImageInput, model: string): Promise<GenerateImageResult> {
     const response = await fetch(`${this.baseUrl}/images/generations`, {
       method: "POST",
       signal: AbortSignal.timeout(this.timeoutMs),
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json"
-      },
+      headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: this.modelName,
+        model,
         prompt: buildPrompt(input),
         n: input.quantity,
         size: openAiSize(input.width, input.height),
@@ -82,28 +87,51 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     });
     const payload = (await response.json().catch(() => ({}))) as OpenAiImageResponse;
     if (!response.ok) {
-      const message = payload.error?.message ?? `OpenAI image generation failed with ${response.status}`;
-      throw new Error(message);
+      throw new Error(payload.error?.message ?? `OpenAI ${model} failed with ${response.status}`);
     }
-    const images = payload.data ?? [];
-    if (!images.length) {
-      throw new Error("OpenAI image generation returned no images");
-    }
+    const items = payload.data ?? [];
+    if (!items.length) throw new Error(`OpenAI ${model} returned no images`);
     return {
       providerRequestId: payload.id ?? `openai_${input.taskId}`,
-      images: images.map((image, index) => {
-        if (!image.b64_json) {
-          throw new Error("OpenAI image response did not include b64_json");
-        }
-        return {
-          bytes: image.b64_json,
-          mimeType: "image/png",
-          width: input.width,
-          height: input.height,
-          index
-        };
+      images: items.map((item, index) => {
+        if (!item.b64_json) throw new Error(`OpenAI ${model} response missing b64_json`);
+        return { bytes: item.b64_json, mimeType: "image/png" as const, width: input.width, height: input.height, index };
       }),
-      raw: { provider: this.name, model: this.modelName }
+      raw: { provider: this.name, model }
+    };
+  }
+
+  // gpt-image-2：不支持 n>1，循环调用；用 output_format 而非 response_format
+  private async generateWithImageTwo(input: GenerateImageInput): Promise<GenerateImageResult> {
+    const images: ProviderImage[] = [];
+    for (let index = 0; index < input.quantity; index++) {
+      const response = await fetch(`${this.baseUrl}/images/generations`, {
+        method: "POST",
+        signal: AbortSignal.timeout(this.timeoutMs),
+        headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-image-2",
+          prompt: buildPrompt(input),
+          n: 1,
+          size: openAiSize(input.width, input.height),
+          quality: openAiQuality(input.quality),
+          output_format: "png"
+        })
+      });
+      const payload = (await response.json().catch(() => ({}))) as OpenAiImageResponse;
+      if (!response.ok) {
+        throw new Error(payload.error?.message ?? `OpenAI gpt-image-2 failed with ${response.status}`);
+      }
+      const item = payload.data?.[0];
+      if (!item) throw new Error("OpenAI gpt-image-2 returned no image");
+      const bytes = item.b64_json ?? item.url ?? "";
+      if (!bytes) throw new Error("OpenAI gpt-image-2 response missing image data");
+      images.push({ bytes, mimeType: "image/png", width: input.width, height: input.height, index });
+    }
+    return {
+      providerRequestId: `openai_gpt-image-2_${input.taskId}`,
+      images,
+      raw: { provider: this.name, model: "gpt-image-2" }
     };
   }
 }
@@ -264,7 +292,7 @@ export function getActiveProviderMetadata(name = process.env.AI_PROVIDER ?? "moc
 
 interface OpenAiImageResponse {
   id?: string;
-  data?: Array<{ b64_json?: string }>;
+  data?: Array<{ b64_json?: string; url?: string }>;
   error?: { message?: string };
 }
 

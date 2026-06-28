@@ -71,6 +71,7 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
       height: task.height,
       quantity: task.quantity,
       quality: task.quality,
+      model: task.modelName as import("@imagora/shared").ModelId | undefined,
       referenceImageUrl: task.referenceImageId
         ? data.referenceImages.find((image) => image.id === task.referenceImageId && !image.deletedAt)?.publicUrl
         : null

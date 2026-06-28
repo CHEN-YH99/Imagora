@@ -9,6 +9,7 @@ export type ImageVisibility = "PRIVATE" | "PUBLIC" | "HIDDEN";
 export type Quality = "draft" | "standard" | "high";
 export type StyleId = "realistic" | "illustration" | "anime" | "product_photography" | "poster";
 export type AspectRatio = "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
+export type ModelId = "gpt-image-1" | "gpt-image-2" | "nano-banana-2" | "nano-banana-pro" | "seedream-4.5" | "mock";
 
 export interface User {
   id: string;
@@ -309,6 +310,16 @@ export const qualityMultiplier: Record<Quality, number> = {
   high: 1.65
 };
 
+// 各模型相对 gpt-image-1 的积分成本倍率
+export const modelCostMultiplier: Record<ModelId, number> = {
+  mock: 1,
+  "gpt-image-1": 1,
+  "gpt-image-2": 1.5,
+  "nano-banana-2": 1.2,
+  "nano-banana-pro": 1.8,
+  "seedream-4.5": 1.3
+};
+
 export const maxPromptLength = 1200;
 export const maxQuantity = 4;
 
@@ -317,11 +328,15 @@ export function calculateCreditCost(input: {
   quality: Quality;
   quantity: number;
   aspectRatio: AspectRatio;
+  model?: ModelId;
 }): number {
   const dimension = aspectRatioDimensions[input.aspectRatio];
   const megapixels = (dimension.width * dimension.height) / 1_000_000;
   const sizeMultiplier = megapixels > 1.4 ? 1.25 : 1;
-  return Math.ceil(styleCost[input.style] * qualityMultiplier[input.quality] * sizeMultiplier * input.quantity);
+  const modelMultiplier = modelCostMultiplier[input.model ?? "gpt-image-1"];
+  return Math.ceil(
+    styleCost[input.style] * qualityMultiplier[input.quality] * sizeMultiplier * modelMultiplier * input.quantity
+  );
 }
 
 export function publicUser(user: User): PublicUser {

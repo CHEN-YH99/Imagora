@@ -15,18 +15,25 @@ import {
   type Task
 } from "../../lib/api";
 
-const styles = [
-  { value: "realistic", label: "写实" },
-  { value: "illustration", label: "插画" },
-  { value: "anime", label: "动漫" },
-  { value: "product_photography", label: "产品摄影" },
-  { value: "poster", label: "海报" }
+const qualityOptions = [
+  { value: "draft", label: "1K", desc: "512–768px，速度最快" },
+  { value: "standard", label: "2K", desc: "1024px，均衡首选" },
+  { value: "high", label: "4K", desc: "最高画质，耗时较长" }
 ];
 
-const qualityOptions = [
-  { value: "draft", label: "草稿" },
-  { value: "standard", label: "标准" },
-  { value: "high", label: "高清" }
+const modelOptions = [
+  { value: "gpt-image-2", label: "GPT Image 2" },
+  { value: "nano-banana-2", label: "Nano Banana 2" },
+  { value: "nano-banana-pro", label: "Nano Banana Pro" },
+  { value: "seedream-4.5", label: "Seedream 4.5" }
+];
+
+const aspectRatioOptions = [
+  { value: "1:1", label: "1:1 — 方形" },
+  { value: "3:4", label: "3:4 — 竖版" },
+  { value: "4:3", label: "4:3 — 横版" },
+  { value: "9:16", label: "9:16 — 手机竖屏" },
+  { value: "16:9", label: "16:9 — 宽屏" }
 ];
 
 export default function GeneratePage() {
@@ -47,10 +54,10 @@ function GenerateExperience() {
   const searchParams = useSearchParams();
   const [prompt, setPrompt] = useState("半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节");
   const [negativePrompt, setNegativePrompt] = useState("低质量、模糊、水印、变形");
-  const [style, setStyle] = useState("product_photography");
   const [aspectRatio, setAspectRatio] = useState("1:1");
   const [quantity, setQuantity] = useState(2);
   const [quality, setQuality] = useState("standard");
+  const [model, setModel] = useState("gpt-image-2");
   const [quote, setQuote] = useState(0);
   const [account, setAccount] = useState<CreditAccount | null>(null);
   const [task, setTask] = useState<Task | null>(null);
@@ -66,33 +73,40 @@ function GenerateExperience() {
 
   useEffect(() => {
     const p = searchParams.get("prompt");
-    const s = searchParams.get("style");
     const ar = searchParams.get("aspectRatio");
     const q = searchParams.get("quality");
     const qty = searchParams.get("quantity");
+    const m = searchParams.get("model");
     if (p) setPrompt(p);
-    if (s && ["realistic", "illustration", "anime", "product_photography", "poster"].includes(s)) setStyle(s);
-    if (ar && ["1:1", "3:4", "4:3", "9:16", "16:9"].includes(ar)) setAspectRatio(ar);
-    if (q && ["draft", "standard", "high"].includes(q)) setQuality(q);
+    if (ar && aspectRatioOptions.some((o) => o.value === ar)) setAspectRatio(ar);
+    if (q && qualityOptions.some((o) => o.value === q)) setQuality(q);
     if (qty) {
       const n = Number(qty);
       if (Number.isInteger(n) && n >= 1 && n <= 4) setQuantity(n);
     }
+    if (m && modelOptions.some((o) => o.value === m)) setModel(m);
   }, [searchParams]);
 
   useEffect(() => {
     apiFetch<{ creditCost: number }>("/api/generation/quote", {
       method: "POST",
-      body: { prompt, negativePrompt, style, aspectRatio, quantity, quality, referenceImageId: referenceImage?.id }
+      body: {
+        prompt,
+        negativePrompt,
+        style: "realistic",
+        aspectRatio,
+        quantity,
+        quality,
+        model,
+        referenceImageId: referenceImage?.id
+      }
     })
       .then((result) => setQuote(result.creditCost))
       .catch(() => setQuote(0));
-  }, [aspectRatio, negativePrompt, prompt, quality, quantity, referenceImage?.id, style]);
+  }, [aspectRatio, negativePrompt, prompt, quality, quantity, referenceImage?.id, model]);
 
   async function ensureLoggedIn(): Promise<void> {
-    if (account) {
-      return;
-    }
+    if (account) return;
     await loginDemo();
     await loadAccount();
   }
@@ -116,11 +130,7 @@ function GenerateExperience() {
         "/api/uploads/reference-images",
         {
           method: "POST",
-          body: {
-            fileName: file.name,
-            mimeType: file.type,
-            contentBase64: dataUrl.split(",")[1] ?? ""
-          }
+          body: { fileName: file.name, mimeType: file.type, contentBase64: dataUrl.split(",")[1] ?? "" }
         }
       );
       setReferenceImage(result.referenceImage);
@@ -144,10 +154,11 @@ function GenerateExperience() {
           prompt,
           negativePrompt,
           referenceImageId: referenceImage?.id,
-          style,
+          style: "realistic",
           aspectRatio,
           quantity,
-          quality
+          quality,
+          model
         }
       });
       setTask(created.task);
@@ -164,10 +175,11 @@ function GenerateExperience() {
   }
 
   return (
-    <AppFrame title="图片生成" subtitle="配置提示词、参考图、风格、比例、数量和质量，并在提交前确认预计积分消耗。">
+    <AppFrame title="图片生成" subtitle="输入提示词，选择模型、比例和画质，提交前确认积分消耗。">
       <div className="grid gap-5 lg:grid-cols-[0.95fr_1.05fr]">
         <Panel>
           <div className="space-y-5">
+            {/* 提示词 */}
             <label className="block text-sm text-white/70">
               提示词
               <textarea
@@ -176,6 +188,8 @@ function GenerateExperience() {
                 onChange={(event) => setPrompt(event.target.value)}
               />
             </label>
+
+            {/* 负向提示词 */}
             <label className="block text-sm text-white/70">
               负向提示词
               <input
@@ -184,6 +198,8 @@ function GenerateExperience() {
                 onChange={(event) => setNegativePrompt(event.target.value)}
               />
             </label>
+
+            {/* 参考图 */}
             <div className="rounded-2xl border border-white/12 bg-black/20 p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <span className="inline-flex items-center gap-2 text-sm text-white/70">
@@ -226,30 +242,32 @@ function GenerateExperience() {
                     onChange={(event) => {
                       const file = event.target.files?.[0];
                       event.target.value = "";
-                      if (file) {
-                        void uploadReference(file);
-                      }
+                      if (file) void uploadReference(file);
                     }}
                   />
                   {uploadingReference ? "上传中..." : "上传 JPG、PNG 或 WebP 格式图片"}
                 </label>
               )}
             </div>
+
+            {/* 模型选择下拉 */}
+            <label className="block text-sm text-white/70">
+              模型
+              <select
+                className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+              >
+                {modelOptions.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
             <div className="grid gap-4 sm:grid-cols-2">
-              <label className="block text-sm text-white/70">
-                风格
-                <select
-                  className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
-                  value={style}
-                  onChange={(event) => setStyle(event.target.value)}
-                >
-                  {styles.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {/* 画面比例下拉 */}
               <label className="block text-sm text-white/70">
                 画面比例
                 <select
@@ -257,13 +275,15 @@ function GenerateExperience() {
                   value={aspectRatio}
                   onChange={(event) => setAspectRatio(event.target.value)}
                 >
-                  {["1:1", "3:4", "4:3", "9:16", "16:9"].map((item) => (
-                    <option key={item} value={item}>
-                      {item}
+                  {aspectRatioOptions.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
                     </option>
                   ))}
                 </select>
               </label>
+
+              {/* 生成数量 */}
               <label className="block text-sm text-white/70">
                 生成数量
                 <input
@@ -275,21 +295,31 @@ function GenerateExperience() {
                   onChange={(event) => setQuantity(Number(event.target.value))}
                 />
               </label>
-              <label className="block text-sm text-white/70">
-                生成质量
-                <select
-                  className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
-                  value={quality}
-                  onChange={(event) => setQuality(event.target.value)}
-                >
-                  {qualityOptions.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
             </div>
+
+            {/* 画质选择 */}
+            <fieldset>
+              <legend className="mb-2 text-sm text-white/70">画质</legend>
+              <div className="grid grid-cols-3 gap-2">
+                {qualityOptions.map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    onClick={() => setQuality(item.value)}
+                    className={`focus-ring rounded-2xl border px-3 py-3 text-center transition-colors duration-200 ${
+                      quality === item.value
+                        ? "border-mint/70 bg-mint/10 text-white"
+                        : "border-white/12 bg-black/28 text-white/70 hover:bg-white/8"
+                    }`}
+                  >
+                    <p className="text-base font-bold">{item.label}</p>
+                    <p className="mt-0.5 text-xs opacity-60">{item.desc}</p>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+
+            {/* 积分预估 */}
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/12 bg-black/24 p-4">
               <span className="inline-flex items-center gap-2 text-sm text-white/72">
                 <Coins className="size-4 text-volt" aria-hidden="true" />
@@ -299,9 +329,11 @@ function GenerateExperience() {
                 当前余额：{account ? formatCredits(account.balance) : "未登录"}
               </span>
             </div>
+
             {message ? (
               <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p>
             ) : null}
+
             <button
               className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
               type="button"

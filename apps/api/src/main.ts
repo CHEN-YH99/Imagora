@@ -20,6 +20,7 @@ import {
   type GenerationTask,
   maxPromptLength,
   maxQuantity,
+  type ModelId,
   type Order,
   type Plan,
   publicUser,
@@ -580,7 +581,7 @@ app.post("/api/generation/tasks", async (request, reply) => {
       quantity: input.quantity,
       quality: input.quality,
       modelProvider: providerMetadata.name,
-      modelName: providerMetadata.modelName,
+      modelName: input.model ?? providerMetadata.modelName,
       status: "PENDING",
       creditCost: cost,
       failureCode: null,
@@ -1306,7 +1307,8 @@ const generationInputSchema = z.object({
   style: z.enum(["realistic", "illustration", "anime", "product_photography", "poster"]),
   aspectRatio: z.enum(["1:1", "3:4", "4:3", "9:16", "16:9"]),
   quantity: z.number().int().min(1).max(maxQuantity),
-  quality: z.enum(["draft", "standard", "high"])
+  quality: z.enum(["draft", "standard", "high"]),
+  model: z.enum(["gpt-image-1", "gpt-image-2", "nano-banana-2", "nano-banana-pro", "seedream-4.5", "mock"]).default("gpt-image-2")
 });
 
 const referenceUploadSchema = z.object({
@@ -1532,7 +1534,7 @@ async function requireAdmin(request: FastifyRequest): Promise<{ data: StoreData;
   return session;
 }
 
-function quote(input: { style: StyleId; quality: Quality; quantity: number; aspectRatio: AspectRatio }): number {
+function quote(input: { style: StyleId; quality: Quality; quantity: number; aspectRatio: AspectRatio; model?: ModelId }): number {
   return calculateCreditCost(input);
 }
 

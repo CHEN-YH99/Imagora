@@ -36,7 +36,7 @@ export default function ImageDetailPage() {
     if (!task) {
       return "/generate";
     }
-    return `/generate?prompt=${encodeURIComponent(task.prompt)}&style=${encodeURIComponent(task.style)}&aspectRatio=${encodeURIComponent(task.aspectRatio)}&quality=${encodeURIComponent(task.quality)}&quantity=${task.quantity}`;
+    return `/generate?prompt=${encodeURIComponent(task.prompt)}&aspectRatio=${encodeURIComponent(task.aspectRatio)}&quality=${encodeURIComponent(task.quality)}&quantity=${task.quantity}&model=${encodeURIComponent(task.modelName ?? "gpt-image-2")}`;
   }, [task]);
 
   async function loadDetail() {

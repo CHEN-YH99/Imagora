@@ -32,6 +32,7 @@ export type Task = {
   aspectRatio: string;
   quantity: number;
   quality: string;
+  modelName: string;
   status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "BLOCKED";
   creditCost: number;
   failureMessage: string | null;
