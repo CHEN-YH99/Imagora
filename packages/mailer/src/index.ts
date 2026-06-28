@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import net from "node:net";
+import tls from "node:tls";
+
 export interface SendEmailInput {
   to: string;
   subject: string;
@@ -76,23 +80,54 @@ export class SmtpMailer implements Mailer {
   private readonly user: string;
   private readonly password: string;
   private readonly from: string;
+  private readonly fromName: string;
+  private readonly secure: boolean;
+  private readonly requireTls: boolean;
+  private readonly timeoutMs: number;
 
   constructor() {
     this.host = this.requiredEnv("SMTP_HOST");
-    this.port = Number(process.env.SMTP_PORT ?? "587");
+    this.port = envNumber("SMTP_PORT", 587);
     this.user = this.requiredEnv("SMTP_USER");
     this.password = this.requiredEnv("SMTP_PASSWORD");
     this.from = this.requiredEnv("SMTP_FROM");
+    this.fromName = process.env.SMTP_FROM_NAME ?? "Imagora";
+    this.secure = envBool("SMTP_SECURE", this.port === 465);
+    this.requireTls = envBool("SMTP_REQUIRE_TLS", true);
+    this.timeoutMs = envNumber("SMTP_TIMEOUT_MS", 15_000);
   }
 
-  async sendEmail(_input: SendEmailInput): Promise<void> {
-    // TODO: 实现 SMTP 邮件发送
-    // 可以使用 nodemailer 或其他 SMTP 客户端库
-    throw new Error(
-      "SmtpMailer not implemented yet. Install nodemailer and implement SMTP transport:\n" +
-        "  npm install nodemailer @types/nodemailer\n" +
-        `  Host: ${this.host}, Port: ${this.port}, From: ${this.from}`
-    );
+  async sendEmail(input: SendEmailInput): Promise<void> {
+    const recipients = parseRecipients(input.to);
+    if (!recipients.length) {
+      throw new Error("Email recipient is required");
+    }
+
+    const client = new SmtpClient({
+      host: this.host,
+      port: this.port,
+      secure: this.secure,
+      requireTls: this.requireTls,
+      timeoutMs: this.timeoutMs
+    });
+
+    try {
+      await client.connect();
+      await client.authenticate(this.user, this.password);
+      await client.send({
+        from: this.from,
+        recipients,
+        message: buildMimeMessage({
+          from: formatMailbox(this.from, this.fromName),
+          to: input.to,
+          subject: input.subject,
+          html: input.html,
+          text: input.text
+        })
+      });
+    } finally {
+      await client.close();
+    }
   }
 
   private requiredEnv(name: string): string {
@@ -165,4 +200,355 @@ export function createMailer(): Mailer {
     default:
       throw new Error(`Unknown MAILER_PROVIDER: ${provider}. Valid options: console, smtp, aliyun`);
   }
+}
+
+interface SmtpClientOptions {
+  host: string;
+  port: number;
+  secure: boolean;
+  requireTls: boolean;
+  timeoutMs: number;
+}
+
+interface SendSmtpMessageInput {
+  from: string;
+  recipients: string[];
+  message: string;
+}
+
+class SmtpClient {
+  private socket: net.Socket | tls.TLSSocket | null = null;
+  private buffer = "";
+  private pending: {
+    resolve: (response: SmtpResponse) => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  } | null = null;
+  private capabilities = new Set<string>();
+
+  constructor(private readonly options: SmtpClientOptions) {}
+
+  async connect(): Promise<void> {
+    this.socket = await openSocket(this.options);
+    this.socket.setEncoding("utf8");
+    this.socket.on("data", (chunk) => this.handleData(chunk.toString()));
+    this.socket.on("error", (error) => this.rejectPending(error));
+    this.socket.on("close", () => this.rejectPending(new Error("SMTP connection closed unexpectedly")));
+
+    await this.expect([220]);
+    await this.ehlo();
+
+    if (!this.options.secure && this.capabilities.has("STARTTLS")) {
+      await this.command("STARTTLS", [220]);
+      await this.upgradeToTls();
+      await this.ehlo();
+    } else if (!this.options.secure && this.options.requireTls) {
+      throw new Error("SMTP server does not advertise STARTTLS");
+    }
+  }
+
+  async authenticate(user: string, password: string): Promise<void> {
+    const credentials = Buffer.from(`\u0000${user}\u0000${password}`, "utf8").toString("base64");
+    if (this.capabilities.has("AUTH PLAIN") || this.capabilities.has("AUTH")) {
+      await this.command(`AUTH PLAIN ${credentials}`, [235]);
+      return;
+    }
+
+    await this.command("AUTH LOGIN", [334]);
+    await this.command(Buffer.from(user, "utf8").toString("base64"), [334]);
+    await this.command(Buffer.from(password, "utf8").toString("base64"), [235]);
+  }
+
+  async send(input: SendSmtpMessageInput): Promise<void> {
+    await this.command(`MAIL FROM:<${input.from}>`, [250]);
+    for (const recipient of input.recipients) {
+      await this.command(`RCPT TO:<${recipient}>`, [250, 251]);
+    }
+    await this.command("DATA", [354]);
+    await this.command(`${dotStuff(input.message)}\r\n.`, [250]);
+  }
+
+  async close(): Promise<void> {
+    const socket = this.socket;
+    if (!socket || socket.destroyed) {
+      return;
+    }
+
+    try {
+      await this.command("QUIT", [221]);
+    } catch {
+      // The message has already been sent; close best-effort.
+    } finally {
+      socket.end();
+      this.socket = null;
+    }
+  }
+
+  private async ehlo(): Promise<void> {
+    const response = await this.command("EHLO imagora.local", [250]);
+    this.capabilities = parseCapabilities(response.lines);
+  }
+
+  private async upgradeToTls(): Promise<void> {
+    const socket = this.socket;
+    if (!socket) {
+      throw new Error("SMTP connection is not open");
+    }
+
+    socket.removeAllListeners("data");
+    socket.removeAllListeners("error");
+    socket.removeAllListeners("close");
+    this.socket = await new Promise<tls.TLSSocket>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`SMTP STARTTLS timed out after ${this.options.timeoutMs}ms`));
+      }, this.options.timeoutMs);
+      const upgraded = tls.connect(
+        {
+          socket,
+          servername: this.options.host
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(upgraded);
+        }
+      );
+      upgraded.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
+    this.socket.setEncoding("utf8");
+    this.socket.on("data", (chunk) => this.handleData(chunk.toString()));
+    this.socket.on("error", (error) => this.rejectPending(error));
+    this.socket.on("close", () => this.rejectPending(new Error("SMTP connection closed unexpectedly")));
+  }
+
+  private async command(command: string, expectedCodes: number[]): Promise<SmtpResponse> {
+    this.write(`${command}\r\n`);
+    return this.expect(expectedCodes);
+  }
+
+  private expect(expectedCodes: number[]): Promise<SmtpResponse> {
+    if (this.pending) {
+      throw new Error("SMTP client cannot wait for multiple responses at once");
+    }
+
+    return new Promise<SmtpResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending = null;
+        reject(new Error(`SMTP response timed out after ${this.options.timeoutMs}ms`));
+      }, this.options.timeoutMs);
+
+      this.pending = {
+        resolve: (response) => {
+          if (!expectedCodes.includes(response.code)) {
+            reject(new Error(`Unexpected SMTP response ${response.code}: ${response.lines.join(" | ")}`));
+            return;
+          }
+          resolve(response);
+        },
+        reject,
+        timer
+      };
+
+      this.flushResponses();
+    });
+  }
+
+  private write(value: string): void {
+    if (!this.socket || this.socket.destroyed) {
+      throw new Error("SMTP connection is not open");
+    }
+    this.socket.write(value);
+  }
+
+  private handleData(chunk: string): void {
+    this.buffer += chunk;
+    this.flushResponses();
+  }
+
+  private flushResponses(): void {
+    if (!this.pending) {
+      return;
+    }
+    const parsed = readSmtpResponse(this.buffer);
+    if (!parsed) {
+      return;
+    }
+
+    this.buffer = parsed.remaining;
+    const pending = this.pending;
+    this.pending = null;
+    clearTimeout(pending.timer);
+    pending.resolve(parsed.response);
+  }
+
+  private rejectPending(error: Error): void {
+    if (!this.pending) {
+      return;
+    }
+    const pending = this.pending;
+    this.pending = null;
+    clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+}
+
+interface SmtpResponse {
+  code: number;
+  lines: string[];
+}
+
+function openSocket(options: SmtpClientOptions): Promise<net.Socket | tls.TLSSocket> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`SMTP connection timed out after ${options.timeoutMs}ms`));
+    }, options.timeoutMs);
+
+    const socket = options.secure
+      ? tls.connect({ host: options.host, port: options.port, servername: options.host })
+      : net.connect({ host: options.host, port: options.port });
+
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      resolve(socket);
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function readSmtpResponse(buffer: string): { response: SmtpResponse; remaining: string } | null {
+  const lines = buffer.split(/\r?\n/);
+  if (!buffer.endsWith("\n")) {
+    lines.pop();
+  }
+
+  const responseLines: string[] = [];
+  for (const line of lines) {
+    if (!/^\d{3}[ -]/.test(line)) {
+      return null;
+    }
+    responseLines.push(line);
+    if (line[3] === " ") {
+      const consumed = responseLines.join("\r\n").length + 2;
+      return {
+        response: {
+          code: Number(line.slice(0, 3)),
+          lines: responseLines.map((item) => item.slice(4))
+        },
+        remaining: buffer.slice(consumed)
+      };
+    }
+  }
+
+  return null;
+}
+
+function parseCapabilities(lines: string[]): Set<string> {
+  const capabilities = new Set<string>();
+  for (const line of lines.slice(1)) {
+    const normalized = line.trim().toUpperCase();
+    if (!normalized) {
+      continue;
+    }
+    capabilities.add(normalized);
+    const [name] = normalized.split(/\s+/, 1);
+    if (name) {
+      capabilities.add(name);
+    }
+  }
+  return capabilities;
+}
+
+function buildMimeMessage(input: SendEmailInput & { from: string }): string {
+  const boundary = `imagora-${randomUUID()}`;
+  const text = input.text ?? stripHtml(input.html);
+  const headers = [
+    `From: ${sanitizeHeader(input.from)}`,
+    `To: ${sanitizeHeader(input.to)}`,
+    `Subject: ${encodeHeader(input.subject)}`,
+    `Message-ID: <${randomUUID()}@imagora.local>`,
+    `Date: ${new Date().toUTCString()}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`
+  ];
+  const body = [
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    normalizeBody(text),
+    `--${boundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    normalizeBody(input.html),
+    `--${boundary}--`,
+    ""
+  ];
+
+  return [...headers, "", ...body].join("\r\n");
+}
+
+function parseRecipients(value: string): string[] {
+  return value
+    .split(/[;,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => item.replace(/^.*<([^>]+)>.*$/, "$1"))
+    .filter((item) => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(item));
+}
+
+function formatMailbox(email: string, name: string): string {
+  const safeName = sanitizeHeader(name).replaceAll('"', '\\"');
+  return `"${safeName}" <${email}>`;
+}
+
+function encodeHeader(value: string): string {
+  const sanitized = sanitizeHeader(value);
+  return isAscii(sanitized) ? sanitized : `=?UTF-8?B?${Buffer.from(sanitized, "utf8").toString("base64")}?=`;
+}
+
+function sanitizeHeader(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").trim();
+}
+
+function isAscii(value: string): boolean {
+  return [...value].every((character) => character.charCodeAt(0) <= 127);
+}
+
+function normalizeBody(value: string): string {
+  return value.replace(/\r?\n/g, "\r\n");
+}
+
+function dotStuff(value: string): string {
+  return normalizeBody(value)
+    .split("\r\n")
+    .map((line) => (line.startsWith(".") ? `.${line}` : line))
+    .join("\r\n");
+}
+
+function stripHtml(value: string): string {
+  return value
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function envBool(name: string, fallback: boolean): boolean {
+  const value = process.env[name];
+  if (!value) {
+    return fallback;
+  }
+  return !["0", "false", "no", "off", "disabled"].includes(value.toLowerCase());
+}
+
+function envNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }

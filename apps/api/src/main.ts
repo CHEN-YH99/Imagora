@@ -281,7 +281,7 @@ app.post("/api/auth/register", async (request, reply) => {
     });
     setSessionCookie(reply, sessionToken, addDays(now, 14));
     reply.status(201);
-    return { sessionToken, user, verifyTokenPlain };
+    return { user, verifyTokenPlain };
   });
 
   const verifyUrl = `${envString("WEB_ORIGIN", "http://127.0.0.1:3100")}/verify-email?token=${result.verifyTokenPlain}`;
@@ -294,7 +294,7 @@ app.post("/api/auth/register", async (request, reply) => {
     request.log.error({ userId: result.user.id, error }, "Failed to send verification email");
   }
 
-  return envelope(request, { token: result.sessionToken, user: publicUser(result.user) });
+  return envelope(request, { user: publicUser(result.user) });
 });
 
 app.post("/api/auth/login", async (request, reply) => {
@@ -313,7 +313,7 @@ app.post("/api/auth/login", async (request, reply) => {
     user.updatedAt = now;
     data.sessions.push({ token, userId: user.id, createdAt: now, expiresAt: addDays(now, 14) });
     setSessionCookie(reply, token, addDays(now, 14));
-    return envelope(request, { token, user: publicUser(user) });
+    return envelope(request, { user: publicUser(user) });
   });
 });
 
@@ -721,8 +721,8 @@ app.post("/api/images/:imageId/download-url", async (request) => {
   const { user, data } = await requireAuth(request);
   const { imageId } = imageParamSchema.parse(request.params);
   const image = mustFindOwnImage(data, user.id, imageId);
-  const expiresAt = addMinutes(new Date().toISOString(), envNumber("DOWNLOAD_URL_TTL_MINUTES", 15));
-  const expiresInSeconds = Math.max(60, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000));
+  const expiresInSeconds = Math.max(60, Math.min(envNumber("DOWNLOAD_URL_TTL_MINUTES", 15) * 60, 60 * 60 * 24 * 7));
+  const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
   return envelope(request, {
     url: await storage.getSignedUrl(image.storageKey, expiresInSeconds),
     fileName: `imagora-${image.id}.${extensionForMimeType(image.mimeType)}`,
@@ -731,8 +731,13 @@ app.post("/api/images/:imageId/download-url", async (request) => {
 });
 
 app.delete("/api/images/:imageId", async (request) => {
-  const { user } = await requireAuth(request);
+  const { user, data } = await requireAuth(request);
   const { imageId } = imageParamSchema.parse(request.params);
+  const image = mustFindOwnImage(data, user.id, imageId);
+  await storage.deleteObject(image.storageKey);
+  if (image.thumbnailKey && image.thumbnailKey !== image.storageKey) {
+    await storage.deleteObject(image.thumbnailKey);
+  }
   return store.update((data) => {
     const image = mustFindOwnImage(data, user.id, imageId);
     image.deletedAt = new Date().toISOString();
@@ -1231,10 +1236,6 @@ const resetPasswordSchema = z.object({
   password: z.string().min(8)
 });
 
-const verifyEmailSchema = z.object({
-  token: z.string().min(1)
-});
-
 const updateProfileSchema = z.object({
   nickname: z.string().min(1).max(80).optional(),
   avatarUrl: z.string().url().nullable().optional()
@@ -1375,13 +1376,20 @@ function sessionToken(request: FastifyRequest, optional = false): string {
     return cookieToken;
   }
   const authorization = request.headers.authorization;
-  if (!authorization?.startsWith("Bearer ")) {
-    if (optional) {
-      return "";
+  if (authorization?.startsWith("Bearer ")) {
+    if (allowBearerSessionAuth()) {
+      return authorization.slice("Bearer ".length);
     }
-    throw new AppError("UNAUTHORIZED", "Missing session token", 401);
+    throw new AppError("UNAUTHORIZED", "Bearer session auth is disabled", 401);
   }
-  return authorization.slice("Bearer ".length);
+  if (optional) {
+    return "";
+  }
+  throw new AppError("UNAUTHORIZED", "Missing session token", 401);
+}
+
+function allowBearerSessionAuth(): boolean {
+  return envBool("ALLOW_BEARER_SESSION_AUTH", false);
 }
 
 async function requireAuth(request: FastifyRequest): Promise<{ data: StoreData; user: User }> {
@@ -2115,6 +2123,9 @@ function validateProductionConfig(): void {
   requireProductionSetting("STORAGE_PROVIDER", "s3", "r2");
   requireProductionSetting("PAYMENT_PROVIDER", "stripe");
   requireProductionSetting("RATE_LIMIT_PROVIDER", "redis");
+  if (allowBearerSessionAuth()) {
+    throw new Error("Unsafe production config: bearer session auth must be disabled");
+  }
   if (!envBool("SESSION_COOKIE_SECURE", false)) {
     throw new Error("Unsafe production config: SESSION_COOKIE_SECURE must be true");
   }
@@ -2192,7 +2203,13 @@ async function enforceRateLimit(request: FastifyRequest, reply: FastifyReply): P
 
   const key = `${rule.id}:${request.ip}`;
   if ((process.env.RATE_LIMIT_PROVIDER ?? "memory") === "redis") {
-    const redisResult = await redisFixedWindowIncrement(key, rateLimitWindowMs);
+    let redisResult: { count: number; resetAt: number };
+    try {
+      redisResult = await redisFixedWindowIncrement(key, rateLimitWindowMs);
+    } catch (error) {
+      request.log.error({ error, rateLimitRule: rule.id }, "Redis rate limiter unavailable");
+      throw new AppError("RATE_LIMIT_UNAVAILABLE", "Rate limit service is unavailable", 503);
+    }
     reply.header("x-ratelimit-limit", String(rule.max));
     reply.header("x-ratelimit-remaining", String(Math.max(rule.max - redisResult.count, 0)));
     reply.header("x-ratelimit-reset", new Date(redisResult.resetAt).toISOString());
@@ -2553,12 +2570,6 @@ function payloadRecord(payload: unknown): Record<string, unknown> {
 function addDays(iso: string, days: number): string {
   const date = new Date(iso);
   date.setDate(date.getDate() + days);
-  return date.toISOString();
-}
-
-function addMinutes(iso: string, minutes: number): string {
-  const date = new Date(iso);
-  date.setMinutes(date.getMinutes() + minutes);
   return date.toISOString();
 }
 

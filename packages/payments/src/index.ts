@@ -238,15 +238,8 @@ interface StripeEvent {
 }
 
 function verifyStripeSignature(payload: string, header: string, secret: string): void {
-  const parts = Object.fromEntries(
-    header.split(",").map((part) => {
-      const [key, value] = part.split("=");
-      return [key, value];
-    })
-  );
-  const timestamp = parts.t;
-  const signature = parts.v1;
-  if (!timestamp || !signature) {
+  const { timestamp, signatures } = parseStripeSignatureHeader(header);
+  if (!timestamp || signatures.length === 0) {
     throw new Error("Invalid Stripe signature header");
   }
   const toleranceSeconds = Number(process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS ?? 300);
@@ -255,9 +248,24 @@ function verifyStripeSignature(payload: string, header: string, secret: string):
     throw new Error("Stripe webhook signature timestamp is outside tolerance");
   }
   const expected = createHmac("sha256", secret).update(`${timestamp}.${payload}`).digest("hex");
-  if (!safeEqualHex(expected, signature)) {
+  if (!signatures.some((signature) => safeEqualHex(expected, signature))) {
     throw new Error("Invalid Stripe webhook signature");
   }
+}
+
+function parseStripeSignatureHeader(header: string): { timestamp?: string; signatures: string[] } {
+  const result: { timestamp?: string; signatures: string[] } = { signatures: [] };
+  for (const part of header.split(",")) {
+    const [key, ...valueParts] = part.split("=");
+    const value = valueParts.join("=").trim();
+    if (key.trim() === "t") {
+      result.timestamp = value;
+    }
+    if (key.trim() === "v1" && value) {
+      result.signatures.push(value);
+    }
+  }
+  return result;
 }
 
 function safeEqualHex(left: string, right: string): boolean {

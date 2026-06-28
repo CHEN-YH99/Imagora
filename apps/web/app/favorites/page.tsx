@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Heart } from "lucide-react";
 import { AppFrame, Panel } from "../../components/AppFrame";
@@ -22,7 +23,9 @@ export default function FavoritesPage() {
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {images.map((image) => (
             <article key={image.id} className="rounded-2xl border border-white/12 bg-black/20 p-3">
-              <img className="aspect-square rounded-xl object-cover" src={image.publicUrl} alt="收藏的生成图片" />
+              <Link className="focus-ring block" href={`/images/${image.id}`}>
+                <img className="aspect-square rounded-xl object-cover" src={image.publicUrl} alt="收藏的生成图片" />
+              </Link>
               <p className="mt-3 inline-flex items-center gap-2 text-sm text-white/64">
                 <Heart className="size-4 text-plasma" aria-hidden="true" />
                 已收藏

@@ -199,7 +199,9 @@ export default function HistoryPage() {
             {(detail?.images.length ? detail.images : images.filter((image) => image.taskId === selectedTask?.id)).map(
               (image) => (
                 <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/20">
-                  <img className="aspect-square w-full object-cover" src={image.publicUrl} alt="历史生成图片" />
+                  <Link className="focus-ring block" href={`/images/${image.id}`}>
+                    <img className="aspect-square w-full object-cover" src={image.publicUrl} alt="历史生成图片" />
+                  </Link>
                   <div className="flex flex-wrap gap-2 p-3">
                     <button
                       className="icon-action"

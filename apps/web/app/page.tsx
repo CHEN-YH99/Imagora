@@ -209,7 +209,6 @@ export default function HomePage() {
   const [quality, setQuality] = useState<Quality>("Studio");
   const [quantity, setQuantity] = useState(2);
   const [prompt, setPrompt] = useState(promptExamples[0]);
-  const [token, setToken] = useState<string | null>(null);
   const [apiMessage, setApiMessage] = useState("生成服务已就绪，可以提交预览任务。");
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedImages, setGeneratedImages] = useState<ApiImage[]>([]);
@@ -224,11 +223,9 @@ export default function HomePage() {
     setGeneratedImages([]);
     setApiMessage("正在连接生成服务...");
     try {
-      const sessionToken = token ?? (await loginDemo());
-      setToken(sessionToken);
+      await loginDemo();
       const created = await apiFetch<{ task: ApiTask; balanceAfter: number }>("/api/generation/tasks", {
         method: "POST",
-        token: sessionToken,
         body: {
           clientRequestId: crypto.randomUUID(),
           prompt,
@@ -241,7 +238,7 @@ export default function HomePage() {
       });
       setBalance(created.balanceAfter);
       setApiMessage(`任务${formatStatusLabel(created.task.status)}，已预留 ${formatCredits(creditCost)}。`);
-      const result = await waitForTask(sessionToken, created.task.id);
+      const result = await waitForTask(created.task.id);
       if (result.task.status === "SUCCEEDED") {
         setGeneratedImages(result.images);
         setApiMessage(`生成完成，已交付 ${result.images.length} 张图片。`);
@@ -755,20 +752,18 @@ function FlowCard({ icon: Icon, title, text }: { icon: LucideIcon; title: string
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4100";
 
-async function loginDemo(): Promise<string> {
-  const response = await apiFetch<{ token: string }>("/api/auth/login", {
+async function loginDemo(): Promise<void> {
+  await apiFetch<{ user: { id: string } }>("/api/auth/login", {
     method: "POST",
     body: { email: "demo@imagora.local", password: "Demo123!" }
   });
-  return response.token;
 }
 
-async function waitForTask(token: string, taskId: string): Promise<{ task: ApiTask; images: ApiImage[] }> {
+async function waitForTask(taskId: string): Promise<{ task: ApiTask; images: ApiImage[] }> {
   for (let attempt = 0; attempt < 18; attempt += 1) {
     await sleep(1200);
     const result = await apiFetch<{ task: ApiTask; images: ApiImage[] }>(`/api/generation/tasks/${taskId}`, {
-      method: "GET",
-      token
+      method: "GET"
     });
     if (["SUCCEEDED", "FAILED", "BLOCKED", "CANCELED"].includes(result.task.status)) {
       return result;
@@ -781,15 +776,14 @@ async function apiFetch<T>(
   path: string,
   options: {
     method: "GET" | "POST" | "PATCH" | "DELETE";
-    token?: string;
     body?: unknown;
   }
 ): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     method: options.method,
+    credentials: "include",
     headers: {
-      "Content-Type": "application/json",
-      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {})
+      "Content-Type": "application/json"
     },
     body: options.body ? JSON.stringify(options.body) : undefined
   });

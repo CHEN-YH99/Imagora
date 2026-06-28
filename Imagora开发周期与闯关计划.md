@@ -1495,16 +1495,16 @@ npm --workspace packages/database run prisma:push
 | 优先级 | 补缺项 | 当前进展 | 剩余完成标准 | 建议归属 |
 | --- | --- | --- | --- | --- |
 | P0 | 接入真实 AI 图片 provider | 已补 `openai` provider 骨架和环境变量 | 填入真实密钥后做沙箱/真实调用、失败码映射和成本 contract test | 第 4 关 |
-| P0 | 接入真实对象存储 | 已补 S3/R2 兼容存储、私有对象写入和短期签名 URL | 用真实 bucket 验证上传、下载、删除、生命周期策略 | 第 6/10 关 |
+| P0 | 接入真实对象存储 | 已补 S3/R2 兼容存储、私有对象写入、短期签名 URL、删除原图/缩略图清理；fake S3 集成测试覆盖上传、下载签名和删除 | 用真实 bucket 验证上传、下载、删除、生命周期策略 | 第 6/10 关 |
 | P0 | 接入真实支付 provider | 已补 Stripe checkout 和 webhook 签名校验 | 填入 Stripe 沙箱密钥，完成端到端支付和重复 webhook 回归 | 第 7 关 |
 | P0 | 生产数据路径固定为 Prisma/PostgreSQL | 生产 compose 默认 `DATA_STORE=prisma`，本地仍保留 JSON | 真实环境执行 Prisma 校验、推送、备份恢复演练 | 第 10/11 关 |
-| P0 | 下载鉴权升级为短期签名 URL | 已改下载接口返回 `storage.getSignedUrl`、文件名和过期时间 | 用真实对象存储验证 URL 过期、权限和 CDN 策略 | 第 6 关 |
-| P0 | 缩略图真实生成 | Worker 已写入 `thumbnailKey` 对象；位图暂复用原图，SVG 生成轻量缩略图 | 引入真实 resize 服务或 `sharp` 后生成小尺寸缩略图 | 第 6 关 |
-| P0 | 前端详情与错误恢复 | 历史页已补任务详情、复制 prompt、再次生成、下载、收藏、删除确认 | 继续补独立图片详情页和移动端 E2E | 第 5/6 关 |
-| P0 | 质量门禁补齐 lint/format | 文档原先写 `npm run lint`，当前仓库没有 lint 脚本 | 增加 ESLint/Prettier 或明确暂缓；CI 执行 `typecheck/test/build/audit/diff-check` | 第 1/10 关 |
-| P0 | 支付 webhook 签名校验 | Stripe provider 已校验 `stripe-signature`、时间戳和防重放 | 用 Stripe CLI/沙箱事件验证失败路径和告警 | 第 7 关 |
-| P0 | 认证会话安全升级 | API 已签发 HttpOnly Cookie 并兼容 Bearer；前端请求带 credentials | 上线前关闭 localStorage 兼容或收敛为单一安全会话策略 | 第 2/10 关 |
-| P0 | Redis 级限流与多实例一致性 | 已补 `RATE_LIMIT_PROVIDER=redis` 的固定窗口限流，生产 compose 默认 redis | 在真实 Redis/网关压测下验证限流一致性和失败策略 | 第 2/10 关 |
+| P0 | 下载鉴权升级为短期签名 URL | 下载接口返回 `storage.getSignedUrl`、文件名和过期时间；API 和 S3 签名 TTL 已统一夹到 60 秒至 7 天 | 用真实对象存储验证 URL 过期、权限和 CDN 策略 | 第 6 关 |
+| P0 | 缩略图真实生成 | Worker 已用 `sharp` 生成位图缩略图，SVG 生成轻量缩略图；fake S3 测试校验 MIME、扩展名和对象内容 | 真实图片样本批量回归缩略图尺寸、体积和失败降级 | 第 6 关 |
+| P0 | 前端详情与错误恢复 | 已补独立图片详情页，支持刷新、下载、收藏、复制提示词、再次生成、删除后返回历史；历史/收藏页已接详情入口 | 移动端 E2E 和真实浏览器交互验收 | 第 5/6 关 |
+| P0 | 质量门禁补齐 lint/format | 已补 ESLint/Prettier 脚本，并纳入固定门禁 `typecheck/test/build/lint/format:check` | CI 中执行同一套门禁 | 第 1/10 关 |
+| P0 | 支付 webhook 签名校验 | Stripe provider 已校验 `stripe-signature`、时间戳、防重放和多 `v1` 签名；本地测试覆盖有效签名、篡改 payload、过期时间戳 | 用 Stripe CLI/沙箱事件验证失败路径和告警 | 第 7 关 |
+| P0 | 认证会话安全升级 | API 已签发 HttpOnly Cookie，登录/注册不返回 token，生产拒绝 Bearer 会话；前端请求走 `credentials`，未再使用 `localStorage` token | 上线前确认 Cookie Secure/SameSite 与域名策略 | 第 2/10 关 |
+| P0 | Redis 级限流与多实例一致性 | 已补 `RATE_LIMIT_PROVIDER=redis` 固定窗口限流、Redis 不可用 fail-closed 503、本地 fake Redis 双 API 实例共享计数测试；生产 compose 默认 redis | 在真实 Redis/网关压测下验证延迟、连接池和限流一致性 | 第 2/10 关 |
 | P1 | 内容安全升级 | 本地敏感词只能挡低级问题，挡不住图片语义风险 | 接入第三方文本/图像审核，人审队列，审核策略和申诉流程 | 第 8 关 |
 | P1 | 生产可观测性 | 当前指标在内存中，重启即丢，缺通知链路 | 接入结构化日志、指标采集、告警通知、错误追踪 | 第 10 关 |
 | P1 | 管理后台防误操作 | 已有审计，但部分操作缺二次确认和更细权限 | 高风险操作二次确认、原因必填、管理员自封保护、操作回滚说明 | 第 9 关 |

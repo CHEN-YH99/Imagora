@@ -18,9 +18,7 @@ import {
   formatStatusLabel,
   formatStyleLabel,
   formatTargetType,
-  getStoredToken,
   login,
-  setStoredToken,
   type AdminMetrics,
   type AdminOperationalMetrics,
   type GeneratedImage,
@@ -102,21 +100,15 @@ export default function AdminPage() {
   >({});
 
   useEffect(() => {
-    const token = getStoredToken();
-    if (token) {
-      load(token);
-    } else {
-      setMessage("未检测到管理员登录状态，请使用管理员登录按钮。");
-    }
+    load();
   }, [taskStatusFilter, orderStatusFilter, imageVisibilityFilter]);
 
   async function loginAdmin() {
     setLoading(true);
     setMessage("");
     try {
-      const result = await login("admin@imagora.local", "Admin123!");
-      setStoredToken(result.token);
-      await load(result.token);
+      await login("admin@imagora.local", "Admin123!");
+      await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "管理员登录失败，请检查账号权限。");
     } finally {
@@ -124,7 +116,7 @@ export default function AdminPage() {
     }
   }
 
-  async function load(token: string) {
+  async function load() {
     try {
       const [
         dashboard,
@@ -137,33 +129,30 @@ export default function AdminPage() {
         ruleResult,
         logResult
       ] = await Promise.all([
-        apiFetch<{ metrics: AdminMetrics }>("/api/admin/dashboard", { token }),
-        apiFetch<AdminOperationalMetrics>("/api/admin/metrics", { token }),
-        apiFetch<{ users: User[] }>(withQuery("/api/admin/users", { limit: 30 }), { token }),
+        apiFetch<{ metrics: AdminMetrics }>("/api/admin/dashboard"),
+        apiFetch<AdminOperationalMetrics>("/api/admin/metrics"),
+        apiFetch<{ users: User[] }>(withQuery("/api/admin/users", { limit: 30 })),
         apiFetch<{ tasks: Task[] }>(
           withQuery("/api/admin/generation/tasks", {
             limit: 30,
             status: taskStatusFilter === "ALL" ? undefined : taskStatusFilter
-          }),
-          { token }
+          })
         ),
         apiFetch<{ images: GeneratedImage[] }>(
           withQuery("/api/admin/images", {
             limit: 24,
             visibility: imageVisibilityFilter === "ALL" ? undefined : imageVisibilityFilter
-          }),
-          { token }
+          })
         ),
         apiFetch<{ orders: Order[] }>(
           withQuery("/api/admin/orders", {
             limit: 30,
             status: orderStatusFilter === "ALL" ? undefined : orderStatusFilter
-          }),
-          { token }
+          })
         ),
-        apiFetch<{ plans: Plan[] }>("/api/admin/plans", { token }),
-        apiFetch<{ rules: SafetyRule[] }>("/api/admin/safety-rules", { token }),
-        apiFetch<{ logs: AuditLog[] }>("/api/admin/audit-logs", { token })
+        apiFetch<{ plans: Plan[] }>("/api/admin/plans"),
+        apiFetch<{ rules: SafetyRule[] }>("/api/admin/safety-rules"),
+        apiFetch<{ logs: AuditLog[] }>("/api/admin/audit-logs")
       ]);
       setMetrics(dashboard.metrics);
       setOperationalMetrics(operations);
@@ -193,17 +182,12 @@ export default function AdminPage() {
   }
 
   async function updateUserStatus(userId: string, status: User["status"]) {
-    const token = getStoredToken();
-    if (!token) {
-      return;
-    }
     try {
       await apiFetch<{ user: User }>(`/api/admin/users/${userId}/status`, {
         method: "PATCH",
-        token,
         body: { status }
       });
-      await load(token);
+      await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "用户状态更新失败，请稍后重试。");
     }
@@ -220,38 +204,31 @@ export default function AdminPage() {
   }
 
   async function adjustUserCredits(userId: string) {
-    const token = getStoredToken();
     const draft = creditAdjustments[userId] ?? { amount: "10", reason: "人工调整积分" };
     const amount = Number(draft.amount);
-    if (!token || !Number.isInteger(amount) || amount === 0 || draft.reason.trim().length < 3) {
+    if (!Number.isInteger(amount) || amount === 0 || draft.reason.trim().length < 3) {
       setMessage("积分调整必须填写非零整数金额和调整原因。");
       return;
     }
     try {
       await apiFetch<{ account: { balance: number } }>(`/api/admin/users/${userId}/credits/adjust`, {
         method: "POST",
-        token,
         body: { amount, reason: draft.reason.trim() }
       });
       setCreditAdjustments((current) => ({ ...current, [userId]: { amount: "10", reason: "人工调整积分" } }));
-      await load(token);
+      await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "积分调整失败，请稍后重试。");
     }
   }
 
   async function updateImageVisibility(imageId: string, visibility: GeneratedImage["visibility"]) {
-    const token = getStoredToken();
-    if (!token) {
-      return;
-    }
     try {
       await apiFetch<{ image: GeneratedImage }>(`/api/admin/images/${imageId}/visibility`, {
         method: "PATCH",
-        token,
         body: { visibility }
       });
-      await load(token);
+      await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "图片可见性更新失败，请稍后重试。");
     }
@@ -274,13 +251,11 @@ export default function AdminPage() {
   }
 
   async function createPlan() {
-    const token = getStoredToken();
     const priceCents = Number(planDraft.priceCents);
     const credits = Number(planDraft.credits);
     const validDays = planDraft.validDays.trim() ? Number(planDraft.validDays) : null;
     const sortOrder = Number(planDraft.sortOrder);
     if (
-      !token ||
       !planDraft.name.trim() ||
       !planDraft.description.trim() ||
       !Number.isInteger(priceCents) ||
@@ -294,7 +269,6 @@ export default function AdminPage() {
     try {
       await apiFetch<{ plan: Plan }>("/api/admin/plans", {
         method: "POST",
-        token,
         body: {
           name: planDraft.name.trim(),
           description: planDraft.description.trim(),
@@ -307,16 +281,15 @@ export default function AdminPage() {
         }
       });
       setPlanDraft(emptyPlanForm);
-      await load(token);
+      await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "套餐创建失败，请稍后重试。");
     }
   }
 
   async function savePlan(planId: string) {
-    const token = getStoredToken();
     const edit = planEdits[planId];
-    if (!token || !edit) {
+    if (!edit) {
       return;
     }
     const priceCents = Number(edit.priceCents);
@@ -329,27 +302,21 @@ export default function AdminPage() {
     try {
       await apiFetch<{ plan: Plan }>(`/api/admin/plans/${planId}`, {
         method: "PATCH",
-        token,
         body: { priceCents, credits, sortOrder }
       });
-      await load(token);
+      await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "套餐保存失败，请稍后重试。");
     }
   }
 
   async function updatePlanStatus(planId: string, status: Plan["status"]) {
-    const token = getStoredToken();
-    if (!token) {
-      return;
-    }
     try {
       await apiFetch<{ plan: Plan }>(`/api/admin/plans/${planId}`, {
         method: "PATCH",
-        token,
         body: { status }
       });
-      await load(token);
+      await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "套餐状态更新失败，请稍后重试。");
     }
@@ -366,37 +333,29 @@ export default function AdminPage() {
     .slice(0, 8);
 
   async function addRule() {
-    const token = getStoredToken();
-    if (!token || !newRule.trim()) {
+    if (!newRule.trim()) {
       return;
     }
     try {
       await apiFetch<{ rule: SafetyRule }>("/api/admin/safety-rules", {
         method: "POST",
-        token,
         body: { term: newRule.trim(), action: "BLOCK", status: "ACTIVE" }
       });
       setNewRule("");
-      await load(token);
+      await load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "安全规则添加失败，请稍后重试。");
     }
   }
 
   async function reconcileOrders() {
-    const token = getStoredToken();
-    if (!token) {
-      setMessage("未检测到管理员登录状态，请使用管理员登录按钮。");
-      return;
-    }
     setMaintenanceRunning(true);
     try {
       const result = await apiFetch<{ maintenance: OrderMaintenance }>("/api/admin/maintenance/reconcile", {
         method: "POST",
-        token,
         body: {}
       });
-      await load(token);
+      await load();
       setMessage(
         `对账完成：关闭过期订单 ${result.maintenance.closedExpiredOrders} 笔，补发已支付积分 ${result.maintenance.reconciledPaidOrders} 笔，补处理支付事件 ${result.maintenance.reconciledPaymentEvents} 条。`
       );

@@ -723,3 +723,26 @@ http://127.0.0.1:3100/verify-email?token=02a66256-f60a-4b79-a364-b79022690f3b
       "statusCode": 200
     }
     responseTime: 0.3446999788284302
+[2026-06-27 16:15:07.366 +0800] [32mINFO[39m: [36mincoming request[39m
+    reqId: "req-s"
+    req: {
+      "method": "GET",
+      "url": "/health",
+      "host": "127.0.0.1:4100",
+      "remoteAddress": "127.0.0.1",
+      "remotePort": 55392
+    }
+[2026-06-27 16:15:07.366 +0800] [32mINFO[39m: [36mGET /health 200 0ms[39m
+    reqId: "req-s"
+    requestId: "f567e962-4c95-401b-b62a-b3aaee95a071"
+    userId: "anonymous"
+    method: "GET"
+    path: "/health"
+    statusCode: 200
+    duration: 0
+[2026-06-27 16:15:07.366 +0800] [32mINFO[39m: [36mrequest completed[39m
+    reqId: "req-s"
+    res: {
+      "statusCode": 200
+    }
+    responseTime: 0.4764000177383423

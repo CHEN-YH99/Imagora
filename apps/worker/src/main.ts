@@ -156,19 +156,19 @@ async function createImage(
   const now = new Date().toISOString();
   const extension = extensionForMimeType(mimeType);
   const imageKey = `generated/${task.userId}/${task.id}/${id}.${extension}`;
-  const thumbnailKey = `generated/${task.userId}/${task.id}/${id}-thumb.${extension}`;
   const stored = await storage.putObject({
     key: imageKey,
     body,
     bodyEncoding: isBase64Mime(mimeType) ? "base64" : "utf8",
     mimeType
   });
-  const thumbBody = await thumbnailBody(task, body, mimeType);
+  const thumbnail = await thumbnailObject(task, body, mimeType);
+  const thumbnailKey = `generated/${task.userId}/${task.id}/${id}-thumb.${thumbnail.extension}`;
   await storage.putObject({
     key: thumbnailKey,
-    body: thumbBody,
-    bodyEncoding: "base64", // 缩略图统一使用 JPEG base64
-    mimeType: "image/jpeg"
+    body: thumbnail.body,
+    bodyEncoding: thumbnail.bodyEncoding,
+    mimeType: thumbnail.mimeType
   });
   return {
     id,
@@ -188,15 +188,25 @@ async function createImage(
   };
 }
 
-async function thumbnailBody(task: GenerationTask, body: string, mimeType: string): Promise<string> {
-  // SVG: 简单调整尺寸
+interface ThumbnailObject {
+  body: string;
+  bodyEncoding: "utf8" | "base64";
+  mimeType: string;
+  extension: string;
+}
+
+async function thumbnailObject(task: GenerationTask, body: string, mimeType: string): Promise<ThumbnailObject> {
   if (mimeType === "image/svg+xml") {
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 ${task.width} ${task.height}">${body
-      .replace(/^<svg[^>]*>/, "")
-      .replace(/<\/svg>$/, "")}</svg>`;
+    return {
+      body: `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 ${task.width} ${task.height}">${body
+        .replace(/^<svg[^>]*>/, "")
+        .replace(/<\/svg>$/, "")}</svg>`,
+      bodyEncoding: "utf8",
+      mimeType,
+      extension: "svg"
+    };
   }
 
-  // 位图格式：使用 sharp 生成真实缩略图
   if (isBase64Mime(mimeType)) {
     try {
       const buffer = Buffer.from(body, "base64");
@@ -207,15 +217,23 @@ async function thumbnailBody(task: GenerationTask, body: string, mimeType: strin
         })
         .jpeg({ quality: 80 })
         .toBuffer();
-      return thumbnailBuffer.toString("base64");
+      return {
+        body: thumbnailBuffer.toString("base64"),
+        bodyEncoding: "base64",
+        mimeType: "image/jpeg",
+        extension: "jpg"
+      };
     } catch (error) {
       console.error("Failed to generate thumbnail, using original image:", error);
-      return body;
     }
   }
 
-  // 其他格式：直接返回原图
-  return body;
+  return {
+    body,
+    bodyEncoding: isBase64Mime(mimeType) ? "base64" : "utf8",
+    mimeType,
+    extension: extensionForMimeType(mimeType)
+  };
 }
 
 function isBase64Mime(mimeType: string): boolean {

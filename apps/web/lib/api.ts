@@ -53,10 +53,14 @@ export type ReferenceImage = {
 export type GeneratedImage = {
   id: string;
   taskId: string;
+  storageKey?: string;
   publicUrl: string;
   thumbnailKey?: string;
   width: number;
   height: number;
+  fileSize?: number;
+  mimeType?: string;
+  safetyStatus?: "PASSED" | "BLOCKED" | "REVIEW_REQUIRED";
   visibility: "PRIVATE" | "PUBLIC" | "HIDDEN";
   favorite?: boolean;
   createdAt: string;
@@ -145,28 +149,10 @@ export type SafetyRule = {
   createdAt: string;
 };
 
-const cookieSessionToken = "cookie-session";
-
-export function getStoredToken(): string | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  window.localStorage.removeItem("imagora.token");
-  return cookieSessionToken;
-}
-
-export function setStoredToken(_token: string | null): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-  window.localStorage.removeItem("imagora.token");
-}
-
 export async function apiFetch<T>(
   path: string,
   options: {
     method?: "GET" | "POST" | "PATCH" | "DELETE";
-    token?: string | null;
     body?: unknown;
   } = {}
 ): Promise<T> {
@@ -174,8 +160,7 @@ export async function apiFetch<T>(
     method: options.method ?? "GET",
     credentials: "include",
     headers: {
-      "Content-Type": "application/json",
-      ...(isBearerToken(options.token) ? { Authorization: `Bearer ${options.token}` } : {})
+      "Content-Type": "application/json"
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body)
   });
@@ -200,25 +185,21 @@ async function readApiPayload<T>(
   }
 }
 
-export async function login(email: string, password: string): Promise<{ token: string; user: User }> {
-  return apiFetch<{ token: string; user: User }>("/api/auth/login", {
+export async function login(email: string, password: string): Promise<{ user: User }> {
+  return apiFetch<{ user: User }>("/api/auth/login", {
     method: "POST",
     body: { email, password }
   });
 }
 
-export async function register(
-  email: string,
-  password: string,
-  nickname: string
-): Promise<{ token: string; user: User }> {
-  return apiFetch<{ token: string; user: User }>("/api/auth/register", {
+export async function register(email: string, password: string, nickname: string): Promise<{ user: User }> {
+  return apiFetch<{ user: User }>("/api/auth/register", {
     method: "POST",
     body: { email, password, nickname }
   });
 }
 
-export async function loginDemo(): Promise<{ token: string; user: User }> {
+export async function loginDemo(): Promise<{ user: User }> {
   return login("demo@imagora.local", "Demo123!");
 }
 
@@ -395,6 +376,7 @@ const apiErrorCodeMap: Record<string, string> = {
   ORDER_NOT_PAYABLE: "该订单当前不可支付，请重新创建订单。",
   PLAN_UNAVAILABLE: "该套餐当前不可购买，请选择其他套餐。",
   RATE_LIMITED: "操作过于频繁，请稍后再试。",
+  RATE_LIMIT_UNAVAILABLE: "服务限流组件暂时不可用，请稍后再试。",
   TASK_NOT_RETRYABLE: "只有失败或被拦截的任务可以重新生成。",
   UNAUTHORIZED: "登录已失效，请重新登录。",
   VALIDATION_ERROR: "提交内容格式不正确，请检查后重试。"
@@ -527,8 +509,4 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
-}
-
-function isBearerToken(token: string | null | undefined): token is string {
-  return Boolean(token && token !== cookieSessionToken);
 }

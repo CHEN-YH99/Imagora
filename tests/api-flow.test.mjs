@@ -1,12 +1,45 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { JsonStore } from "../packages/database/dist/index.js";
 
 const onePixelPngBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+
+test("api rejects bearer session auth in production config", async () => {
+  const env = {
+    ...process.env,
+    NODE_ENV: "production",
+    WEB_ORIGIN: "https://imagora.example",
+    DATABASE_URL: "postgresql://imagora:imagora@db.example:5432/imagora",
+    REDIS_URL: "redis://redis.example:6379",
+    OPENAI_API_KEY: "sk-test",
+    S3_ENDPOINT: "https://s3.example",
+    S3_BUCKET: "imagora",
+    S3_ACCESS_KEY_ID: "test-access-key",
+    S3_SECRET_ACCESS_KEY: "test-secret-key",
+    S3_PUBLIC_BASE_URL: "https://cdn.example",
+    STRIPE_SECRET_KEY: "sk_test",
+    STRIPE_WEBHOOK_SECRET: "whsec_test",
+    STRIPE_SUCCESS_URL: "https://imagora.example/payment/success",
+    STRIPE_CANCEL_URL: "https://imagora.example/payment/cancel",
+    DATA_STORE: "prisma",
+    QUEUE_PROVIDER: "bullmq",
+    AI_PROVIDER: "openai",
+    STORAGE_PROVIDER: "s3",
+    PAYMENT_PROVIDER: "stripe",
+    RATE_LIMIT_PROVIDER: "redis",
+    SESSION_COOKIE_SECURE: "true",
+    ALLOW_BEARER_SESSION_AUTH: "true"
+  };
+
+  const result = await runProcess(process.execPath, ["apps/api/dist/main.js"], env);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /bearer session auth must be disabled/);
+});
 
 test("api and worker complete generation and enforce admin safety rules", async () => {
   const dir = await mkdtemp(join(tmpdir(), "imagora-api-"));
@@ -14,8 +47,10 @@ test("api and worker complete generation and enforce admin safety rules", async 
   const storePath = join(dir, "store.json");
   const env = {
     ...process.env,
+    NODE_ENV: "test",
     API_HOST: "127.0.0.1",
     API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
     IMAGORA_STORE_PATH: storePath,
     ORDER_PENDING_TTL_MINUTES: "30",
     WORKER_POLL_INTERVAL_MS: "300"
@@ -27,17 +62,26 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const baseUrl = `http://127.0.0.1:${port}`;
     await waitForHealth(baseUrl);
 
-    const demo = await post(baseUrl, "/api/auth/login", {
-      email: "demo@imagora.local",
-      password: "Demo123!"
+    const demo = await login(baseUrl, "demo@imagora.local", "Demo123!");
+    const demoSession = demo.session;
+
+    const bearerDenied = await fetch(`${baseUrl}/api/users/me/credits`, {
+      headers: {
+        Authorization: `Bearer ${demo.sessionValue}`
+      }
     });
-    const demoToken = demo.data.token;
+    const bearerDeniedPayload = await bearerDenied.json();
+    assert.equal(bearerDenied.status, 401);
+    assert.equal(bearerDeniedPayload.error.code, "UNAUTHORIZED");
+
+    const cookieAuthenticated = await get(baseUrl, "/api/users/me/credits", demoSession);
+    assert.ok(cookieAuthenticated.data.account.balance >= 0);
 
     const blockedOrigin = await fetch(`${baseUrl}/api/generation/quote`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${demoToken}`,
+        Cookie: demoSession,
         Origin: "https://evil.example"
       },
       body: JSON.stringify({
@@ -56,7 +100,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${demoToken}`
+        Cookie: demoSession
       },
       body: JSON.stringify({
         fileName: "fake.png",
@@ -72,7 +116,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${demoToken}`
+        Cookie: demoSession
       },
       body: JSON.stringify({
         fileName: "large-invalid.png",
@@ -92,7 +136,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
         mimeType: "image/png",
         contentBase64: onePixelPngBase64
       },
-      demoToken
+      demoSession
     );
     const duplicateReference = await post(
       baseUrl,
@@ -102,21 +146,22 @@ test("api and worker complete generation and enforce admin safety rules", async 
         mimeType: "image/png",
         contentBase64: onePixelPngBase64
       },
-      demoToken
+      demoSession
     );
     assert.equal(uploadedReference.data.referenceImage.width, 1);
     assert.equal(uploadedReference.data.referenceImage.height, 1);
     assert.equal(duplicateReference.data.duplicate, true);
     assert.equal(duplicateReference.data.referenceImage.id, uploadedReference.data.referenceImage.id);
 
-    const otherUser = await post(baseUrl, "/api/auth/register", {
+    const otherUser = await register(baseUrl, {
       email: `intruder-${crypto.randomUUID()}@imagora.local`,
       password: "Intruder123!",
       nickname: "Intruder"
     });
+    const otherUserSession = otherUser.session;
     const forbiddenAdminUsers = await fetch(`${baseUrl}/api/admin/users`, {
       headers: {
-        Authorization: `Bearer ${demoToken}`
+        Cookie: demoSession
       }
     });
     const forbiddenAdminUsersPayload = await forbiddenAdminUsers.json();
@@ -127,7 +172,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${otherUser.data.token}`
+        Cookie: otherUserSession
       },
       body: JSON.stringify({
         clientRequestId: crypto.randomUUID(),
@@ -143,7 +188,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     assert.equal(foreignReferenceUse.status, 404);
     assert.equal(foreignReferencePayload.error.code, "NOT_FOUND");
 
-    const startingCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
+    const startingCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     const clientRequestId = crypto.randomUUID();
     const generationPayload = {
       clientRequestId,
@@ -155,8 +200,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       quantity: 1,
       quality: "draft"
     };
-    const created = await post(baseUrl, "/api/generation/tasks", generationPayload, demoToken);
-    const duplicateCreated = await post(baseUrl, "/api/generation/tasks", generationPayload, demoToken);
+    const created = await post(baseUrl, "/api/generation/tasks", generationPayload, demoSession);
+    const duplicateCreated = await post(baseUrl, "/api/generation/tasks", generationPayload, demoSession);
 
     assert.equal(duplicateCreated.data.task.id, created.data.task.id);
     assert.equal(created.data.task.referenceImageId, uploadedReference.data.referenceImage.id);
@@ -164,12 +209,12 @@ test("api and worker complete generation and enforce admin safety rules", async 
     assert.equal(created.data.balanceAfter, startingCredits.data.account.balance - created.data.task.creditCost);
 
     const taskId = created.data.task.id;
-    const completed = await waitForTask(baseUrl, demoToken, taskId);
+    const completed = await waitForTask(baseUrl, demoSession, taskId);
     assert.equal(completed.data.task.status, "SUCCEEDED");
     assert.equal(completed.data.images.length, 1);
     const generatedImageId = completed.data.images[0].id;
 
-    const downloadUrl = await post(baseUrl, `/api/images/${generatedImageId}/download-url`, {}, demoToken);
+    const downloadUrl = await post(baseUrl, `/api/images/${generatedImageId}/download-url`, {}, demoSession);
     assert.match(downloadUrl.data.url, /^mock-signed:\/\//);
     assert.match(downloadUrl.data.fileName, /^imagora-.+\.svg$/);
     assert.ok(downloadUrl.data.expiresAt);
@@ -177,7 +222,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${otherUser.data.token}`
+        Cookie: otherUserSession
       },
       body: JSON.stringify({})
     });
@@ -185,7 +230,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     assert.equal(foreignDownload.status, 404);
     assert.equal(foreignDownloadPayload.error.code, "NOT_FOUND");
 
-    const beforeFailedCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
+    const beforeFailedCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     const failedCreated = await post(
       baseUrl,
       "/api/generation/tasks",
@@ -197,17 +242,17 @@ test("api and worker complete generation and enforce admin safety rules", async 
         quantity: 1,
         quality: "draft"
       },
-      demoToken
+      demoSession
     );
-    const failed = await waitForTask(baseUrl, demoToken, failedCreated.data.task.id);
+    const failed = await waitForTask(baseUrl, demoSession, failedCreated.data.task.id);
     assert.equal(failed.data.task.status, "FAILED");
     assert.equal(failed.data.task.failureCode, "PROVIDER_FAILED");
 
-    const afterFailedCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
+    const afterFailedCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     assert.equal(afterFailedCredits.data.account.balance, beforeFailedCredits.data.account.balance);
 
     await forceStaleRunningTask(storePath, failedCreated.data.task.id);
-    const failedAgain = await waitForTask(baseUrl, demoToken, failedCreated.data.task.id);
+    const failedAgain = await waitForTask(baseUrl, demoSession, failedCreated.data.task.id);
     assert.equal(failedAgain.data.task.status, "FAILED");
 
     const storeAfterRefund = await readStore(storePath);
@@ -224,8 +269,13 @@ test("api and worker complete generation and enforce admin safety rules", async 
       1
     );
 
-    const beforePaymentCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
-    const orderCreated = await post(baseUrl, "/api/orders", { planId: "starter", paymentProvider: "mock" }, demoToken);
+    const beforePaymentCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const orderCreated = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock" },
+      demoSession
+    );
     const providerEventId = `evt_${crypto.randomUUID()}`;
     const webhookPayload = {
       providerEventId,
@@ -246,14 +296,19 @@ test("api and worker complete generation and enforce admin safety rules", async 
     assert.equal(webhookDuplicate.data.duplicateEvent, true);
     assert.equal(webhookDuplicate.data.balanceAfter, webhookPaid.data.balanceAfter);
 
-    const beforeMismatchCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
-    const mismatchOrder = await post(baseUrl, "/api/orders", { planId: "starter", paymentProvider: "mock" }, demoToken);
+    const beforeMismatchCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const mismatchOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock" },
+      demoSession
+    );
     const mismatchWebhook = await post(baseUrl, "/api/payments/webhooks/mock", {
       providerEventId: `evt_${crypto.randomUUID()}`,
       orderId: mismatchOrder.data.order.id,
       amountCents: mismatchOrder.data.order.amountCents + 1
     });
-    const afterMismatchCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
+    const afterMismatchCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     assert.equal(mismatchWebhook.data.credited, false);
     assert.equal(mismatchWebhook.data.reason, "AMOUNT_MISMATCH");
     assert.equal(mismatchWebhook.data.order.status, "PENDING");
@@ -273,21 +328,19 @@ test("api and worker complete generation and enforce admin safety rules", async 
       1
     );
 
-    const admin = await post(baseUrl, "/api/auth/login", {
-      email: "admin@imagora.local",
-      password: "Admin123!"
-    });
+    const admin = await login(baseUrl, "admin@imagora.local", "Admin123!");
+    const adminSession = admin.session;
 
     await removeOrderCreditGrant(storePath, orderCreated.data.order.id);
-    const corruptedPaymentCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
+    const corruptedPaymentCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     assert.equal(
       corruptedPaymentCredits.data.account.balance,
       webhookPaid.data.balanceAfter - orderCreated.data.plan.credits
     );
 
-    const paidOrderReconciliation = await post(baseUrl, "/api/admin/maintenance/reconcile", {}, admin.data.token);
+    const paidOrderReconciliation = await post(baseUrl, "/api/admin/maintenance/reconcile", {}, adminSession);
     assert.equal(paidOrderReconciliation.data.maintenance.reconciledPaidOrders, 1);
-    const restoredPaymentCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
+    const restoredPaymentCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     assert.equal(restoredPaymentCredits.data.account.balance, webhookPaid.data.balanceAfter);
     const storeAfterPaidOrderReconcile = await readStore(storePath);
     assert.equal(
@@ -300,34 +353,39 @@ test("api and worker complete generation and enforce admin safety rules", async 
     );
     assert.ok(storeAfterPaidOrderReconcile.adminAuditLogs.some((entry) => entry.action === "maintenance.reconcile"));
 
-    const duplicateReconciliation = await post(baseUrl, "/api/admin/maintenance/reconcile", {}, admin.data.token);
+    const duplicateReconciliation = await post(baseUrl, "/api/admin/maintenance/reconcile", {}, adminSession);
     assert.equal(duplicateReconciliation.data.maintenance.reconciledPaidOrders, 0);
 
     const eventBackfillOrder = await post(
       baseUrl,
       "/api/orders",
       { planId: "starter", paymentProvider: "mock" },
-      demoToken
+      demoSession
     );
-    const beforeEventBackfillCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
+    const beforeEventBackfillCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     await seedSucceededPaymentEvent(
       storePath,
       eventBackfillOrder.data.order.id,
       `evt_${crypto.randomUUID()}`,
       eventBackfillOrder.data.order.amountCents
     );
-    const eventBackfillReconciliation = await post(baseUrl, "/api/admin/maintenance/reconcile", {}, admin.data.token);
+    const eventBackfillReconciliation = await post(baseUrl, "/api/admin/maintenance/reconcile", {}, adminSession);
     assert.equal(eventBackfillReconciliation.data.maintenance.reconciledPaymentEvents, 1);
     assert.equal(eventBackfillReconciliation.data.maintenance.reconciledPaidOrders, 1);
-    const afterEventBackfillCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
+    const afterEventBackfillCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     assert.equal(
       afterEventBackfillCredits.data.account.balance,
       beforeEventBackfillCredits.data.account.balance + eventBackfillOrder.data.plan.credits
     );
 
-    const expiredOrder = await post(baseUrl, "/api/orders", { planId: "starter", paymentProvider: "mock" }, demoToken);
+    const expiredOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock" },
+      demoSession
+    );
     await markOrderExpired(storePath, expiredOrder.data.order.id);
-    const ordersAfterExpiry = await get(baseUrl, "/api/orders", demoToken);
+    const ordersAfterExpiry = await get(baseUrl, "/api/orders", demoSession);
     assert.ok(ordersAfterExpiry.data.maintenance.closedExpiredOrders >= 1);
     const expiredAfterMaintenance = ordersAfterExpiry.data.orders.find(
       (order) => order.id === expiredOrder.data.order.id
@@ -338,7 +396,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${demoToken}`
+        Cookie: demoSession
       },
       body: JSON.stringify({})
     });
@@ -350,11 +408,11 @@ test("api and worker complete generation and enforce admin safety rules", async 
       baseUrl,
       "/api/orders",
       { planId: "starter", paymentProvider: "mock" },
-      demoToken
+      demoSession
     );
-    const beforeLateWebhookCredits = await get(baseUrl, "/api/users/me/credits", demoToken);
+    const beforeLateWebhookCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     await markOrderExpired(storePath, lateWebhookOrder.data.order.id);
-    await get(baseUrl, "/api/orders", demoToken);
+    await get(baseUrl, "/api/orders", demoSession);
     const lateWebhookPaid = await post(baseUrl, "/api/payments/webhooks/mock", {
       providerEventId: `evt_${crypto.randomUUID()}`,
       orderId: lateWebhookOrder.data.order.id,
@@ -367,34 +425,30 @@ test("api and worker complete generation and enforce admin safety rules", async 
       beforeLateWebhookCredits.data.account.balance + lateWebhookOrder.data.plan.credits
     );
 
-    const adminUserSearch = await get(
-      baseUrl,
-      "/api/admin/users?search=demo%40imagora.local&limit=5",
-      admin.data.token
-    );
+    const adminUserSearch = await get(baseUrl, "/api/admin/users?search=demo%40imagora.local&limit=5", adminSession);
     assert.ok(adminUserSearch.data.users.some((user) => user.id === demo.data.user.id));
 
     const suspendedUser = await patch(
       baseUrl,
       `/api/admin/users/${otherUser.data.user.id}/status`,
       { status: "SUSPENDED" },
-      admin.data.token
+      adminSession
     );
     assert.equal(suspendedUser.data.user.status, "SUSPENDED");
-    const suspendedUsers = await get(baseUrl, "/api/admin/users?status=SUSPENDED&limit=10", admin.data.token);
+    const suspendedUsers = await get(baseUrl, "/api/admin/users?status=SUSPENDED&limit=10", adminSession);
     assert.ok(suspendedUsers.data.users.some((user) => user.id === otherUser.data.user.id));
     assert.ok(suspendedUsers.data.users.every((user) => user.status === "SUSPENDED"));
-    await patch(baseUrl, `/api/admin/users/${otherUser.data.user.id}/status`, { status: "ACTIVE" }, admin.data.token);
+    await patch(baseUrl, `/api/admin/users/${otherUser.data.user.id}/status`, { status: "ACTIVE" }, adminSession);
 
-    const beforeAdminAdjustment = await get(baseUrl, "/api/users/me/credits", demoToken);
+    const beforeAdminAdjustment = await get(baseUrl, "/api/users/me/credits", demoSession);
     const adjustedCredits = await post(
       baseUrl,
       `/api/admin/users/${demo.data.user.id}/credits/adjust`,
       { amount: 17, reason: "QA manual adjustment" },
-      admin.data.token
+      adminSession
     );
     assert.equal(adjustedCredits.data.account.balance, beforeAdminAdjustment.data.account.balance + 17);
-    const ledgerAfterAdjustment = await get(baseUrl, "/api/users/me/credit-ledger?limit=100", demoToken);
+    const ledgerAfterAdjustment = await get(baseUrl, "/api/users/me/credit-ledger?limit=100", demoSession);
     assert.ok(
       ledgerAfterAdjustment.data.entries.some(
         (entry) =>
@@ -418,51 +472,51 @@ test("api and worker complete generation and enforce admin safety rules", async 
         status: "ACTIVE",
         sortOrder: 77
       },
-      admin.data.token
+      adminSession
     );
     assert.equal(createdPlan.data.plan.status, "ACTIVE");
-    const publicPlansAfterCreate = await get(baseUrl, "/api/plans", demoToken);
+    const publicPlansAfterCreate = await get(baseUrl, "/api/plans", demoSession);
     assert.ok(publicPlansAfterCreate.data.plans.some((plan) => plan.id === createdPlan.data.plan.id));
 
     const disabledPlan = await patch(
       baseUrl,
       `/api/admin/plans/${createdPlan.data.plan.id}`,
       { priceCents: 1599, credits: 420, status: "INACTIVE", sortOrder: 8 },
-      admin.data.token
+      adminSession
     );
     assert.equal(disabledPlan.data.plan.priceCents, 1599);
     assert.equal(disabledPlan.data.plan.credits, 420);
     assert.equal(disabledPlan.data.plan.status, "INACTIVE");
-    const publicPlansAfterDisable = await get(baseUrl, "/api/plans", demoToken);
+    const publicPlansAfterDisable = await get(baseUrl, "/api/plans", demoSession);
     assert.ok(!publicPlansAfterDisable.data.plans.some((plan) => plan.id === createdPlan.data.plan.id));
     const reactivatedPlan = await patch(
       baseUrl,
       `/api/admin/plans/${createdPlan.data.plan.id}`,
       { status: "ACTIVE" },
-      admin.data.token
+      adminSession
     );
     assert.equal(reactivatedPlan.data.plan.status, "ACTIVE");
 
-    const succeededTasks = await get(baseUrl, "/api/admin/generation/tasks?status=SUCCEEDED&limit=5", admin.data.token);
+    const succeededTasks = await get(baseUrl, "/api/admin/generation/tasks?status=SUCCEEDED&limit=5", adminSession);
     assert.ok(succeededTasks.data.tasks.some((task) => task.id === taskId));
     assert.ok(succeededTasks.data.tasks.every((task) => task.status === "SUCCEEDED"));
-    const paidOrders = await get(baseUrl, "/api/admin/orders?status=PAID&limit=10", admin.data.token);
+    const paidOrders = await get(baseUrl, "/api/admin/orders?status=PAID&limit=10", adminSession);
     assert.ok(paidOrders.data.orders.every((order) => order.status === "PAID"));
 
     const hiddenImage = await patch(
       baseUrl,
       `/api/admin/images/${generatedImageId}/visibility`,
       { visibility: "HIDDEN" },
-      admin.data.token
+      adminSession
     );
     assert.equal(hiddenImage.data.image.visibility, "HIDDEN");
-    const hiddenImages = await get(baseUrl, "/api/admin/images?visibility=HIDDEN&limit=10", admin.data.token);
+    const hiddenImages = await get(baseUrl, "/api/admin/images?visibility=HIDDEN&limit=10", adminSession);
     assert.ok(hiddenImages.data.images.some((image) => image.id === generatedImageId));
     assert.ok(hiddenImages.data.images.every((image) => image.visibility === "HIDDEN"));
-    const visibleImagesAfterHide = await get(baseUrl, "/api/images?limit=50", demoToken);
+    const visibleImagesAfterHide = await get(baseUrl, "/api/images?limit=50", demoSession);
     assert.ok(!visibleImagesAfterHide.data.images.some((image) => image.id === generatedImageId));
 
-    const auditLogs = await get(baseUrl, "/api/admin/audit-logs", admin.data.token);
+    const auditLogs = await get(baseUrl, "/api/admin/audit-logs", adminSession);
     for (const action of [
       "user.status.update",
       "user.credits.adjust",
@@ -476,7 +530,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
       );
     }
 
-    const metrics = await get(baseUrl, "/api/admin/metrics", admin.data.token);
+    const metrics = await get(baseUrl, "/api/admin/metrics", adminSession);
     assert.ok(metrics.data.http.requestsTotal > 0);
     assert.ok(metrics.data.domain.tasksByStatus.SUCCEEDED >= 1);
     assert.ok(metrics.data.domain.referenceImagesTotal >= 1);
@@ -488,13 +542,13 @@ test("api and worker complete generation and enforce admin safety rules", async 
       baseUrl,
       "/api/admin/safety-rules",
       { term: "blockedtest", action: "BLOCK", status: "ACTIVE" },
-      admin.data.token
+      adminSession
     );
     const blocked = await fetch(`${baseUrl}/api/generation/tasks`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${demoToken}`
+        Cookie: demoSession
       },
       body: JSON.stringify({
         clientRequestId: crypto.randomUUID(),
@@ -515,6 +569,67 @@ test("api and worker complete generation and enforce admin safety rules", async 
   }
 });
 
+function runProcess(command, args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { env, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${command} ${args.join(" ")} timed out`));
+    }, 5000);
+
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      resolve({ code, stderr });
+    });
+  });
+}
+
+async function login(baseUrl, email, password) {
+  return authPost(baseUrl, "/api/auth/login", { email, password });
+}
+
+async function register(baseUrl, body) {
+  return authPost(baseUrl, "/api/auth/register", body);
+}
+
+async function authPost(baseUrl, path, body) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json();
+  assert.equal(response.ok, true, JSON.stringify(payload));
+  assert.ok(payload.data);
+  assert.equal("token" in payload.data, false);
+
+  const setCookie = readSetCookie(response);
+  assert.match(setCookie, /^imagora_session=/);
+  assert.match(setCookie, /;\s*HttpOnly/i);
+  const session = setCookie.split(";")[0];
+  const sessionValue = session.split("=").slice(1).join("=");
+  assert.ok(sessionValue);
+  return { ...payload, session, sessionValue };
+}
+
+function readSetCookie(response) {
+  const getSetCookie = response.headers.getSetCookie?.bind(response.headers);
+  const setCookie = getSetCookie ? getSetCookie()[0] : response.headers.get("set-cookie");
+  assert.ok(setCookie);
+  return setCookie;
+}
+
 async function waitForHealth(baseUrl) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
@@ -530,9 +645,9 @@ async function waitForHealth(baseUrl) {
   throw new Error("API health check timed out");
 }
 
-async function waitForTask(baseUrl, token, taskId) {
+async function waitForTask(baseUrl, session, taskId) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const response = await get(baseUrl, `/api/generation/tasks/${taskId}`, token);
+    const response = await get(baseUrl, `/api/generation/tasks/${taskId}`, session);
     if (["SUCCEEDED", "FAILED", "BLOCKED"].includes(response.data.task.status)) {
       return response;
     }
@@ -541,12 +656,12 @@ async function waitForTask(baseUrl, token, taskId) {
   throw new Error("Task did not complete");
 }
 
-async function post(baseUrl, path, body, token) {
+async function post(baseUrl, path, body, session) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
+      ...sessionHeaders(session)
     },
     body: JSON.stringify(body)
   });
@@ -555,12 +670,12 @@ async function post(baseUrl, path, body, token) {
   return payload;
 }
 
-async function patch(baseUrl, path, body, token) {
+async function patch(baseUrl, path, body, session) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
+      ...sessionHeaders(session)
     },
     body: JSON.stringify(body)
   });
@@ -569,15 +684,17 @@ async function patch(baseUrl, path, body, token) {
   return payload;
 }
 
-async function get(baseUrl, path, token) {
+async function get(baseUrl, path, session) {
   const response = await fetch(`${baseUrl}${path}`, {
-    headers: {
-      Authorization: `Bearer ${token}`
-    }
+    headers: sessionHeaders(session)
   });
   const payload = await response.json();
   assert.equal(response.ok, true, JSON.stringify(payload));
   return payload;
+}
+
+function sessionHeaders(session) {
+  return session ? { Cookie: session } : {};
 }
 
 function sleep(ms) {
@@ -587,17 +704,11 @@ function sleep(ms) {
 }
 
 async function readStore(storePath) {
-  return JSON.parse(await readFile(storePath, "utf8"));
-}
-
-async function writeStoreJson(storePath, store) {
-  await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  return new JsonStore(storePath).read();
 }
 
 async function updateStoreJson(storePath, updater) {
-  const store = await readStore(storePath);
-  updater(store);
-  await writeStoreJson(storePath, store);
+  return new JsonStore(storePath).update((store) => updater(store));
 }
 
 async function forceStaleRunningTask(storePath, taskId) {
