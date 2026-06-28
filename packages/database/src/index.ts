@@ -13,7 +13,16 @@ export interface Store {
 }
 
 export function createStore(): Store {
-  return process.env.DATA_STORE === "prisma" ? new PrismaStore() : new JsonStore();
+  if (process.env.DATA_STORE !== "prisma") {
+    return new JsonStore();
+  }
+
+  const prismaStore = new PrismaStore();
+  if (!allowPrismaDevelopmentFallback()) {
+    return prismaStore;
+  }
+
+  return new DevelopmentFallbackStore(prismaStore, new JsonStore());
 }
 
 export class JsonStore implements Store {
@@ -89,6 +98,43 @@ export class JsonStore implements Store {
         throw error;
       }
       await this.writeUnlocked(createInitialData());
+    }
+  }
+}
+
+class DevelopmentFallbackStore implements Store {
+  private activeFallback: Store | null = null;
+
+  constructor(
+    private readonly primary: Store,
+    private readonly fallback: Store
+  ) {}
+
+  async read(): Promise<StoreData> {
+    return this.run((store) => store.read());
+  }
+
+  async write(data: StoreData): Promise<void> {
+    return this.run((store) => store.write(data));
+  }
+
+  async update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
+    return this.run((store) => store.update(mutate));
+  }
+
+  private async run<T>(operation: (store: Store) => Promise<T>): Promise<T> {
+    if (this.activeFallback) {
+      return operation(this.activeFallback);
+    }
+
+    try {
+      return await operation(this.primary);
+    } catch (error) {
+      if (!isPrismaUnavailableError(error)) {
+        throw error;
+      }
+      this.activeFallback = this.fallback;
+      return operation(this.activeFallback);
     }
   }
 }
@@ -878,6 +924,27 @@ function shouldSeedDemoData(): boolean {
     return envFlag(value);
   }
   return process.env.NODE_ENV !== "production";
+}
+
+function allowPrismaDevelopmentFallback(): boolean {
+  if (process.env.NODE_ENV === "production") {
+    return false;
+  }
+  return !envFlag(process.env.DISABLE_PRISMA_DEV_FALLBACK ?? "false");
+}
+
+function isPrismaUnavailableError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const name = "name" in error ? String(error.name) : "";
+  const code = "code" in error ? String(error.code) : "";
+  const message = error instanceof Error ? error.message : "";
+  return (
+    name === "PrismaClientInitializationError" ||
+    code === "P1001" ||
+    /Can't reach database server|ECONNREFUSED|ETIMEDOUT|ENOTFOUND/i.test(message)
+  );
 }
 
 async function withFileLock<T>(filePath: string, action: () => Promise<T>): Promise<T> {

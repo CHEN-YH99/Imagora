@@ -70,8 +70,15 @@ const app = Fastify({
 const serviceStartedAt = Date.now();
 const routeMetrics = new Map<string, RouteMetric>();
 const rateLimitBuckets = new Map<string, RateLimitBucket>();
+const captchaChallenges = new Map<string, CaptchaChallenge>();
 const rateLimitWindowMs = envNumber("RATE_LIMIT_WINDOW_MS", 60_000);
 const rateLimitRules: RateLimitRule[] = [
+  {
+    id: "auth-captcha",
+    method: "GET",
+    pattern: /^\/api\/auth\/captcha$/,
+    max: envNumber("RATE_LIMIT_CAPTCHA_MAX", 60)
+  },
   { id: "auth-login", method: "POST", pattern: /^\/api\/auth\/login$/, max: envNumber("RATE_LIMIT_AUTH_MAX", 20) },
   {
     id: "auth-register",
@@ -231,19 +238,37 @@ app.get("/health", async () => ({
 
 app.get("/api/features", async (request) => envelope(request, { features: featureFlags() }));
 
+app.get("/api/auth/captcha", async (request) => {
+  pruneCaptchaChallenges();
+  const answer = createCaptchaAnswer();
+  const captchaId = randomUUID();
+  const expiresAt = new Date(Date.now() + envNumber("CAPTCHA_TTL_SECONDS", 180) * 1000).toISOString();
+  captchaChallenges.set(captchaId, {
+    answerHash: hashCaptchaAnswer(answer),
+    expiresAt,
+    createdAt: new Date().toISOString()
+  });
+  return envelope(request, {
+    captchaId,
+    imageSvg: createCaptchaSvg(answer),
+    expiresAt,
+    ...(exposeCaptchaAnswerForTests() ? { answer } : {})
+  });
+});
+
 app.post("/api/auth/register", async (request, reply) => {
   const input = registerSchema.parse(request.body);
   const result = await store.update(async (data) => {
     const email = input.email.toLowerCase();
     if (data.users.some((user) => user.email === email)) {
-      throw new AppError("CONFLICT", "Email is already registered", 409);
+      throw new AppError("CONFLICT", "Unable to create account with these credentials", 409);
     }
     const now = new Date().toISOString();
     const user: User = {
       id: randomUUID(),
       email,
       passwordHash: hashPassword(input.password),
-      nickname: input.nickname ?? email.split("@")[0] ?? "Creator",
+      nickname: defaultNicknameForEmail(email),
       avatarUrl: null,
       emailVerifiedAt: null,
       role: "USER",
@@ -299,7 +324,12 @@ app.post("/api/auth/register", async (request, reply) => {
 });
 
 app.post("/api/auth/login", async (request, reply) => {
+  const payload = payloadRecord(request.body);
+  if (!payload.captchaId || !payload.captchaAnswer) {
+    throw new AppError("CAPTCHA_REQUIRED", "Image verification is required", 400);
+  }
   const input = loginSchema.parse(request.body);
+  verifyCaptchaChallenge(input.captchaId, input.captchaAnswer);
   return store.update(async (data) => {
     const user = data.users.find((item) => item.email === input.email.toLowerCase());
     if (!user || !verifyPassword(input.password, user.passwordHash)) {
@@ -1231,6 +1261,12 @@ interface RateLimitRule {
   max: number;
 }
 
+interface CaptchaChallenge {
+  answerHash: string;
+  expiresAt: string;
+  createdAt: string;
+}
+
 type FeatureName = "generation" | "payments" | "uploads" | "downloads";
 
 interface FeatureFlags {
@@ -1270,19 +1306,67 @@ interface OperationalAlert {
   runbook: string;
 }
 
-const registerSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
-  nickname: z.string().min(1).max(80).optional()
-});
+const commonPasswordBlocklist = new Set([
+  "123456",
+  "12345678",
+  "123456789",
+  "admin123",
+  "imagora",
+  "imagora123",
+  "password",
+  "password123",
+  "qwerty123"
+]);
 
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1)
+const emailSchema = z.string().trim().toLowerCase().min(1).max(254).email();
+const loginPasswordSchema = z.string().min(1).max(128).refine(hasNoControlCharacters, {
+  message: "Password contains unsupported characters"
 });
+const newPasswordSchema = z
+  .string()
+  .min(12)
+  .max(128)
+  .refine((password) => password.trim() === password, {
+    message: "Password must not start or end with spaces"
+  })
+  .refine(hasNoControlCharacters, {
+    message: "Password contains unsupported characters"
+  })
+  .refine((password) => /[A-Za-z]/.test(password) && /\d/.test(password), {
+    message: "Password must include letters and numbers"
+  })
+  .refine((password) => !commonPasswordBlocklist.has(normalizePasswordForBlocklist(password)), {
+    message: "Password is too common"
+  });
+
+const registerSchema = z
+  .object({
+    email: emailSchema,
+    password: newPasswordSchema
+  })
+  .strict()
+  .superRefine((input, context) => {
+    const emailName = input.email.split("@")[0]?.toLowerCase() ?? "";
+    if (emailName.length >= 4 && input.password.toLowerCase().includes(emailName)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["password"],
+        message: "Password must not include the email name"
+      });
+    }
+  });
+
+const loginSchema = z
+  .object({
+    email: emailSchema,
+    password: loginPasswordSchema,
+    captchaId: z.string().uuid(),
+    captchaAnswer: z.string().trim().min(1).max(12)
+  })
+  .strict();
 
 const requestPasswordResetSchema = z.object({
-  email: z.string().email()
+  email: emailSchema
 });
 
 const resetPasswordSchema = z.object({
@@ -2159,6 +2243,94 @@ function assertMockPaymentAllowed(): void {
       provider: paymentProvider.name
     });
   }
+}
+
+function createCaptchaAnswer(): string {
+  const alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+  let value = "";
+  for (let index = 0; index < 5; index += 1) {
+    value += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return value;
+}
+
+function createCaptchaSvg(answer: string): string {
+  const characters = [...answer];
+  const text = characters
+    .map((character, index) => {
+      const x = 28 + index * 30;
+      const y = 48 + (index % 2 === 0 ? -4 : 4);
+      const rotate = index % 2 === 0 ? -8 : 7;
+      return `<text x="${x}" y="${y}" transform="rotate(${rotate} ${x} ${y})">${escapeXml(character)}</text>`;
+    })
+    .join("");
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="190" height="72" viewBox="0 0 190 72" role="img" aria-label="图片验证码"><rect width="190" height="72" rx="14" fill="#f8fafc"/><path d="M12 22 C45 5, 70 40, 105 18 S150 50, 178 24" stroke="#94a3b8" stroke-width="2" fill="none"/><path d="M16 52 C52 42, 72 62, 118 48 S152 34, 180 50" stroke="#99f6e4" stroke-width="3" fill="none"/><g fill="#0f172a" font-family="Arial, sans-serif" font-size="30" font-weight="700" letter-spacing="2">${text}</g><circle cx="24" cy="19" r="2" fill="#f97316"/><circle cx="161" cy="19" r="2" fill="#14b8a6"/><circle cx="145" cy="56" r="2" fill="#f97316"/></svg>`;
+}
+
+function verifyCaptchaChallenge(captchaId: string, captchaAnswer: string): void {
+  pruneCaptchaChallenges();
+  const challenge = captchaChallenges.get(captchaId);
+  captchaChallenges.delete(captchaId);
+  if (!challenge || new Date(challenge.expiresAt).getTime() <= Date.now()) {
+    throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
+  }
+  const actualHash = hashCaptchaAnswer(captchaAnswer);
+  if (actualHash !== challenge.answerHash) {
+    throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
+  }
+}
+
+function hashCaptchaAnswer(answer: string): string {
+  return createHash("sha256").update(answer.trim().toUpperCase()).digest("hex");
+}
+
+function exposeCaptchaAnswerForTests(): boolean {
+  return process.env.NODE_ENV !== "production" && envBool("EXPOSE_CAPTCHA_ANSWER_FOR_TESTS", false);
+}
+
+function pruneCaptchaChallenges(): void {
+  const now = Date.now();
+  for (const [captchaId, challenge] of captchaChallenges) {
+    if (new Date(challenge.expiresAt).getTime() <= now) {
+      captchaChallenges.delete(captchaId);
+    }
+  }
+  const maxChallenges = envNumber("CAPTCHA_MAX_CHALLENGES", 5000);
+  if (captchaChallenges.size <= maxChallenges) {
+    return;
+  }
+  const overflow = [...captchaChallenges.entries()]
+    .sort(([, left], [, right]) => left.createdAt.localeCompare(right.createdAt))
+    .slice(0, captchaChallenges.size - maxChallenges);
+  for (const [captchaId] of overflow) {
+    captchaChallenges.delete(captchaId);
+  }
+}
+
+function defaultNicknameForEmail(email: string): string {
+  const localPart = email.split("@")[0] ?? "";
+  const cleaned = localPart.replace(/[^a-z0-9_-]/gi, "").slice(0, 32);
+  return cleaned || "Imagora 用户";
+}
+
+function hasNoControlCharacters(value: string): boolean {
+  return [...value].every((character) => {
+    const code = character.charCodeAt(0);
+    return code > 31 && code !== 127;
+  });
+}
+
+function normalizePasswordForBlocklist(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function validateProductionConfig(): void {

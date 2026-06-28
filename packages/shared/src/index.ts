@@ -257,6 +257,8 @@ export interface ApiErrorEnvelope {
 
 export type ErrorCode =
   | "VALIDATION_ERROR"
+  | "CAPTCHA_REQUIRED"
+  | "CAPTCHA_INVALID"
   | "UNAUTHORIZED"
   | "FORBIDDEN"
   | "NOT_FOUND"

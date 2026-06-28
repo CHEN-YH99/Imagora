@@ -19,3 +19,14 @@ test("web exposes image detail workflow from history and favorites", async () =>
   assert.match(historyPage, /href=\{`\/images\/\$\{image\.id\}`\}/);
   assert.match(favoritesPage, /href=\{`\/images\/\$\{image\.id\}`\}/);
 });
+
+test("web auth pages validate inputs and registration does not ask for nickname", async () => {
+  const loginPage = await readFile(join(root, "apps/web/app/login/page.tsx"), "utf8");
+  const registerPage = await readFile(join(root, "apps/web/app/register/page.tsx"), "utf8");
+
+  assert.match(loginPage, /validateLoginForm/);
+  assert.match(registerPage, /validateRegisterForm/);
+  assert.match(registerPage, /confirmPassword/);
+  assert.doesNotMatch(registerPage, /昵称/);
+  assert.doesNotMatch(registerPage, /nickname/);
+});

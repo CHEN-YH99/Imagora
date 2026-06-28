@@ -18,7 +18,6 @@ import {
   formatStatusLabel,
   formatStyleLabel,
   formatTargetType,
-  login,
   type AdminMetrics,
   type AdminOperationalMetrics,
   type GeneratedImage,
@@ -102,7 +101,6 @@ export default function AdminPage() {
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [newRule, setNewRule] = useState("");
   const [message, setMessage] = useState("");
-  const [loading, setLoading] = useState(false);
   const [maintenanceRunning, setMaintenanceRunning] = useState(false);
   const [taskStatusFilter, setTaskStatusFilter] = useState<"ALL" | Task["status"]>("ALL");
   const [orderStatusFilter, setOrderStatusFilter] = useState<"ALL" | Order["status"]>("ALL");
@@ -130,19 +128,6 @@ export default function AdminPage() {
       setMessage(error instanceof Error ? error.message : "用户详情加载失败。");
     } finally {
       setUserDetailLoading(false);
-    }
-  }
-
-  async function loginAdmin() {
-    setLoading(true);
-    setMessage("");
-    try {
-      await login("admin@imagora.local", "Admin123!");
-      await load();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "管理员登录失败，请检查账号权限。");
-    } finally {
-      setLoading(false);
     }
   }
 
@@ -406,11 +391,12 @@ export default function AdminPage() {
         <button
           className="focus-ring inline-flex items-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
           type="button"
-          disabled={loading}
-          onClick={loginAdmin}
+          onClick={() => {
+            window.location.href = "/login";
+          }}
         >
           <Shield className="size-4" aria-hidden="true" />
-          {loading ? "登录中..." : "管理员登录"}
+          前往登录
         </button>
         <button
           className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/12 bg-white/8 px-5 py-3 font-semibold text-white transition-colors duration-200 hover:border-mint/70 hover:bg-mint/12 disabled:opacity-60"

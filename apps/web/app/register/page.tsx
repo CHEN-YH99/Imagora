@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { type FormEvent, Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { UserPlus } from "lucide-react";
@@ -24,19 +24,26 @@ function RegisterForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
-  const [nickname, setNickname] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
   const promptParam = searchParams.get("prompt");
   const fromDemo = searchParams.get("from") === "demo";
 
-  async function submit() {
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const validationMessage = validateRegisterForm(email, password, confirmPassword);
+    if (validationMessage) {
+      setMessage(validationMessage);
+      return;
+    }
+
     setLoading(true);
     setMessage("");
     try {
-      await register(email, password, nickname || email.split("@")[0] || "创作者");
+      await register(email.trim().toLowerCase(), password);
       if (promptParam) {
         router.push(`/generate?prompt=${encodeURIComponent(promptParam)}`);
       } else {
@@ -66,22 +73,17 @@ function RegisterForm() {
             新用户可获得欢迎积分，用于体验图片生成、历史记录和下载流程。
           </p>
         )}
-        <div className="mt-6 space-y-4">
+        <form className="mt-6 space-y-4" noValidate onSubmit={submit}>
           <label className="block text-sm text-white/70">
             邮箱
             <input
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
+              autoComplete="email"
+              maxLength={254}
+              required
               type="email"
-            />
-          </label>
-          <label className="block text-sm text-white/70">
-            昵称
-            <input
-              className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-              value={nickname}
-              onChange={(event) => setNickname(event.target.value)}
             />
           </label>
           <label className="block text-sm text-white/70">
@@ -90,6 +92,23 @@ function RegisterForm() {
               className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
+              autoComplete="new-password"
+              maxLength={128}
+              minLength={12}
+              required
+              type="password"
+            />
+          </label>
+          <label className="block text-sm text-white/70">
+            确认密码
+            <input
+              className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+              value={confirmPassword}
+              onChange={(event) => setConfirmPassword(event.target.value)}
+              autoComplete="new-password"
+              maxLength={128}
+              minLength={12}
+              required
               type="password"
             />
           </label>
@@ -98,9 +117,8 @@ function RegisterForm() {
           ) : null}
           <button
             className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
-            type="button"
-            disabled={loading}
-            onClick={submit}
+            type="submit"
+            disabled={loading || !email.trim() || !password || !confirmPassword}
           >
             <UserPlus className="size-4" aria-hidden="true" />
             {loading ? "创建中..." : fromDemo ? "注册并生成图片" : "创建账号"}
@@ -111,8 +129,41 @@ function RegisterForm() {
               登录
             </Link>
           </p>
-        </div>
+        </form>
       </section>
     </main>
   );
+}
+
+function validateRegisterForm(email: string, password: string, confirmPassword: string): string | null {
+  const normalizedEmail = email.trim();
+  if (!normalizedEmail) {
+    return "请输入邮箱。";
+  }
+  if (normalizedEmail.length > 254 || !isEmailLike(normalizedEmail)) {
+    return "请输入有效的邮箱地址。";
+  }
+  if (!password) {
+    return "请输入密码。";
+  }
+  if (password.length < 12) {
+    return "密码至少需要 12 位。";
+  }
+  if (password.length > 128) {
+    return "密码长度不能超过 128 位。";
+  }
+  if (password.trim() !== password) {
+    return "密码开头和结尾不能包含空格。";
+  }
+  if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+    return "密码需要同时包含字母和数字。";
+  }
+  if (password !== confirmPassword) {
+    return "两次输入的密码不一致。";
+  }
+  return null;
+}
+
+function isEmailLike(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }

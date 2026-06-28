@@ -8,6 +8,12 @@ export type User = {
   status: "ACTIVE" | "SUSPENDED" | "DELETED";
 };
 
+export type CaptchaChallenge = {
+  captchaId: string;
+  imageSvg: string;
+  expiresAt: string;
+};
+
 export type CreditAccount = {
   userId: string;
   balance: number;
@@ -186,22 +192,31 @@ async function readApiPayload<T>(
   }
 }
 
-export async function login(email: string, password: string): Promise<{ user: User }> {
+export async function getLoginCaptcha(): Promise<CaptchaChallenge> {
+  return apiFetch<CaptchaChallenge>("/api/auth/captcha");
+}
+
+export async function login(
+  email: string,
+  password: string,
+  captchaId: string,
+  captchaAnswer: string
+): Promise<{ user: User }> {
   return apiFetch<{ user: User }>("/api/auth/login", {
+    method: "POST",
+    body: { email, password, captchaId, captchaAnswer }
+  });
+}
+
+export async function register(email: string, password: string): Promise<{ user: User }> {
+  return apiFetch<{ user: User }>("/api/auth/register", {
     method: "POST",
     body: { email, password }
   });
 }
 
-export async function register(email: string, password: string, nickname: string): Promise<{ user: User }> {
-  return apiFetch<{ user: User }>("/api/auth/register", {
-    method: "POST",
-    body: { email, password, nickname }
-  });
-}
-
 export async function loginDemo(): Promise<{ user: User }> {
-  return login("demo@imagora.local", "Demo123!");
+  throw new Error("请先在登录页完成图片验证后再继续。");
 }
 
 export async function waitForTask(taskId: string): Promise<{ task: Task; images: GeneratedImage[] }> {
@@ -367,7 +382,9 @@ const safetyRuleTermMap: Record<string, string> = {
 };
 
 const apiErrorCodeMap: Record<string, string> = {
-  CONFLICT: "该邮箱已注册，请直接登录或更换邮箱。",
+  CONFLICT: "账号信息无法完成注册，请检查邮箱或直接登录。",
+  CAPTCHA_INVALID: "图片验证已失效或输入错误，请刷新后重试。",
+  CAPTCHA_REQUIRED: "请先完成图片验证。",
   CONTENT_BLOCKED: "内容未通过安全规则，请调整提示词或参考图后重试。",
   FEATURE_DISABLED: "该功能当前暂不可用，请稍后再试。",
   FORBIDDEN: "当前账号没有权限执行此操作。",
@@ -387,6 +404,7 @@ const apiErrorMessageMap: Record<string, string> = {
   "Admin cannot change own status here": "不能在此处修改当前管理员账号状态。",
   "Credit balance is not enough": "积分余额不足，请充值后再提交生成。",
   "Email is already registered": "该邮箱已注册，请直接登录或更换邮箱。",
+  "Unable to create account with these credentials": "账号信息无法完成注册，请检查邮箱或直接登录。",
   "Invalid email or password": "邮箱或密码不正确。",
   "Invalid request payload": "提交内容格式不正确，请检查后重试。",
   "Only failed or blocked tasks can be retried": "只有失败或被拦截的任务可以重新生成。",

@@ -21,6 +21,7 @@ test("worker stores SVG thumbnails with matching SVG metadata", async () => {
     API_PORT: String(port),
     ALLOW_BEARER_SESSION_AUTH: "false",
     IMAGORA_STORE_PATH: storePath,
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
     ORDER_PENDING_TTL_MINUTES: "30",
     WORKER_POLL_INTERVAL_MS: "300",
     STORAGE_PROVIDER: "s3",
@@ -156,18 +157,33 @@ function createCaptureObjectStorageServer() {
 }
 
 async function login(baseUrl, email, password) {
+  const captcha = await getCaptcha(baseUrl);
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ email, password })
+    body: JSON.stringify({
+      email,
+      password,
+      captchaId: captcha.data.captchaId,
+      captchaAnswer: captcha.data.answer
+    })
   });
   const payload = await response.json();
   assert.equal(response.ok, true, JSON.stringify(payload));
   const setCookie = response.headers.getSetCookie?.()[0] ?? response.headers.get("set-cookie");
   assert.ok(setCookie);
   return { ...payload, session: setCookie.split(";")[0] };
+}
+
+async function getCaptcha(baseUrl) {
+  const response = await fetch(`${baseUrl}/api/auth/captcha`);
+  const payload = await response.json();
+  assert.equal(response.ok, true, JSON.stringify(payload));
+  assert.ok(payload.data?.captchaId);
+  assert.ok(payload.data?.answer);
+  return payload;
 }
 
 async function waitForHealth(baseUrl) {

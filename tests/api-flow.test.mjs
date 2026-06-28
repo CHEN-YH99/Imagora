@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -41,6 +42,228 @@ test("api rejects bearer session auth in production config", async () => {
   assert.match(result.stderr, /bearer session auth must be disabled/);
 });
 
+test("auth remains usable in local development when prisma database is unavailable", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-auth-fallback-"));
+  const port = await reserveUnusedPort();
+  const unavailableDbPort = await reserveUnusedPort();
+  const storePath = join(dir, "fallback-store.json");
+  const env = {
+    ...process.env,
+    NODE_ENV: "development",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    DATA_STORE: "prisma",
+    DATABASE_URL: `postgresql://imagora:imagora@127.0.0.1:${unavailableDbPort}/imagora`,
+    IMAGORA_STORE_PATH: storePath,
+    IMAGORA_SEED_DEMO_DATA: "true",
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    RATE_LIMIT_PROVIDER: "memory",
+    WEB_ORIGIN: "http://127.0.0.1:3100",
+    CSRF_ALLOWED_ORIGINS: "http://127.0.0.1:3100"
+  };
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl);
+
+    const email = `local-${crypto.randomUUID()}@imagora.local`;
+    const password = "LocalStrong123!";
+    const registered = await authPost(baseUrl, "/api/auth/register", { email, password }, "http://127.0.0.1:3100");
+    assert.equal(registered.data.user.email, email);
+
+    const fallbackCaptcha = await getCaptcha(baseUrl, "http://127.0.0.1:3100");
+    const loggedIn = await authPost(
+      baseUrl,
+      "/api/auth/login",
+      {
+        email,
+        password,
+        captchaId: fallbackCaptcha.data.captchaId,
+        captchaAnswer: fallbackCaptcha.data.answer
+      },
+      "http://127.0.0.1:3100"
+    );
+    assert.equal(loggedIn.data.user.email, email);
+  } finally {
+    api.kill();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("auth validates registration and login payloads at browser boundaries", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-auth-validation-"));
+  const port = await reserveUnusedPort();
+  const storePath = join(dir, "store.json");
+  const origin = "http://127.0.0.1:3100";
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    DATA_STORE: "json",
+    IMAGORA_STORE_PATH: storePath,
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    RATE_LIMIT_PROVIDER: "memory",
+    WEB_ORIGIN: origin,
+    CSRF_ALLOWED_ORIGINS: origin
+  };
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl);
+
+    const injectedNickname = await rawAuthPost(
+      baseUrl,
+      "/api/auth/register",
+      {
+        email: `nickname-${crypto.randomUUID()}@imagora.local`,
+        password: "StrongLocal123!",
+        nickname: "Injected"
+      },
+      origin
+    );
+    assert.equal(injectedNickname.status, 400);
+    assert.equal(injectedNickname.payload.error.code, "VALIDATION_ERROR");
+
+    const weakPassword = await rawAuthPost(
+      baseUrl,
+      "/api/auth/register",
+      {
+        email: `weak-${crypto.randomUUID()}@imagora.local`,
+        password: "password"
+      },
+      origin
+    );
+    assert.equal(weakPassword.status, 400);
+    assert.equal(weakPassword.payload.error.code, "VALIDATION_ERROR");
+
+    const email = `Mixed-${crypto.randomUUID()}@IMAGORA.LOCAL`;
+    const registered = await authPost(
+      baseUrl,
+      "/api/auth/register",
+      { email: `  ${email}  `, password: "StrongLocal123!" },
+      origin
+    );
+    assert.equal(registered.data.user.email, email.toLowerCase());
+    assert.notEqual(registered.data.user.nickname, "Injected");
+
+    const validationCaptcha = await getCaptcha(baseUrl, origin);
+    const loggedIn = await authPost(
+      baseUrl,
+      "/api/auth/login",
+      {
+        email: `  ${email.toUpperCase()}  `,
+        password: "StrongLocal123!",
+        captchaId: validationCaptcha.data.captchaId,
+        captchaAnswer: validationCaptcha.data.answer
+      },
+      origin
+    );
+    assert.equal(loggedIn.data.user.email, email.toLowerCase());
+
+    const duplicate = await rawAuthPost(
+      baseUrl,
+      "/api/auth/register",
+      { email: email.toLowerCase(), password: "StrongLocal123!" },
+      origin
+    );
+    assert.equal(duplicate.status, 409);
+    assert.equal(duplicate.payload.error.code, "CONFLICT");
+    assert.equal(duplicate.payload.error.message, "Unable to create account with these credentials");
+  } finally {
+    api.kill();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("auth login requires a valid one-time image captcha", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-auth-captcha-"));
+  const port = await reserveUnusedPort();
+  const storePath = join(dir, "store.json");
+  const origin = "http://127.0.0.1:3100";
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    DATA_STORE: "json",
+    IMAGORA_STORE_PATH: storePath,
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    RATE_LIMIT_PROVIDER: "memory",
+    WEB_ORIGIN: origin,
+    CSRF_ALLOWED_ORIGINS: origin
+  };
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl);
+
+    const missingCaptcha = await rawAuthPost(
+      baseUrl,
+      "/api/auth/login",
+      { email: "demo@imagora.local", password: "Demo123!" },
+      origin
+    );
+    assert.equal(missingCaptcha.status, 400);
+    assert.equal(missingCaptcha.payload.error.code, "CAPTCHA_REQUIRED");
+
+    const captcha = await getCaptcha(baseUrl, origin);
+    assert.match(captcha.data.imageSvg, /^<svg/);
+    assert.equal(captcha.data.answer.length, 5);
+
+    const wrongCaptcha = await rawAuthPost(
+      baseUrl,
+      "/api/auth/login",
+      {
+        email: "demo@imagora.local",
+        password: "Demo123!",
+        captchaId: captcha.data.captchaId,
+        captchaAnswer: "WRONG"
+      },
+      origin
+    );
+    assert.equal(wrongCaptcha.status, 400);
+    assert.equal(wrongCaptcha.payload.error.code, "CAPTCHA_INVALID");
+
+    const freshCaptcha = await getCaptcha(baseUrl, origin);
+    const loggedIn = await authPost(
+      baseUrl,
+      "/api/auth/login",
+      {
+        email: "demo@imagora.local",
+        password: "Demo123!",
+        captchaId: freshCaptcha.data.captchaId,
+        captchaAnswer: freshCaptcha.data.answer
+      },
+      origin
+    );
+    assert.equal(loggedIn.data.user.email, "demo@imagora.local");
+
+    const reusedCaptcha = await rawAuthPost(
+      baseUrl,
+      "/api/auth/login",
+      {
+        email: "demo@imagora.local",
+        password: "Demo123!",
+        captchaId: freshCaptcha.data.captchaId,
+        captchaAnswer: freshCaptcha.data.answer
+      },
+      origin
+    );
+    assert.equal(reusedCaptcha.status, 400);
+    assert.equal(reusedCaptcha.payload.error.code, "CAPTCHA_INVALID");
+  } finally {
+    api.kill();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("api and worker complete generation and enforce admin safety rules", async () => {
   const dir = await mkdtemp(join(tmpdir(), "imagora-api-"));
   const port = 4700 + Math.floor(Math.random() * 400);
@@ -52,6 +275,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     API_PORT: String(port),
     ALLOW_BEARER_SESSION_AUTH: "false",
     IMAGORA_STORE_PATH: storePath,
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
     ORDER_PENDING_TTL_MINUTES: "30",
     WORKER_POLL_INTERVAL_MS: "300"
   };
@@ -155,8 +379,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
 
     const otherUser = await register(baseUrl, {
       email: `intruder-${crypto.randomUUID()}@imagora.local`,
-      password: "Intruder123!",
-      nickname: "Intruder"
+      password: "Intruder123!"
     });
     const otherUserSession = otherUser.session;
     const forbiddenAdminUsers = await fetch(`${baseUrl}/api/admin/users`, {
@@ -594,21 +817,21 @@ function runProcess(command, args, env) {
 }
 
 async function login(baseUrl, email, password) {
-  return authPost(baseUrl, "/api/auth/login", { email, password });
+  const captcha = await getCaptcha(baseUrl);
+  return authPost(baseUrl, "/api/auth/login", {
+    email,
+    password,
+    captchaId: captcha.data.captchaId,
+    captchaAnswer: captcha.data.answer
+  });
 }
 
 async function register(baseUrl, body) {
   return authPost(baseUrl, "/api/auth/register", body);
 }
 
-async function authPost(baseUrl, path, body) {
-  const response = await fetch(`${baseUrl}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
+async function authPost(baseUrl, path, body, origin) {
+  const response = await authFetch(baseUrl, path, body, origin);
   const payload = await response.json();
   assert.equal(response.ok, true, JSON.stringify(payload));
   assert.ok(payload.data);
@@ -621,6 +844,57 @@ async function authPost(baseUrl, path, body) {
   const sessionValue = session.split("=").slice(1).join("=");
   assert.ok(sessionValue);
   return { ...payload, session, sessionValue };
+}
+
+async function rawAuthPost(baseUrl, path, body, origin) {
+  const response = await authFetch(baseUrl, path, body, origin);
+  return {
+    status: response.status,
+    payload: await response.json()
+  };
+}
+
+async function getCaptcha(baseUrl, origin) {
+  const response = await fetch(`${baseUrl}/api/auth/captcha`, {
+    headers: origin ? { Origin: origin } : undefined
+  });
+  const payload = await response.json();
+  assert.equal(response.ok, true, JSON.stringify(payload));
+  assert.ok(payload.data?.captchaId);
+  assert.ok(payload.data?.imageSvg);
+  assert.ok(payload.data?.expiresAt);
+  return payload;
+}
+
+async function authFetch(baseUrl, path, body, origin) {
+  return fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(origin ? { Origin: origin } : {})
+    },
+    body: JSON.stringify(body)
+  });
+}
+
+function reserveUnusedPort() {
+  const server = createServer();
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      const address = server.address();
+      assert.ok(address && typeof address === "object");
+      const port = address.port;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
 }
 
 function readSetCookie(response) {

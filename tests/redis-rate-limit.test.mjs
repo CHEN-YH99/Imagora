@@ -62,6 +62,7 @@ test("redis rate limiter shares counters across api instances", async () => {
     RATE_LIMIT_PROVIDER: "redis",
     REDIS_URL: `redis://127.0.0.1:${redis.port}`,
     REDIS_RATE_LIMIT_TIMEOUT_MS: "1000",
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
     RATE_LIMIT_AUTH_MAX: "1",
     RATE_LIMIT_WINDOW_MS: "60000"
   };
@@ -131,6 +132,12 @@ async function waitForHealth(baseUrl) {
 }
 
 async function invalidLogin(baseUrl) {
+  const captchaResponse = await fetch(`${baseUrl}/api/auth/captcha`);
+  const captchaPayload = await captchaResponse.json();
+  assert.equal(captchaResponse.status, 200);
+  assert.ok(captchaPayload.data.captchaId);
+  assert.ok(captchaPayload.data.answer);
+
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: {
@@ -138,7 +145,9 @@ async function invalidLogin(baseUrl) {
     },
     body: JSON.stringify({
       email: "demo@imagora.local",
-      password: "wrong-password"
+      password: "wrong-password",
+      captchaId: captchaPayload.data.captchaId,
+      captchaAnswer: captchaPayload.data.answer
     })
   });
   return {

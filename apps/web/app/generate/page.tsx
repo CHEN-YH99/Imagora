@@ -1,13 +1,12 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Coins, ImagePlus, X, Wand2 } from "lucide-react";
 import { AppFrame, Panel, StatusPill } from "../../components/AppFrame";
 import {
   apiFetch,
   formatCredits,
-  loginDemo,
   waitForTask,
   type CreditAccount,
   type GeneratedImage,
@@ -51,6 +50,7 @@ export default function GeneratePage() {
 }
 
 function GenerateExperience() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const [prompt, setPrompt] = useState("半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节");
   const [negativePrompt, setNegativePrompt] = useState("低质量、模糊、水印、变形");
@@ -107,8 +107,15 @@ function GenerateExperience() {
 
   async function ensureLoggedIn(): Promise<void> {
     if (account) return;
-    await loginDemo();
-    await loadAccount();
+    const params = new URLSearchParams({
+      prompt,
+      aspectRatio,
+      quality,
+      quantity: String(quantity),
+      model
+    });
+    router.push(`/login?next=${encodeURIComponent(`/generate?${params.toString()}`)}`);
+    throw new Error("请先登录后再提交生成。");
   }
 
   async function loadAccount() {
