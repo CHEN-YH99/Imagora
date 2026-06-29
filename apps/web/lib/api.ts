@@ -17,12 +17,18 @@ export type CaptchaChallenge = {
   instruction: string;
   targetLabel: string;
   requiredSelections: number;
+  optionCount: number;
   expiresAt: string;
 };
 
 export type CaptchaSelection = {
   x: number;
   y: number;
+};
+
+export type CaptchaVerification = {
+  verificationId: string;
+  expiresAt: string;
 };
 
 export type CreditAccount = {
@@ -255,15 +261,24 @@ export async function getLoginCaptcha(): Promise<CaptchaChallenge> {
   return apiFetch<CaptchaChallenge>("/api/auth/captcha");
 }
 
+export async function verifyLoginCaptcha(
+  captchaId: string,
+  captchaSelections: CaptchaSelection[]
+): Promise<CaptchaVerification> {
+  return apiFetch<CaptchaVerification>("/api/auth/captcha/verify", {
+    method: "POST",
+    body: { captchaId, captchaSelections }
+  });
+}
+
 export async function login(
   email: string,
   password: string,
-  captchaId: string,
-  captchaSelections: CaptchaSelection[]
+  captchaVerificationIds: string[]
 ): Promise<{ user: User }> {
   return apiFetch<{ user: User }>("/api/auth/login", {
     method: "POST",
-    body: { email, password, captchaId, captchaSelections }
+    body: { email, password, captchaVerificationIds }
   });
 }
 

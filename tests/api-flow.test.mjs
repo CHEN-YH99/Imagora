@@ -85,15 +85,15 @@ test("auth remains usable in local development when prisma database is unavailab
     const registered = await authPost(baseUrl, "/api/auth/register", { email, password }, browserOrigin);
     assert.equal(registered.data.user.email, email);
 
-    const fallbackCaptcha = await getCaptcha(baseUrl, browserOrigin);
+    const firstFallbackProof = await verifyCaptcha(baseUrl, browserOrigin);
+    const secondFallbackProof = await verifyCaptcha(baseUrl, browserOrigin);
     const loggedIn = await authPost(
       baseUrl,
       "/api/auth/login",
       {
         email,
         password,
-        captchaId: fallbackCaptcha.data.captchaId,
-        captchaSelections: fallbackCaptcha.data.answer
+        captchaVerificationIds: [firstFallbackProof.data.verificationId, secondFallbackProof.data.verificationId]
       },
       browserOrigin
     );
@@ -175,15 +175,15 @@ test("auth validates registration and login payloads at browser boundaries", asy
     assert.equal(registered.data.user.email, email.toLowerCase());
     assert.notEqual(registered.data.user.nickname, "Injected");
 
-    const validationCaptcha = await getCaptcha(baseUrl, origin);
+    const firstValidationProof = await verifyCaptcha(baseUrl, origin);
+    const secondValidationProof = await verifyCaptcha(baseUrl, origin);
     const loggedIn = await authPost(
       baseUrl,
       "/api/auth/login",
       {
         email: `  ${email.toUpperCase()}  `,
         password: "StrongLocal123!",
-        captchaId: validationCaptcha.data.captchaId,
-        captchaSelections: validationCaptcha.data.answer
+        captchaVerificationIds: [firstValidationProof.data.verificationId, secondValidationProof.data.verificationId]
       },
       origin
     );
@@ -241,14 +241,14 @@ test("auth login requires a valid one-time image captcha", async () => {
     assert.match(captcha.data.imageSvg, /^<svg/);
     assert.match(captcha.data.instruction, /^请点击图中所有/);
     assert.ok(captcha.data.requiredSelections >= 2);
+    assert.ok(captcha.data.requiredSelections <= 4);
+    assert.ok(captcha.data.optionCount >= 12);
     assert.equal(captcha.data.answer.length, captcha.data.requiredSelections);
 
-    const wrongCaptcha = await rawAuthPost(
+    const wrongCaptcha = await rawApiPost(
       baseUrl,
-      "/api/auth/login",
+      "/api/auth/captcha/verify",
       {
-        email: "demo@imagora.local",
-        password: "Demo123!",
         captchaId: captcha.data.captchaId,
         captchaSelections: [{ x: 0.01, y: 0.01 }]
       },
@@ -259,12 +259,10 @@ test("auth login requires a valid one-time image captcha", async () => {
 
     const duplicateCaptcha = await getCaptcha(baseUrl, origin);
     const repeatedSelection = duplicateCaptcha.data.answer[0];
-    const duplicateSelectionLogin = await rawAuthPost(
+    const duplicateSelectionLogin = await rawApiPost(
       baseUrl,
-      "/api/auth/login",
+      "/api/auth/captcha/verify",
       {
-        email: "demo@imagora.local",
-        password: "Demo123!",
         captchaId: duplicateCaptcha.data.captchaId,
         captchaSelections: Array.from({ length: duplicateCaptcha.data.requiredSelections }, () => repeatedSelection)
       },
@@ -273,15 +271,30 @@ test("auth login requires a valid one-time image captcha", async () => {
     assert.equal(duplicateSelectionLogin.status, 400);
     assert.equal(duplicateSelectionLogin.payload.error.code, "CAPTCHA_INVALID");
 
-    const freshCaptcha = await getCaptcha(baseUrl, origin);
+    const firstProof = await verifyCaptcha(baseUrl, origin);
+    const secondProof = await verifyCaptcha(baseUrl, origin);
+    assert.notEqual(firstProof.data.verificationId, secondProof.data.verificationId);
+
+    const oneProofLogin = await rawAuthPost(
+      baseUrl,
+      "/api/auth/login",
+      {
+        email: "demo@imagora.local",
+        password: "Demo123!",
+        captchaVerificationIds: [firstProof.data.verificationId]
+      },
+      origin
+    );
+    assert.equal(oneProofLogin.status, 400);
+    assert.equal(oneProofLogin.payload.error.code, "CAPTCHA_REQUIRED");
+
     const loggedIn = await authPost(
       baseUrl,
       "/api/auth/login",
       {
         email: "demo@imagora.local",
         password: "Demo123!",
-        captchaId: freshCaptcha.data.captchaId,
-        captchaSelections: freshCaptcha.data.answer
+        captchaVerificationIds: [firstProof.data.verificationId, secondProof.data.verificationId]
       },
       origin
     );
@@ -293,8 +306,7 @@ test("auth login requires a valid one-time image captcha", async () => {
       {
         email: "demo@imagora.local",
         password: "Demo123!",
-        captchaId: freshCaptcha.data.captchaId,
-        captchaSelections: freshCaptcha.data.answer
+        captchaVerificationIds: [firstProof.data.verificationId, secondProof.data.verificationId]
       },
       origin
     );
@@ -859,12 +871,12 @@ function runProcess(command, args, env) {
 }
 
 async function login(baseUrl, email, password) {
-  const captcha = await getCaptcha(baseUrl);
+  const firstProof = await verifyCaptcha(baseUrl);
+  const secondProof = await verifyCaptcha(baseUrl);
   return authPost(baseUrl, "/api/auth/login", {
     email,
     password,
-    captchaId: captcha.data.captchaId,
-    captchaSelections: captcha.data.answer
+    captchaVerificationIds: [firstProof.data.verificationId, secondProof.data.verificationId]
   });
 }
 
@@ -896,6 +908,41 @@ async function rawAuthPost(baseUrl, path, body, origin) {
   };
 }
 
+async function rawApiPost(baseUrl, path, body, origin) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(origin ? { Origin: origin } : {})
+    },
+    body: JSON.stringify(body)
+  });
+  return {
+    status: response.status,
+    payload: await response.json()
+  };
+}
+
+async function verifyCaptcha(baseUrl, origin) {
+  const captcha = await getCaptcha(baseUrl, origin);
+  const response = await fetch(`${baseUrl}/api/auth/captcha/verify`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(origin ? { Origin: origin } : {})
+    },
+    body: JSON.stringify({
+      captchaId: captcha.data.captchaId,
+      captchaSelections: captcha.data.answer
+    })
+  });
+  const payload = await response.json();
+  assert.equal(response.ok, true, JSON.stringify(payload));
+  assert.ok(payload.data?.verificationId);
+  assert.ok(payload.data?.expiresAt);
+  return payload;
+}
+
 async function getCaptcha(baseUrl, origin) {
   const response = await fetch(`${baseUrl}/api/auth/captcha`, {
     headers: origin ? { Origin: origin } : undefined
@@ -906,6 +953,7 @@ async function getCaptcha(baseUrl, origin) {
   assert.ok(payload.data?.imageSvg);
   assert.ok(payload.data?.instruction);
   assert.ok(payload.data?.requiredSelections);
+  assert.ok(payload.data?.optionCount >= 12);
   assert.ok(payload.data?.expiresAt);
   return payload;
 }

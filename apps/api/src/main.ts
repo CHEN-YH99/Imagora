@@ -71,6 +71,8 @@ const serviceStartedAt = Date.now();
 const routeMetrics = new Map<string, RouteMetric>();
 const rateLimitBuckets = new Map<string, RateLimitBucket>();
 const captchaChallenges = new Map<string, CaptchaChallenge>();
+const captchaVerifications = new Map<string, CaptchaVerification>();
+const captchaRequiredRounds = 2;
 const rateLimitWindowMs = envNumber("RATE_LIMIT_WINDOW_MS", 60_000);
 const rateLimitRules: RateLimitRule[] = [
   {
@@ -240,6 +242,7 @@ app.get("/api/features", async (request) => envelope(request, { features: featur
 
 app.get("/api/auth/captcha", async (request) => {
   pruneCaptchaChallenges();
+  pruneCaptchaVerifications();
   const challenge = createCaptchaChallenge();
   const captchaId = randomUUID();
   const expiresAt = new Date(Date.now() + envNumber("CAPTCHA_TTL_SECONDS", 180) * 1000).toISOString();
@@ -254,9 +257,24 @@ app.get("/api/auth/captcha", async (request) => {
     instruction: `请点击图中所有${challenge.targetLabel}`,
     targetLabel: challenge.targetLabel,
     requiredSelections: challenge.answer.length,
+    optionCount: captchaOptions.length,
     expiresAt,
     ...(exposeCaptchaAnswerForTests() ? { answer: challenge.answer } : {})
   });
+});
+
+app.post("/api/auth/captcha/verify", async (request) => {
+  pruneCaptchaChallenges();
+  pruneCaptchaVerifications();
+  const input = captchaVerifySchema.parse(request.body);
+  verifyCaptchaChallenge(input.captchaId, input.captchaSelections);
+  const verificationId = randomUUID();
+  const expiresAt = new Date(Date.now() + envNumber("CAPTCHA_VERIFICATION_TTL_SECONDS", 180) * 1000).toISOString();
+  captchaVerifications.set(verificationId, {
+    expiresAt,
+    createdAt: new Date().toISOString()
+  });
+  return envelope(request, { verificationId, expiresAt });
 });
 
 app.post("/api/auth/register", async (request, reply) => {
@@ -328,11 +346,14 @@ app.post("/api/auth/register", async (request, reply) => {
 
 app.post("/api/auth/login", async (request, reply) => {
   const payload = payloadRecord(request.body);
-  if (!payload.captchaId || !payload.captchaSelections) {
+  if (
+    !Array.isArray(payload.captchaVerificationIds) ||
+    payload.captchaVerificationIds.length !== captchaRequiredRounds
+  ) {
     throw new AppError("CAPTCHA_REQUIRED", "Image verification is required", 400);
   }
   const input = loginSchema.parse(request.body);
-  verifyCaptchaChallenge(input.captchaId, input.captchaSelections);
+  verifyCaptchaVerifications(input.captchaVerificationIds);
   return store.update(async (data) => {
     const user = data.users.find((item) => item.email === input.email.toLowerCase());
     if (!user || !verifyPassword(input.password, user.passwordHash)) {
@@ -1270,6 +1291,11 @@ interface CaptchaChallenge {
   createdAt: string;
 }
 
+interface CaptchaVerification {
+  expiresAt: string;
+  createdAt: string;
+}
+
 interface CaptchaSelection {
   x: number;
   y: number;
@@ -1381,6 +1407,12 @@ const loginSchema = z
   .object({
     email: emailSchema,
     password: loginPasswordSchema,
+    captchaVerificationIds: z.array(z.string().uuid()).length(captchaRequiredRounds)
+  })
+  .strict();
+
+const captchaVerifySchema = z
+  .object({
     captchaId: z.string().uuid(),
     captchaSelections: z
       .array(
@@ -2284,7 +2316,13 @@ const captchaOptions: CaptchaOption[] = [
   { id: "panda", label: "熊猫", fill: "#f8fafc", accent: "#111827" },
   { id: "rabbit", label: "兔子", fill: "#ffe4e6", accent: "#fb7185" },
   { id: "fox", label: "狐狸", fill: "#ffedd5", accent: "#f97316" },
-  { id: "seal", label: "海豹", fill: "#e0f2fe", accent: "#0284c7" }
+  { id: "seal", label: "海豹", fill: "#e0f2fe", accent: "#0284c7" },
+  { id: "cat", label: "猫", fill: "#fef9c3", accent: "#ca8a04" },
+  { id: "dog", label: "狗", fill: "#f5e8d8", accent: "#92400e" },
+  { id: "owl", label: "猫头鹰", fill: "#ede9fe", accent: "#7c3aed" },
+  { id: "turtle", label: "乌龟", fill: "#dcfce7", accent: "#16a34a" },
+  { id: "sheep", label: "绵羊", fill: "#f8fafc", accent: "#64748b" },
+  { id: "squirrel", label: "松鼠", fill: "#fed7aa", accent: "#ea580c" }
 ];
 
 function createCaptchaChallenge(): {
@@ -2293,7 +2331,7 @@ function createCaptchaChallenge(): {
   targetLabel: string;
 } {
   const target = captchaOptions[Math.floor(Math.random() * captchaOptions.length)] ?? captchaOptions[0];
-  const targetCount = 2 + Math.floor(Math.random() * 2);
+  const targetCount = 2 + Math.floor(Math.random() * 3);
   const targetIndexes = pickUniqueIndexes(captchaColumns * captchaRows, targetCount);
   const tiles: CaptchaTile[] = [];
   for (let index = 0; index < captchaColumns * captchaRows; index += 1) {
@@ -2352,6 +2390,18 @@ function createCaptchaAnimalSvg(option: CaptchaOption, x: number, y: number): st
       return `<g><ellipse cx="${x + 29}" cy="${y + 18}" rx="7" ry="17" fill="${fill}" stroke="${accent}" stroke-width="3" transform="rotate(-12 ${x + 29} ${y + 18})"/><ellipse cx="${x + 46}" cy="${y + 18}" rx="7" ry="17" fill="${fill}" stroke="${accent}" stroke-width="3" transform="rotate(12 ${x + 46} ${y + 18})"/><circle cx="${x + 37}" cy="${y + 39}" r="20" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 30}" cy="${y + 36}" r="3" fill="${accent}"/><circle cx="${x + 44}" cy="${y + 36}" r="3" fill="${accent}"/><path d="M${x + 31} ${y + 45} Q${x + 37} ${y + 50}, ${x + 43} ${y + 45}" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="round"/></g>`;
     case "fox":
       return `<g><path d="M${x + 16} ${y + 24} L${x + 25} ${y + 10} L${x + 34} ${y + 26} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><path d="M${x + 58} ${y + 24} L${x + 49} ${y + 10} L${x + 40} ${y + 26} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><path d="M${x + 15} ${y + 28} Q${x + 37} ${y + 8}, ${x + 59} ${y + 28} Q${x + 51} ${y + 53}, ${x + 37} ${y + 54} Q${x + 23} ${y + 53}, ${x + 15} ${y + 28} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 30}" cy="${y + 34}" r="3" fill="${accent}"/><circle cx="${x + 44}" cy="${y + 34}" r="3" fill="${accent}"/><path d="M${x + 37} ${y + 40} L${x + 31} ${y + 47} L${x + 43} ${y + 47} Z" fill="#ffffff"/></g>`;
+    case "cat":
+      return `<g><path d="M${x + 19} ${y + 25} L${x + 27} ${y + 11} L${x + 35} ${y + 26} M${x + 55} ${y + 25} L${x + 47} ${y + 11} L${x + 39} ${y + 26}" fill="none" stroke="${accent}" stroke-width="3" stroke-linejoin="round"/><circle cx="${x + 37}" cy="${y + 37}" r="20" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 30}" cy="${y + 34}" r="3" fill="${accent}"/><circle cx="${x + 44}" cy="${y + 34}" r="3" fill="${accent}"/><path d="M${x + 24} ${y + 43} H${x + 14} M${x + 50} ${y + 43} H${x + 60} M${x + 37} ${y + 40} V${y + 43}" stroke="${accent}" stroke-width="2" stroke-linecap="round"/></g>`;
+    case "dog":
+      return `<g><ellipse cx="${x + 24}" cy="${y + 29}" rx="9" ry="15" fill="${fill}" stroke="${accent}" stroke-width="3" transform="rotate(22 ${x + 24} ${y + 29})"/><ellipse cx="${x + 50}" cy="${y + 29}" rx="9" ry="15" fill="${fill}" stroke="${accent}" stroke-width="3" transform="rotate(-22 ${x + 50} ${y + 29})"/><circle cx="${x + 37}" cy="${y + 38}" r="20" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 31}" cy="${y + 35}" r="3" fill="${accent}"/><circle cx="${x + 43}" cy="${y + 35}" r="3" fill="${accent}"/><ellipse cx="${x + 37}" cy="${y + 44}" rx="7" ry="5" fill="${accent}"/></g>`;
+    case "owl":
+      return `<g><path d="M${x + 16} ${y + 22} Q${x + 37} ${y + 7}, ${x + 58} ${y + 22} V${y + 44} Q${x + 37} ${y + 60}, ${x + 16} ${y + 44} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 29}" cy="${y + 32}" r="8" fill="#ffffff" stroke="${accent}" stroke-width="3"/><circle cx="${x + 45}" cy="${y + 32}" r="8" fill="#ffffff" stroke="${accent}" stroke-width="3"/><path d="M${x + 37} ${y + 39} L${x + 32} ${y + 47} H${x + 42} Z" fill="#f59e0b"/></g>`;
+    case "turtle":
+      return `<g><ellipse cx="${x + 37}" cy="${y + 38}" rx="23" ry="17" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 61}" cy="${y + 36}" r="8" fill="${fill}" stroke="${accent}" stroke-width="3"/><path d="M${x + 23} ${y + 32} Q${x + 37} ${y + 22}, ${x + 51} ${y + 32} M${x + 23} ${y + 44} Q${x + 37} ${y + 54}, ${x + 51} ${y + 44}" stroke="${accent}" stroke-width="2" fill="none"/><circle cx="${x + 64}" cy="${y + 34}" r="2" fill="${accent}"/></g>`;
+    case "sheep":
+      return `<g><circle cx="${x + 24}" cy="${y + 32}" r="10" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 36}" cy="${y + 27}" r="12" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 49}" cy="${y + 33}" r="11" fill="${fill}" stroke="${accent}" stroke-width="3"/><ellipse cx="${x + 38}" cy="${y + 45}" rx="17" ry="11" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 33}" cy="${y + 43}" r="2.5" fill="${accent}"/><circle cx="${x + 43}" cy="${y + 43}" r="2.5" fill="${accent}"/></g>`;
+    case "squirrel":
+      return `<g><path d="M${x + 51} ${y + 42} C${x + 68} ${y + 28}, ${x + 55} ${y + 8}, ${x + 42} ${y + 20}" fill="none" stroke="${accent}" stroke-width="8" stroke-linecap="round"/><ellipse cx="${x + 35}" cy="${y + 39}" rx="18" ry="16" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 25}" cy="${y + 25}" r="10" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 22}" cy="${y + 23}" r="2.5" fill="${accent}"/></g>`;
     case "seal":
     default:
       return `<g><ellipse cx="${x + 38}" cy="${y + 38}" rx="27" ry="15" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 32}" cy="${y + 28}" r="12" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 28}" cy="${y + 27}" r="3" fill="${accent}"/><path d="M${x + 36} ${y + 32} C${x + 48} ${y + 29}, ${x + 54} ${y + 33}, ${x + 61} ${y + 40}" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="round"/><path d="M${x + 17} ${y + 43} Q${x + 8} ${y + 52}, ${x + 24} ${y + 51}" fill="${fill}" stroke="${accent}" stroke-width="3"/></g>`;
@@ -2371,6 +2421,25 @@ function verifyCaptchaChallenge(captchaId: string, captchaSelections: CaptchaSel
   }
   const actualHash = hashCaptchaAnswer(captchaSelections);
   if (actualHash !== challenge.answerHash) {
+    throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
+  }
+}
+
+function verifyCaptchaVerifications(verificationIds: string[]): void {
+  pruneCaptchaVerifications();
+  const uniqueIds = new Set(verificationIds);
+  if (uniqueIds.size !== captchaRequiredRounds) {
+    throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
+  }
+  const verifications = verificationIds.map((verificationId) => ({
+    verificationId,
+    verification: captchaVerifications.get(verificationId)
+  }));
+  for (const { verificationId } of verifications) {
+    captchaVerifications.delete(verificationId);
+  }
+  const now = Date.now();
+  if (verifications.some(({ verification }) => !verification || new Date(verification.expiresAt).getTime() <= now)) {
     throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
   }
 }
@@ -2422,6 +2491,25 @@ function pruneCaptchaChallenges(): void {
     .slice(0, captchaChallenges.size - maxChallenges);
   for (const [captchaId] of overflow) {
     captchaChallenges.delete(captchaId);
+  }
+}
+
+function pruneCaptchaVerifications(): void {
+  const now = Date.now();
+  for (const [verificationId, verification] of captchaVerifications) {
+    if (new Date(verification.expiresAt).getTime() <= now) {
+      captchaVerifications.delete(verificationId);
+    }
+  }
+  const maxVerifications = envNumber("CAPTCHA_MAX_VERIFICATIONS", 5000);
+  if (captchaVerifications.size <= maxVerifications) {
+    return;
+  }
+  const overflow = [...captchaVerifications.entries()]
+    .sort(([, left], [, right]) => left.createdAt.localeCompare(right.createdAt))
+    .slice(0, captchaVerifications.size - maxVerifications);
+  for (const [verificationId] of overflow) {
+    captchaVerifications.delete(verificationId);
   }
 }
 

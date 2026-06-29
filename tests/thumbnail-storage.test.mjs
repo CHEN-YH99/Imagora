@@ -157,7 +157,8 @@ function createCaptureObjectStorageServer() {
 }
 
 async function login(baseUrl, email, password) {
-  const captcha = await getCaptcha(baseUrl);
+  const firstProof = await verifyCaptcha(baseUrl);
+  const secondProof = await verifyCaptcha(baseUrl);
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: {
@@ -166,8 +167,7 @@ async function login(baseUrl, email, password) {
     body: JSON.stringify({
       email,
       password,
-      captchaId: captcha.data.captchaId,
-      captchaSelections: captcha.data.answer
+      captchaVerificationIds: [firstProof.data.verificationId, secondProof.data.verificationId]
     })
   });
   const payload = await response.json();
@@ -175,6 +175,24 @@ async function login(baseUrl, email, password) {
   const setCookie = response.headers.getSetCookie?.()[0] ?? response.headers.get("set-cookie");
   assert.ok(setCookie);
   return { ...payload, session: setCookie.split(";")[0] };
+}
+
+async function verifyCaptcha(baseUrl) {
+  const captcha = await getCaptcha(baseUrl);
+  const response = await fetch(`${baseUrl}/api/auth/captcha/verify`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      captchaId: captcha.data.captchaId,
+      captchaSelections: captcha.data.answer
+    })
+  });
+  const payload = await response.json();
+  assert.equal(response.ok, true, JSON.stringify(payload));
+  assert.ok(payload.data?.verificationId);
+  return payload;
 }
 
 async function getCaptcha(baseUrl) {

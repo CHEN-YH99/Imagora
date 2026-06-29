@@ -132,12 +132,8 @@ async function waitForHealth(baseUrl) {
 }
 
 async function invalidLogin(baseUrl) {
-  const captchaResponse = await fetch(`${baseUrl}/api/auth/captcha`);
-  const captchaPayload = await captchaResponse.json();
-  assert.equal(captchaResponse.status, 200);
-  assert.ok(captchaPayload.data.captchaId);
-  assert.ok(captchaPayload.data.answer);
-
+  const firstProof = await verifyCaptcha(baseUrl);
+  const secondProof = await verifyCaptcha(baseUrl);
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: {
@@ -146,14 +142,35 @@ async function invalidLogin(baseUrl) {
     body: JSON.stringify({
       email: "demo@imagora.local",
       password: "wrong-password",
-      captchaId: captchaPayload.data.captchaId,
-      captchaSelections: captchaPayload.data.answer
+      captchaVerificationIds: [firstProof.data.verificationId, secondProof.data.verificationId]
     })
   });
   return {
     status: response.status,
     payload: await response.json()
   };
+}
+
+async function verifyCaptcha(baseUrl) {
+  const captchaResponse = await fetch(`${baseUrl}/api/auth/captcha`);
+  const captchaPayload = await captchaResponse.json();
+  assert.equal(captchaResponse.status, 200);
+  assert.ok(captchaPayload.data.captchaId);
+  assert.ok(captchaPayload.data.answer);
+  const response = await fetch(`${baseUrl}/api/auth/captcha/verify`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      captchaId: captchaPayload.data.captchaId,
+      captchaSelections: captchaPayload.data.answer
+    })
+  });
+  const payload = await response.json();
+  assert.equal(response.ok, true, JSON.stringify(payload));
+  assert.ok(payload.data?.verificationId);
+  return payload;
 }
 
 function createFakeRedisServer() {
