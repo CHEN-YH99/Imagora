@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Check, Coins } from "lucide-react";
-import { AppFrame, Panel } from "../../components/AppFrame";
+import { AppFrame, EmptyState, InlineNotice, Panel } from "../../components/AppFrame";
 import {
   apiFetch,
   formatCredits,
@@ -20,10 +20,15 @@ export default function PricingPage() {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
+    void loadPlans();
+  }, []);
+
+  async function loadPlans() {
+    setMessage("");
     apiFetch<{ plans: Plan[] }>("/api/plans")
       .then((result) => setPlans(result.plans))
       .catch((error) => setMessage(error instanceof Error ? error.message : "套餐加载失败，请稍后重试。"));
-  }, []);
+  }
 
   async function buy(planId: string) {
     try {
@@ -51,7 +56,9 @@ export default function PricingPage() {
   return (
     <AppFrame title="积分套餐" subtitle="按创作规模选择积分包，套餐价格、积分额度和有效期以服务端配置为准。">
       {message ? (
-        <p className="mb-5 rounded-2xl border border-white/12 bg-white/7 p-4 text-sm text-white/70">{message}</p>
+        <div className="mb-5">
+          <InlineNotice tone={message.includes("失败") ? "danger" : "success"}>{message}</InlineNotice>
+        </div>
       ) : null}
       <div className="grid gap-5 lg:grid-cols-3">
         {plans.map((plan, index) => (
@@ -93,6 +100,16 @@ export default function PricingPage() {
             </button>
           </Panel>
         ))}
+        {plans.length === 0 ? (
+          <div className="lg:col-span-3">
+            <EmptyState
+              title="暂无可购买套餐"
+              description="当前没有启用的积分套餐，请稍后重试或联系管理员确认套餐配置。"
+              actionLabel="重新加载套餐"
+              onAction={() => void loadPlans()}
+            />
+          </div>
+        ) : null}
       </div>
     </AppFrame>
   );

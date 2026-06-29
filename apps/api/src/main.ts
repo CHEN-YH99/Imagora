@@ -1031,9 +1031,10 @@ app.get("/api/admin/metrics", async (request) => {
 
 app.post("/api/admin/maintenance/reconcile", async (request) => {
   const { user: admin } = await requireAdmin(request);
+  const input = adminReasonSchema.parse(request.body ?? {});
   return store.update((data) => {
     const maintenance = runOrderMaintenance(data);
-    audit(data, admin.id, "maintenance.reconcile", "SYSTEM", "orders", null, { ...maintenance }, request);
+    audit(data, admin.id, "maintenance.reconcile", "SYSTEM", "orders", input.reason, null, { ...maintenance }, request);
     return envelope(request, { maintenance });
   });
 });
@@ -1091,7 +1092,7 @@ app.get("/api/admin/users/:userId", async (request) => {
 app.patch("/api/admin/users/:userId/status", async (request) => {
   const { user: admin } = await requireAdmin(request);
   const { userId } = userParamSchema.parse(request.params);
-  const input = statusSchema.parse(request.body);
+  const input = adminStatusSchema.parse(request.body);
   return store.update((data) => {
     const target = mustFindUser(data, userId);
     if (target.id === admin.id) {
@@ -1100,7 +1101,17 @@ app.patch("/api/admin/users/:userId/status", async (request) => {
     const before = { status: target.status };
     target.status = input.status;
     target.updatedAt = new Date().toISOString();
-    audit(data, admin.id, "user.status.update", "USER", target.id, before, { status: target.status }, request);
+    audit(
+      data,
+      admin.id,
+      "user.status.update",
+      "USER",
+      target.id,
+      input.reason,
+      before,
+      { status: target.status },
+      request
+    );
     return envelope(request, { user: withoutPassword(target) });
   });
 });
@@ -1114,7 +1125,17 @@ app.post("/api/admin/users/:userId/credits/adjust", async (request) => {
     const account = mustFindCreditAccount(data, userId);
     const before = { balance: account.balance };
     adjustCredits(data, userId, input.amount, admin.id, `admin-adjust:${randomUUID()}`, input.reason);
-    audit(data, admin.id, "user.credits.adjust", "USER", userId, before, { balance: account.balance }, request);
+    audit(
+      data,
+      admin.id,
+      "user.credits.adjust",
+      "USER",
+      userId,
+      input.reason,
+      before,
+      { balance: account.balance },
+      request
+    );
     return envelope(request, { account });
   });
 });
@@ -1144,7 +1165,7 @@ app.get("/api/admin/images", async (request) => {
 app.patch("/api/admin/images/:imageId/visibility", async (request) => {
   const { user: admin } = await requireAdmin(request);
   const { imageId } = imageParamSchema.parse(request.params);
-  const input = visibilitySchema.parse(request.body);
+  const input = adminVisibilitySchema.parse(request.body);
   return store.update((data) => {
     const image = data.generatedImages.find((item) => item.id === imageId);
     if (!image) {
@@ -1158,6 +1179,7 @@ app.patch("/api/admin/images/:imageId/visibility", async (request) => {
       "image.visibility.update",
       "IMAGE",
       image.id,
+      input.reason,
       before,
       { visibility: image.visibility },
       request
@@ -1184,12 +1206,22 @@ app.get("/api/admin/plans", async (request) => {
 
 app.post("/api/admin/plans", async (request, reply) => {
   const { user: admin } = await requireAdmin(request);
-  const input = planSchema.parse(request.body);
+  const input = adminPlanSchema.parse(request.body);
   return store.update((data) => {
     const now = new Date().toISOString();
-    const plan: Plan = { id: randomUUID(), ...input, createdAt: now, updatedAt: now };
+    const plan: Plan = { id: randomUUID(), ...stripAdminReason(input), createdAt: now, updatedAt: now };
     data.plans.push(plan);
-    audit(data, admin.id, "plan.create", "PLAN", plan.id, null, plan as unknown as Record<string, unknown>, request);
+    audit(
+      data,
+      admin.id,
+      "plan.create",
+      "PLAN",
+      plan.id,
+      input.reason,
+      null,
+      plan as unknown as Record<string, unknown>,
+      request
+    );
     reply.status(201);
     return envelope(request, { plan });
   });
@@ -1198,15 +1230,25 @@ app.post("/api/admin/plans", async (request, reply) => {
 app.patch("/api/admin/plans/:planId", async (request) => {
   const { user: admin } = await requireAdmin(request);
   const { planId } = planParamSchema.parse(request.params);
-  const input = planPatchSchema.parse(request.body);
+  const input = adminPlanPatchSchema.parse(request.body);
   return store.update((data) => {
     const plan = data.plans.find((item) => item.id === planId);
     if (!plan) {
       throw new AppError("NOT_FOUND", "Plan was not found", 404);
     }
     const before = { ...plan };
-    Object.assign(plan, input, { updatedAt: new Date().toISOString() });
-    audit(data, admin.id, "plan.update", "PLAN", plan.id, before, plan as unknown as Record<string, unknown>, request);
+    Object.assign(plan, stripAdminReason(input), { updatedAt: new Date().toISOString() });
+    audit(
+      data,
+      admin.id,
+      "plan.update",
+      "PLAN",
+      plan.id,
+      input.reason,
+      before,
+      plan as unknown as Record<string, unknown>,
+      request
+    );
     return envelope(request, { plan });
   });
 });
@@ -1233,7 +1275,7 @@ app.post("/api/admin/safety-rules", async (request, reply) => {
       updatedAt: now
     };
     data.safetyRules.push(rule);
-    audit(data, admin.id, "safety-rule.create", "SAFETY_RULE", rule.id, null, { ...rule }, request);
+    audit(data, admin.id, "safety-rule.create", "SAFETY_RULE", rule.id, null, null, { ...rule }, request);
     reply.status(201);
     return envelope(request, { rule });
   });
@@ -1250,7 +1292,7 @@ app.patch("/api/admin/safety-rules/:ruleId", async (request) => {
     }
     const before = { ...rule };
     Object.assign(rule, input, { updatedAt: new Date().toISOString() });
-    audit(data, admin.id, "safety-rule.update", "SAFETY_RULE", rule.id, before, { ...rule }, request);
+    audit(data, admin.id, "safety-rule.update", "SAFETY_RULE", rule.id, null, before, { ...rule }, request);
     return envelope(request, { rule });
   });
 });
@@ -1513,6 +1555,7 @@ const createOrderSchema = z.object({
   paymentProvider: z.enum(["mock", "stripe", "wechat", "alipay"]).default("mock")
 });
 
+const adminReasonSchema = z.object({ reason: z.string().trim().min(3).max(240) });
 const statusSchema = z.object({ status: userStatusSchema });
 const visibilitySchema = z.object({ visibility: imageVisibilitySchema });
 const adjustCreditSchema = z.object({
@@ -1533,6 +1576,10 @@ const planSchema = z.object({
   sortOrder: z.number().int()
 });
 const planPatchSchema = planSchema.partial();
+const adminStatusSchema = statusSchema.merge(adminReasonSchema);
+const adminVisibilitySchema = visibilitySchema.merge(adminReasonSchema);
+const adminPlanSchema = planSchema.merge(adminReasonSchema);
+const adminPlanPatchSchema = planPatchSchema.merge(adminReasonSchema);
 const safetyRuleParamSchema = z.object({ ruleId: z.string().min(1) });
 const safetyRuleSchema = z.object({
   term: z.string().min(2).max(120),
@@ -2087,6 +2134,7 @@ function audit(
   action: string,
   targetType: string,
   targetId: string,
+  reason: string | null,
   before: Record<string, unknown> | null,
   after: Record<string, unknown> | null,
   request: FastifyRequest
@@ -2097,6 +2145,7 @@ function audit(
     action,
     targetType,
     targetId,
+    reason,
     before,
     after,
     ipAddress: request.ip,
@@ -2104,6 +2153,11 @@ function audit(
     createdAt: new Date().toISOString()
   };
   data.adminAuditLogs.push(log);
+}
+
+function stripAdminReason<T extends { reason: string }>(input: T): Omit<T, "reason"> {
+  const { reason: _reason, ...rest } = input;
+  return rest;
 }
 
 function inspectReferenceUpload(input: z.infer<typeof referenceUploadSchema>): InspectedReferenceUpload {

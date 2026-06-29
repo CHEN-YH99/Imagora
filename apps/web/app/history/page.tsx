@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
-import { AppFrame, Panel, StatusPill } from "../../components/AppFrame";
+import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import {
   apiFetch,
   formatCredits,
@@ -24,6 +24,8 @@ export default function HistoryPage() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [message, setMessage] = useState("");
+  const [pendingDeleteImage, setPendingDeleteImage] = useState<GeneratedImage | null>(null);
+  const [deletingImage, setDeletingImage] = useState(false);
 
   useEffect(() => {
     void loadHistory();
@@ -90,21 +92,41 @@ export default function HistoryPage() {
     anchor.click();
   }
 
-  async function deleteImage(image: GeneratedImage) {
-    if (!window.confirm("确定从历史记录中删除这张生成图片？")) {
+  async function confirmDeleteImage() {
+    if (!pendingDeleteImage) {
       return;
     }
-    await apiFetch<{ imageId: string; deleted: boolean }>(`/api/images/${image.id}`, {
-      method: "DELETE"
-    });
-    setImages((items) => items.filter((item) => item.id !== image.id));
-    setDetail((value) => (value ? { ...value, images: value.images.filter((item) => item.id !== image.id) } : value));
+    setDeletingImage(true);
+    try {
+      await apiFetch<{ imageId: string; deleted: boolean }>(`/api/images/${pendingDeleteImage.id}`, {
+        method: "DELETE"
+      });
+      setImages((items) => items.filter((item) => item.id !== pendingDeleteImage.id));
+      setDetail((value) =>
+        value ? { ...value, images: value.images.filter((item) => item.id !== pendingDeleteImage.id) } : value
+      );
+      setPendingDeleteImage(null);
+      setMessage("图片已删除。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "删除失败，请稍后重试。");
+    } finally {
+      setDeletingImage(false);
+    }
   }
 
   return (
     <AppFrame title="生成历史" subtitle="集中管理生成任务、图片资产、下载、收藏和再次生成，方便复用高质量创意结果。">
       {message ? (
-        <p className="mb-5 rounded-2xl border border-white/12 bg-white/7 p-4 text-sm text-white/70">{message}</p>
+        <div className="mb-5">
+          <InlineNotice tone={message.includes("失败") ? "danger" : "success"}>
+            {message}{" "}
+            {message.includes("失败") ? (
+              <button className="underline underline-offset-4" onClick={() => void loadHistory()} type="button">
+                重新加载历史
+              </button>
+            ) : null}
+          </InlineNotice>
+        </div>
       ) : null}
       <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
         <Panel>
@@ -141,7 +163,14 @@ export default function HistoryPage() {
                 </p>
               </button>
             ))}
-            {tasks.length === 0 ? <p className="text-sm text-white/50">暂无生成任务。</p> : null}
+            {tasks.length === 0 ? (
+              <EmptyState
+                title="暂无生成任务"
+                description="提交图片生成后，任务状态、消耗积分和提示词会显示在这里。"
+                actionLabel="去生成图片"
+                actionHref="/generate"
+              />
+            ) : null}
           </div>
         </Panel>
 
@@ -225,7 +254,7 @@ export default function HistoryPage() {
                     <button
                       className="icon-action"
                       type="button"
-                      onClick={() => void deleteImage(image)}
+                      onClick={() => setPendingDeleteImage(image)}
                       aria-label="删除图片"
                     >
                       <Trash2 className="size-4" aria-hidden="true" />
@@ -237,6 +266,15 @@ export default function HistoryPage() {
           </div>
         </Panel>
       </div>
+      <ConfirmDialog
+        open={Boolean(pendingDeleteImage)}
+        title="确认删除图片？"
+        description="删除后这张图片会从历史记录中移除，后续需要重新生成或从备份恢复。"
+        confirmLabel="删除图片"
+        loading={deletingImage}
+        onCancel={() => setPendingDeleteImage(null)}
+        onConfirm={() => void confirmDeleteImage()}
+      />
     </AppFrame>
   );
 }

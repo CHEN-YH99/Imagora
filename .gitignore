@@ -2,6 +2,7 @@ node_modules
 .next
 out
 dist
+packages/database/generated/
 build
 .npm-cache/
 .claude/

@@ -215,6 +215,7 @@ export interface AdminAuditLog {
   action: string;
   targetType: string;
   targetId: string;
+  reason: string | null;
   before: Record<string, unknown> | null;
   after: Record<string, unknown> | null;
   ipAddress: string;

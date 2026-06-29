@@ -12,8 +12,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "node scripts/prisma-cli.mjs generate-if-needed && tsc -p tsconfig.json",
+    "typecheck": "node scripts/prisma-cli.mjs generate-if-needed && tsc -p tsconfig.json --noEmit",
     "prisma:validate": "node scripts/prisma-cli.mjs validate",
     "prisma:generate": "node scripts/prisma-cli.mjs generate",
     "prisma:push": "node scripts/prisma-cli.mjs db push",

@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Coins, ImagePlus, X, Wand2 } from "lucide-react";
-import { AppFrame, Panel, StatusPill } from "../../components/AppFrame";
+import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import {
   apiFetch,
   formatCredits,
@@ -64,6 +64,7 @@ function GenerateExperience() {
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [referenceImage, setReferenceImage] = useState<ReferenceImage | null>(null);
   const [message, setMessage] = useState("");
+  const [messageTone, setMessageTone] = useState<"success" | "danger">("danger");
   const [loading, setLoading] = useState(false);
   const [uploadingReference, setUploadingReference] = useState(false);
 
@@ -130,6 +131,7 @@ function GenerateExperience() {
   async function uploadReference(file: File) {
     setUploadingReference(true);
     setMessage("");
+    setMessageTone("danger");
     try {
       await ensureLoggedIn();
       const dataUrl = await readFileAsDataUrl(file);
@@ -141,16 +143,40 @@ function GenerateExperience() {
         }
       );
       setReferenceImage(result.referenceImage);
+      setMessage("参考图上传完成，提交生成时会一并参与创作。");
+      setMessageTone("success");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "参考图上传失败，请重新选择图片。");
+      setMessageTone("danger");
     } finally {
       setUploadingReference(false);
     }
   }
 
+  function validateForm(): string | null {
+    const trimmedPrompt = prompt.trim();
+    if (!trimmedPrompt) {
+      return "请输入提示词后再提交生成。";
+    }
+    if (trimmedPrompt.length < 6) {
+      return "提示词至少需要 6 个字符，别拿半句黑话糊弄模型。";
+    }
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 4) {
+      return "生成数量仅支持 1 到 4 张，请调整后重试。";
+    }
+    return null;
+  }
+
   async function submit() {
+    const validationError = validateForm();
+    if (validationError) {
+      setMessage(validationError);
+      setMessageTone("danger");
+      return;
+    }
     setLoading(true);
     setMessage("");
+    setMessageTone("danger");
     setImages([]);
     try {
       await ensureLoggedIn();
@@ -173,9 +199,21 @@ function GenerateExperience() {
       const result = await waitForTask(created.task.id);
       setTask(result.task);
       setImages(result.images);
+      if (result.task.status === "SUCCEEDED" && result.images.length > 0) {
+        setMessage("生成完成，可进入详情继续下载、收藏或再次生成。");
+        setMessageTone("success");
+      } else if (
+        result.task.status === "FAILED" ||
+        result.task.status === "BLOCKED" ||
+        result.task.status === "CANCELED"
+      ) {
+        setMessage(result.task.failureMessage ?? "生成未成功，请调整提示词或稍后重试。");
+        setMessageTone("danger");
+      }
       await loadAccount();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "生成失败，请稍后重试。");
+      setMessageTone("danger");
     } finally {
       setLoading(false);
     }
@@ -299,7 +337,18 @@ function GenerateExperience() {
                   min={1}
                   max={4}
                   value={quantity}
-                  onChange={(event) => setQuantity(Number(event.target.value))}
+                  onChange={(event) => {
+                    const rawValue = event.target.value.trim();
+                    if (!rawValue) {
+                      setQuantity(1);
+                      return;
+                    }
+                    const nextValue = Number(rawValue);
+                    if (!Number.isFinite(nextValue)) {
+                      return;
+                    }
+                    setQuantity(Math.max(1, Math.min(4, Math.trunc(nextValue))));
+                  }}
                 />
               </label>
             </div>
@@ -338,7 +387,25 @@ function GenerateExperience() {
             </div>
 
             {message ? (
-              <p className="rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">{message}</p>
+              <InlineNotice tone={messageTone}>
+                {message}
+                {messageTone === "danger" ? (
+                  <>
+                    {" "}
+                    <button className="underline underline-offset-4" onClick={() => void submit()} type="button">
+                      重试提交
+                    </button>
+                    {" 或 "}
+                    <button
+                      className="underline underline-offset-4"
+                      onClick={() => router.push("/history")}
+                      type="button"
+                    >
+                      去历史查看
+                    </button>
+                  </>
+                ) : null}
+              </InlineNotice>
             ) : null}
 
             <button
@@ -373,8 +440,13 @@ function GenerateExperience() {
               />
             ))}
             {images.length === 0 ? (
-              <div className="flex min-h-80 items-center justify-center rounded-2xl border border-dashed border-white/14 text-sm text-white/50">
-                生成结果会显示在这里
+              <div className="sm:col-span-2">
+                <EmptyState
+                  title="生成结果会显示在这里"
+                  description="填写提示词并提交生成后，图片会按固定比例展示，成功后可进入详情、下载或再次生成。"
+                  actionLabel="提交生成"
+                  onAction={() => void submit()}
+                />
               </div>
             ) : null}
           </div>

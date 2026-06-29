@@ -615,7 +615,12 @@ test("api and worker complete generation and enforce admin safety rules", async 
       webhookPaid.data.balanceAfter - orderCreated.data.plan.credits
     );
 
-    const paidOrderReconciliation = await post(baseUrl, "/api/admin/maintenance/reconcile", {}, adminSession);
+    const paidOrderReconciliation = await post(
+      baseUrl,
+      "/api/admin/maintenance/reconcile",
+      { reason: "补发已支付订单积分" },
+      adminSession
+    );
     assert.equal(paidOrderReconciliation.data.maintenance.reconciledPaidOrders, 1);
     const restoredPaymentCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     assert.equal(restoredPaymentCredits.data.account.balance, webhookPaid.data.balanceAfter);
@@ -628,9 +633,18 @@ test("api and worker complete generation and enforce admin safety rules", async 
       ).length,
       1
     );
-    assert.ok(storeAfterPaidOrderReconcile.adminAuditLogs.some((entry) => entry.action === "maintenance.reconcile"));
+    assert.ok(
+      storeAfterPaidOrderReconcile.adminAuditLogs.some(
+        (entry) => entry.action === "maintenance.reconcile" && entry.reason === "补发已支付订单积分"
+      )
+    );
 
-    const duplicateReconciliation = await post(baseUrl, "/api/admin/maintenance/reconcile", {}, adminSession);
+    const duplicateReconciliation = await post(
+      baseUrl,
+      "/api/admin/maintenance/reconcile",
+      { reason: "确认没有重复补发" },
+      adminSession
+    );
     assert.equal(duplicateReconciliation.data.maintenance.reconciledPaidOrders, 0);
 
     const eventBackfillOrder = await post(
@@ -646,7 +660,12 @@ test("api and worker complete generation and enforce admin safety rules", async 
       `evt_${crypto.randomUUID()}`,
       eventBackfillOrder.data.order.amountCents
     );
-    const eventBackfillReconciliation = await post(baseUrl, "/api/admin/maintenance/reconcile", {}, adminSession);
+    const eventBackfillReconciliation = await post(
+      baseUrl,
+      "/api/admin/maintenance/reconcile",
+      { reason: "回补漏记支付事件" },
+      adminSession
+    );
     assert.equal(eventBackfillReconciliation.data.maintenance.reconciledPaymentEvents, 1);
     assert.equal(eventBackfillReconciliation.data.maintenance.reconciledPaidOrders, 1);
     const afterEventBackfillCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
@@ -708,14 +727,19 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const suspendedUser = await patch(
       baseUrl,
       `/api/admin/users/${otherUser.data.user.id}/status`,
-      { status: "SUSPENDED" },
+      { status: "SUSPENDED", reason: "账号异常需要暂停" },
       adminSession
     );
     assert.equal(suspendedUser.data.user.status, "SUSPENDED");
     const suspendedUsers = await get(baseUrl, "/api/admin/users?status=SUSPENDED&limit=10", adminSession);
     assert.ok(suspendedUsers.data.users.some((user) => user.id === otherUser.data.user.id));
     assert.ok(suspendedUsers.data.users.every((user) => user.status === "SUSPENDED"));
-    await patch(baseUrl, `/api/admin/users/${otherUser.data.user.id}/status`, { status: "ACTIVE" }, adminSession);
+    await patch(
+      baseUrl,
+      `/api/admin/users/${otherUser.data.user.id}/status`,
+      { status: "ACTIVE", reason: "确认恢复正常使用" },
+      adminSession
+    );
 
     const beforeAdminAdjustment = await get(baseUrl, "/api/users/me/credits", demoSession);
     const adjustedCredits = await post(
@@ -747,7 +771,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
         credits: 345,
         validDays: 45,
         status: "ACTIVE",
-        sortOrder: 77
+        sortOrder: 77,
+        reason: "新增测试套餐"
       },
       adminSession
     );
@@ -758,7 +783,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const disabledPlan = await patch(
       baseUrl,
       `/api/admin/plans/${createdPlan.data.plan.id}`,
-      { priceCents: 1599, credits: 420, status: "INACTIVE", sortOrder: 8 },
+      { priceCents: 1599, credits: 420, status: "INACTIVE", sortOrder: 8, reason: "更新套餐定价" },
       adminSession
     );
     assert.equal(disabledPlan.data.plan.priceCents, 1599);
@@ -769,7 +794,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const reactivatedPlan = await patch(
       baseUrl,
       `/api/admin/plans/${createdPlan.data.plan.id}`,
-      { status: "ACTIVE" },
+      { status: "ACTIVE", reason: "恢复套餐售卖" },
       adminSession
     );
     assert.equal(reactivatedPlan.data.plan.status, "ACTIVE");
@@ -783,7 +808,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const hiddenImage = await patch(
       baseUrl,
       `/api/admin/images/${generatedImageId}/visibility`,
-      { visibility: "HIDDEN" },
+      { visibility: "HIDDEN", reason: "隐藏测试图片" },
       adminSession
     );
     assert.equal(hiddenImage.data.image.visibility, "HIDDEN");
@@ -804,6 +829,20 @@ test("api and worker complete generation and enforce admin safety rules", async 
       assert.ok(
         auditLogs.data.logs.some((entry) => entry.action === action),
         `Missing audit action: ${action}`
+      );
+    }
+    for (const [action, reason] of [
+      ["maintenance.reconcile", "补发已支付订单积分"],
+      ["maintenance.reconcile", "回补漏记支付事件"],
+      ["user.status.update", "确认恢复正常使用"],
+      ["user.credits.adjust", "QA manual adjustment"],
+      ["plan.create", "新增测试套餐"],
+      ["plan.update", "恢复套餐售卖"],
+      ["image.visibility.update", "隐藏测试图片"]
+    ]) {
+      assert.ok(
+        auditLogs.data.logs.some((entry) => entry.action === action && entry.reason === reason),
+        `Missing audit reason for ${action}: ${reason}`
       );
     }
 

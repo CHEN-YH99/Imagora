@@ -1,7 +1,7 @@
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import { Prisma, PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "../generated/client/index.js";
 import type { CreditLedgerEntry, Plan, StoreData, User } from "@imagora/shared";
 
 const defaultPath = resolve(process.cwd(), "data", "imagora-store.json");
@@ -363,6 +363,7 @@ export class PrismaStore implements Store {
         action: log.action,
         targetType: log.targetType,
         targetId: log.targetId,
+        reason: log.reason ?? null,
         before: log.before as Record<string, unknown> | null,
         after: log.after as Record<string, unknown> | null,
         ipAddress: log.ipAddress,
@@ -630,6 +631,7 @@ export class PrismaStore implements Store {
             action: log.action,
             targetType: log.targetType,
             targetId: log.targetId,
+            reason: log.reason,
             before: log.before === null ? Prisma.JsonNull : (log.before as Prisma.InputJsonValue),
             after: log.after === null ? Prisma.JsonNull : (log.after as Prisma.InputJsonValue),
             ipAddress: log.ipAddress,
@@ -910,7 +912,10 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
     paymentEvents: data.paymentEvents ?? [],
     safetyEvents: data.safetyEvents ?? [],
     safetyRules: data.safetyRules ?? seedSafetyRules(now),
-    adminAuditLogs: data.adminAuditLogs ?? []
+    adminAuditLogs: (data.adminAuditLogs ?? []).map((log) => ({
+      ...log,
+      reason: log.reason ?? null
+    }))
   };
 }
 

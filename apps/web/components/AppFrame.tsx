@@ -210,3 +210,154 @@ export function StatusPill({ children }: { children: React.ReactNode }) {
     <span className="rounded-full border border-white/10 bg-white/8 px-3 py-1 text-xs text-white/68">{label}</span>
   );
 }
+
+export function InlineNotice({
+  children,
+  tone = "info"
+}: {
+  children: React.ReactNode;
+  tone?: "info" | "success" | "danger";
+}) {
+  const toneClass =
+    tone === "danger"
+      ? "border-ember/40 bg-ember/10 text-ember"
+      : tone === "success"
+        ? "border-mint/40 bg-mint/10 text-mint"
+        : "border-white/12 bg-white/7 text-white/72";
+  return (
+    <p
+      aria-live="polite"
+      className={`rounded-2xl border p-4 text-sm ${toneClass}`}
+      role={tone === "danger" ? "alert" : "status"}
+    >
+      {children}
+    </p>
+  );
+}
+
+export function EmptyState({
+  title,
+  description,
+  actionLabel,
+  actionHref,
+  onAction
+}: {
+  title: string;
+  description: string;
+  actionLabel?: string;
+  actionHref?: string;
+  onAction?: () => void;
+}) {
+  const actionClass =
+    "focus-ring inline-flex items-center justify-center rounded-full bg-mint px-4 py-2 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-volt";
+  return (
+    <div className="flex min-h-40 flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-white/14 bg-black/16 p-6 text-center">
+      <div>
+        <h2 className="text-base font-semibold text-white">{title}</h2>
+        <p className="mt-2 max-w-md text-sm leading-6 text-white/54">{description}</p>
+      </div>
+      {actionLabel && actionHref ? (
+        <Link className={actionClass} href={actionHref}>
+          {actionLabel}
+        </Link>
+      ) : null}
+      {actionLabel && onAction ? (
+        <button className={actionClass} onClick={onAction} type="button">
+          {actionLabel}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+export function ConfirmDialog({
+  open,
+  title,
+  description,
+  confirmLabel = "确认",
+  cancelLabel = "取消",
+  loading = false,
+  tone = "danger",
+  confirmDisabled = false,
+  onCancel,
+  onConfirm,
+  children
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  loading?: boolean;
+  tone?: "danger" | "default";
+  confirmDisabled?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  children?: React.ReactNode;
+}) {
+  const titleId = useId();
+  const descriptionId = useId();
+
+  useEffect(() => {
+    if (!open || loading) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onCancel();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [loading, onCancel, open]);
+
+  if (!open) {
+    return null;
+  }
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <section
+        aria-describedby={descriptionId}
+        aria-labelledby={titleId}
+        aria-modal="true"
+        className="w-full max-w-sm rounded-[1.25rem] border border-white/12 bg-ink p-5 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <h2 className="text-lg font-semibold text-white" id={titleId}>
+          {title}
+        </h2>
+        <p className="mt-2 text-sm leading-6 text-white/66" id={descriptionId}>
+          {description}
+        </p>
+        {children ? <div className="mt-4">{children}</div> : null}
+        <div className="mt-5 flex justify-end gap-3">
+          <button
+            autoFocus
+            className="focus-ring rounded-full border border-white/12 px-4 py-2 text-sm text-white/72 transition-colors duration-200 hover:bg-white/10 hover:text-white disabled:opacity-60"
+            disabled={loading}
+            onClick={onCancel}
+            type="button"
+          >
+            {cancelLabel}
+          </button>
+          <button
+            className={`focus-ring rounded-full px-4 py-2 text-sm font-semibold transition-colors duration-200 disabled:opacity-60 ${
+              tone === "danger" ? "bg-ember text-white hover:bg-ember/80" : "bg-mint text-ink hover:bg-volt"
+            }`}
+            disabled={loading || confirmDisabled}
+            onClick={onConfirm}
+            type="button"
+          >
+            {loading ? "处理中..." : confirmLabel}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}

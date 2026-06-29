@@ -80,3 +80,52 @@ test("web auth pages validate inputs and registration does not ask for nickname"
   assert.match(nextConfig, /X-Frame-Options/);
   assert.match(nextConfig, /Permissions-Policy/);
 });
+
+test("web core pages expose recoverable empty states and confirm destructive actions", async () => {
+  const accountPage = await readFile(join(root, "apps/web/app/account/page.tsx"), "utf8");
+  const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
+  const appFrame = await readFile(join(root, "apps/web/components/AppFrame.tsx"), "utf8");
+  const detailPage = await readFile(join(root, "apps/web/app/images/[imageId]/page.tsx"), "utf8");
+  const favoritesPage = await readFile(join(root, "apps/web/app/favorites/page.tsx"), "utf8");
+  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
+  const ordersPage = await readFile(join(root, "apps/web/app/orders/page.tsx"), "utf8");
+  const pricingPage = await readFile(join(root, "apps/web/app/pricing/page.tsx"), "utf8");
+
+  assert.match(appFrame, /export function EmptyState/);
+  assert.match(appFrame, /export function InlineNotice/);
+  assert.match(appFrame, /export function ConfirmDialog/);
+  assert.match(appFrame, /role=\{tone === "danger" \? "alert" : "status"\}/);
+
+  for (const page of [accountPage, detailPage, favoritesPage, generatePage, historyPage, ordersPage, pricingPage]) {
+    assert.match(page, /EmptyState/);
+    assert.match(page, /InlineNotice/);
+  }
+
+  assert.match(historyPage, /ConfirmDialog/);
+  assert.match(detailPage, /ConfirmDialog/);
+  assert.match(favoritesPage, /ConfirmDialog/);
+  assert.match(adminPage, /ConfirmDialog/);
+  assert.doesNotMatch(historyPage, /window\.confirm/);
+  assert.doesNotMatch(detailPage, /window\.confirm/);
+  assert.doesNotMatch(favoritesPage, /window\.confirm/);
+  assert.doesNotMatch(adminPage, /window\.confirm/);
+  assert.match(accountPage, /emailVerifiedAt/);
+  assert.match(accountPage, /重新发送验证邮件/);
+  assert.match(accountPage, /\/api\/auth\/resend-verification/);
+  assert.match(ordersPage, /继续支付/);
+  assert.match(ordersPage, /ORDER_NOT_PAYABLE|订单已关闭|订单已取消|订单已退款/);
+  assert.match(favoritesPage, /重新加载收藏/);
+  assert.match(favoritesPage, /取消收藏/);
+  assert.match(ordersPage, /重新加载订单/);
+  assert.match(pricingPage, /重新加载套餐/);
+  assert.match(accountPage, /重新加载账户/);
+  assert.match(generatePage, /validateForm/);
+  assert.match(generatePage, /Math\.max\(1, Math\.min\(4, Math\.trunc\(nextValue\)\)\)/);
+  assert.match(generatePage, /参考图上传完成/);
+  assert.match(generatePage, /重试提交/);
+  assert.match(generatePage, /去历史查看/);
+  assert.match(adminPage, /处理原因/);
+  assert.match(adminPage, /confirmDisabled=\{confirmReason\.trim\(\)\.length < 3\}/);
+  assert.match(adminPage, /审计日志/);
+});

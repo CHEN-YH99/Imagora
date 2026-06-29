@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, ArrowLeft, Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
-import { AppFrame, Panel, StatusPill } from "../../../components/AppFrame";
+import { ArrowLeft, Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
+import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../../components/AppFrame";
 import {
   apiFetch,
   formatCredits,
@@ -27,6 +27,8 @@ export default function ImageDetailPage() {
   const [task, setTask] = useState<Task | null>(null);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deletingImage, setDeletingImage] = useState(false);
 
   useEffect(() => {
     void loadDetail();
@@ -99,10 +101,11 @@ export default function ImageDetailPage() {
     }
   }
 
-  async function deleteImage() {
-    if (!image || !window.confirm("确定从历史记录中删除这张生成图片？")) {
+  async function confirmDeleteImage() {
+    if (!image) {
       return;
     }
+    setDeletingImage(true);
     try {
       await apiFetch<{ imageId: string; deleted: boolean }>(`/api/images/${image.id}`, {
         method: "DELETE"
@@ -110,6 +113,8 @@ export default function ImageDetailPage() {
       router.push("/history");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "删除失败，请稍后重试。");
+    } finally {
+      setDeletingImage(false);
     }
   }
 
@@ -134,7 +139,11 @@ export default function ImageDetailPage() {
       </div>
 
       {message ? (
-        <p className="mb-5 rounded-2xl border border-white/12 bg-white/7 p-4 text-sm text-white/72">{message}</p>
+        <div className="mb-5">
+          <InlineNotice tone={message.includes("失败") || message.includes("不可用") ? "danger" : "success"}>
+            {message}
+          </InlineNotice>
+        </div>
       ) : null}
 
       {loading ? (
@@ -195,7 +204,7 @@ export default function ImageDetailPage() {
                 <button
                   className="icon-action"
                   type="button"
-                  onClick={() => void deleteImage()}
+                  onClick={() => setDeleteConfirmOpen(true)}
                   aria-label="删除图片"
                   title="删除图片"
                 >
@@ -244,22 +253,23 @@ export default function ImageDetailPage() {
         </div>
       ) : (
         <Panel>
-          <div className="flex min-h-72 flex-col items-center justify-center gap-4 text-center">
-            <AlertCircle className="size-8 text-ember" aria-hidden="true" />
-            <div>
-              <h2 className="text-lg font-semibold">图片详情不可用</h2>
-              <p className="mt-2 text-sm text-white/54">图片不存在、已删除，或当前账号没有访问权限。</p>
-            </div>
-            <button
-              className="focus-ring rounded-full bg-mint px-4 py-2 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-volt"
-              type="button"
-              onClick={() => void loadDetail()}
-            >
-              重试加载
-            </button>
-          </div>
+          <EmptyState
+            title="图片详情不可用"
+            description="图片不存在、已删除，或当前账号没有访问权限。"
+            actionLabel="重试加载"
+            onAction={() => void loadDetail()}
+          />
         </Panel>
       )}
+      <ConfirmDialog
+        open={deleteConfirmOpen}
+        title="确认删除图片？"
+        description="删除后会返回历史记录页，这张图片将不再出现在当前资产列表中。"
+        confirmLabel="删除图片"
+        loading={deletingImage}
+        onCancel={() => setDeleteConfirmOpen(false)}
+        onConfirm={() => void confirmDeleteImage()}
+      />
     </AppFrame>
   );
 }

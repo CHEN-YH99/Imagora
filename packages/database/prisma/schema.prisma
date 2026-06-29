@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  output   = "../generated/client"
 }
 
 datasource db {
@@ -353,6 +354,7 @@ model AdminAuditLog {
   action      String
   targetType  String   @map("target_type")
   targetId    String   @map("target_id")
+  reason      String?
   before      Json?
   after       Json?
   ipAddress   String   @map("ip_address")

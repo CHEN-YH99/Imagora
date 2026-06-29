@@ -9,6 +9,7 @@ export type User = {
   nickname: string;
   role: "USER" | "ADMIN";
   status: "ACTIVE" | "SUSPENDED" | "DELETED";
+  emailVerifiedAt: string | null;
 };
 
 export type CaptchaChallenge = {
@@ -110,7 +111,9 @@ export type Order = {
   currency: string;
   paymentProvider: string;
   status: "PENDING" | "PAID" | "CANCELED" | "REFUNDED" | "CLOSED";
+  paidAt?: string | null;
   createdAt: string;
+  updatedAt?: string;
 };
 
 export type AdminMetrics = {

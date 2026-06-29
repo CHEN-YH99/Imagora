@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Edit2, Save, X } from "lucide-react";
-import { AppFrame, Panel, StatusPill } from "../../components/AppFrame";
+import { Edit2, MailCheck, Save, Send, X } from "lucide-react";
+import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import {
   apiFetch,
   formatCredits,
@@ -26,6 +26,7 @@ export default function AccountPage() {
   const [editingNickname, setEditingNickname] = useState(false);
   const [nicknameDraft, setNicknameDraft] = useState("");
   const [savingNickname, setSavingNickname] = useState(false);
+  const [resendingVerification, setResendingVerification] = useState(false);
 
   useEffect(() => {
     void loadAll();
@@ -59,6 +60,22 @@ export default function AccountPage() {
     setNicknameDraft("");
   }
 
+  async function resendVerificationEmail() {
+    setResendingVerification(true);
+    setMessage("");
+    try {
+      await apiFetch<{ ok: boolean; message: string }>("/api/auth/resend-verification", {
+        method: "POST",
+        body: {}
+      });
+      setMessage("验证邮件已重新发送，请前往邮箱完成验证。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "验证邮件发送失败，请稍后重试。");
+    } finally {
+      setResendingVerification(false);
+    }
+  }
+
   async function saveNickname() {
     const trimmed = nicknameDraft.trim();
     if (!trimmed || trimmed.length > 80) {
@@ -85,16 +102,51 @@ export default function AccountPage() {
   return (
     <AppFrame title="账户中心" subtitle="查看用户资料、积分余额和积分流水，确保每一次发放、消耗和退回都有记录。">
       {message ? (
-        <p className="mb-5 rounded-2xl border border-white/12 bg-white/7 p-4 text-sm text-white/70">{message}</p>
+        <div className="mb-5">
+          <InlineNotice tone="danger">
+            {message}{" "}
+            <button className="underline underline-offset-4" onClick={() => void loadAll()} type="button">
+              重新加载账户
+            </button>
+          </InlineNotice>
+        </div>
       ) : null}
       <div className="grid gap-5 lg:grid-cols-[0.8fr_1.2fr]">
         <div className="space-y-5">
           <Panel>
             <h2 className="text-xl font-semibold">个人资料</h2>
+            {user && !user.emailVerifiedAt ? (
+              <div className="mt-5">
+                <InlineNotice tone="danger">
+                  邮箱尚未验证，部分安全操作可能受限。
+                  <button
+                    className="ml-2 inline-flex items-center gap-1 underline underline-offset-4"
+                    disabled={resendingVerification}
+                    onClick={() => void resendVerificationEmail()}
+                    type="button"
+                  >
+                    <Send className="size-3.5" aria-hidden="true" />
+                    {resendingVerification ? "发送中..." : "重新发送验证邮件"}
+                  </button>
+                </InlineNotice>
+              </div>
+            ) : null}
             <div className="mt-5 space-y-4 text-sm text-white/68">
               <div>
                 <p className="text-white/50">邮箱</p>
-                <p className="mt-1 text-white/82">{user?.email ?? "-"}</p>
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-white/82">
+                  <span>{user?.email ?? "-"}</span>
+                  {user?.emailVerifiedAt ? (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-mint/30 bg-mint/10 px-2.5 py-1 text-xs text-mint">
+                      <MailCheck className="size-3.5" aria-hidden="true" />
+                      已验证
+                    </span>
+                  ) : user ? (
+                    <span className="rounded-full border border-ember/30 bg-ember/10 px-2.5 py-1 text-xs text-ember">
+                      待验证
+                    </span>
+                  ) : null}
+                </div>
               </div>
               <div>
                 <p className="text-white/50">昵称</p>
@@ -214,7 +266,14 @@ export default function AccountPage() {
                 </p>
               </article>
             ))}
-            {entries.length === 0 ? <p className="text-sm text-white/50">暂无积分流水。</p> : null}
+            {entries.length === 0 ? (
+              <EmptyState
+                title="暂无积分流水"
+                description="充值、生成扣减、失败退款和人工调整都会形成流水记录。"
+                actionLabel="查看积分套餐"
+                actionHref="/pricing"
+              />
+            ) : null}
           </div>
         </Panel>
       </div>
