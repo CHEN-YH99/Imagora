@@ -240,19 +240,22 @@ app.get("/api/features", async (request) => envelope(request, { features: featur
 
 app.get("/api/auth/captcha", async (request) => {
   pruneCaptchaChallenges();
-  const answer = createCaptchaAnswer();
+  const challenge = createCaptchaChallenge();
   const captchaId = randomUUID();
   const expiresAt = new Date(Date.now() + envNumber("CAPTCHA_TTL_SECONDS", 180) * 1000).toISOString();
   captchaChallenges.set(captchaId, {
-    answerHash: hashCaptchaAnswer(answer),
+    answerHash: hashCaptchaAnswer(challenge.answer),
     expiresAt,
     createdAt: new Date().toISOString()
   });
   return envelope(request, {
     captchaId,
-    imageSvg: createCaptchaSvg(answer),
+    imageSvg: challenge.imageSvg,
+    instruction: `请点击图中所有${challenge.targetLabel}`,
+    targetLabel: challenge.targetLabel,
+    requiredSelections: challenge.answer.length,
     expiresAt,
-    ...(exposeCaptchaAnswerForTests() ? { answer } : {})
+    ...(exposeCaptchaAnswerForTests() ? { answer: challenge.answer } : {})
   });
 });
 
@@ -325,11 +328,11 @@ app.post("/api/auth/register", async (request, reply) => {
 
 app.post("/api/auth/login", async (request, reply) => {
   const payload = payloadRecord(request.body);
-  if (!payload.captchaId || !payload.captchaAnswer) {
+  if (!payload.captchaId || !payload.captchaSelections) {
     throw new AppError("CAPTCHA_REQUIRED", "Image verification is required", 400);
   }
   const input = loginSchema.parse(request.body);
-  verifyCaptchaChallenge(input.captchaId, input.captchaAnswer);
+  verifyCaptchaChallenge(input.captchaId, input.captchaSelections);
   return store.update(async (data) => {
     const user = data.users.find((item) => item.email === input.email.toLowerCase());
     if (!user || !verifyPassword(input.password, user.passwordHash)) {
@@ -1267,6 +1270,24 @@ interface CaptchaChallenge {
   createdAt: string;
 }
 
+interface CaptchaSelection {
+  x: number;
+  y: number;
+}
+
+interface CaptchaOption {
+  id: string;
+  label: string;
+  fill: string;
+  accent: string;
+}
+
+interface CaptchaTile {
+  option: CaptchaOption;
+  row: number;
+  column: number;
+}
+
 type FeatureName = "generation" | "payments" | "uploads" | "downloads";
 
 interface FeatureFlags {
@@ -1361,7 +1382,15 @@ const loginSchema = z
     email: emailSchema,
     password: loginPasswordSchema,
     captchaId: z.string().uuid(),
-    captchaAnswer: z.string().trim().min(1).max(12)
+    captchaSelections: z
+      .array(
+        z.object({
+          x: z.number().min(0).max(1),
+          y: z.number().min(0).max(1)
+        })
+      )
+      .min(1)
+      .max(6)
   })
   .strict();
 
@@ -2247,43 +2276,130 @@ function assertMockPaymentAllowed(): void {
   }
 }
 
-function createCaptchaAnswer(): string {
-  const alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-  let value = "";
-  for (let index = 0; index < 5; index += 1) {
-    value += alphabet[Math.floor(Math.random() * alphabet.length)];
+const captchaColumns = 4;
+const captchaRows = 3;
+const captchaOptions: CaptchaOption[] = [
+  { id: "cow", label: "奶牛", fill: "#f8fafc", accent: "#0f172a" },
+  { id: "duck", label: "鸭子", fill: "#fef3c7", accent: "#f59e0b" },
+  { id: "panda", label: "熊猫", fill: "#f8fafc", accent: "#111827" },
+  { id: "rabbit", label: "兔子", fill: "#ffe4e6", accent: "#fb7185" },
+  { id: "fox", label: "狐狸", fill: "#ffedd5", accent: "#f97316" },
+  { id: "seal", label: "海豹", fill: "#e0f2fe", accent: "#0284c7" }
+];
+
+function createCaptchaChallenge(): {
+  answer: CaptchaSelection[];
+  imageSvg: string;
+  targetLabel: string;
+} {
+  const target = captchaOptions[Math.floor(Math.random() * captchaOptions.length)] ?? captchaOptions[0];
+  const targetCount = 2 + Math.floor(Math.random() * 2);
+  const targetIndexes = pickUniqueIndexes(captchaColumns * captchaRows, targetCount);
+  const tiles: CaptchaTile[] = [];
+  for (let index = 0; index < captchaColumns * captchaRows; index += 1) {
+    const option = targetIndexes.has(index) ? target : randomNonTargetCaptchaOption(target.id);
+    tiles.push({
+      option,
+      row: Math.floor(index / captchaColumns),
+      column: index % captchaColumns
+    });
   }
-  return value;
+  const answer = [...targetIndexes]
+    .sort((left, right) => left - right)
+    .map((index) => ({
+      x: ((index % captchaColumns) + 0.5) / captchaColumns,
+      y: (Math.floor(index / captchaColumns) + 0.5) / captchaRows
+    }));
+
+  return {
+    answer,
+    imageSvg: createCaptchaSvg(tiles, target.label),
+    targetLabel: target.label
+  };
 }
 
-function createCaptchaSvg(answer: string): string {
-  const characters = [...answer];
-  const text = characters
-    .map((character, index) => {
-      const x = 28 + index * 30;
-      const y = 48 + (index % 2 === 0 ? -4 : 4);
-      const rotate = index % 2 === 0 ? -8 : 7;
-      return `<text x="${x}" y="${y}" transform="rotate(${rotate} ${x} ${y})">${escapeXml(character)}</text>`;
+function createCaptchaSvg(tiles: CaptchaTile[], targetLabel: string): string {
+  const width = 360;
+  const height = 260;
+  const cardWidth = 74;
+  const cardHeight = 62;
+  const gap = 10;
+  const offsetX = 18;
+  const offsetY = 48;
+  const tileSvg = tiles
+    .map((tile, index) => {
+      const x = offsetX + tile.column * (cardWidth + gap);
+      const y = offsetY + tile.row * (cardHeight + gap);
+      const noise = index % 2 === 0 ? "#dbeafe" : "#ccfbf1";
+      return `<g><rect x="${x}" y="${y}" width="${cardWidth}" height="${cardHeight}" rx="12" fill="${tile.option.fill}" stroke="#94a3b8" stroke-width="1.5"/>${createCaptchaAnimalSvg(tile.option, x, y)}<circle cx="${x + 10}" cy="${y + 10}" r="2" fill="${noise}"/></g>`;
     })
     .join("");
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="190" height="72" viewBox="0 0 190 72" role="img" aria-label="图片验证码"><rect width="190" height="72" rx="14" fill="#f8fafc"/><path d="M12 22 C45 5, 70 40, 105 18 S150 50, 178 24" stroke="#94a3b8" stroke-width="2" fill="none"/><path d="M16 52 C52 42, 72 62, 118 48 S152 34, 180 50" stroke="#99f6e4" stroke-width="3" fill="none"/><g fill="#0f172a" font-family="Arial, sans-serif" font-size="30" font-weight="700" letter-spacing="2">${text}</g><circle cx="24" cy="19" r="2" fill="#f97316"/><circle cx="161" cy="19" r="2" fill="#14b8a6"/><circle cx="145" cy="56" r="2" fill="#f97316"/></svg>`;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="请点击图中所有${escapeXml(targetLabel)}"><rect width="${width}" height="${height}" rx="18" fill="#f8fafc"/><rect x="14" y="14" width="332" height="24" rx="12" fill="#0f766e"/><text x="28" y="31" fill="#ffffff" font-family="Arial, sans-serif" font-size="14" font-weight="700">请点击图中所有${escapeXml(targetLabel)}</text><path d="M14 236 C75 214, 134 250, 206 226 S300 214, 346 238" stroke="#99f6e4" stroke-width="3" fill="none" opacity="0.75"/>${tileSvg}</svg>`;
 }
 
-function verifyCaptchaChallenge(captchaId: string, captchaAnswer: string): void {
+function createCaptchaAnimalSvg(option: CaptchaOption, x: number, y: number): string {
+  const accent = option.accent;
+  const fill = option.fill;
+  switch (option.id) {
+    case "cow":
+      return `<g><ellipse cx="${x + 37}" cy="${y + 35}" rx="24" ry="15" fill="#f8fafc" stroke="${accent}" stroke-width="3"/><path d="M${x + 20} ${y + 22} L${x + 14} ${y + 12} M${x + 54} ${y + 22} L${x + 60} ${y + 12}" stroke="${accent}" stroke-width="3" stroke-linecap="round"/><circle cx="${x + 29}" cy="${y + 32}" r="4" fill="${accent}"/><circle cx="${x + 45}" cy="${y + 32}" r="4" fill="${accent}"/><path d="M${x + 28} ${y + 43} Q${x + 37} ${y + 49}, ${x + 46} ${y + 43}" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="round"/></g>`;
+    case "duck":
+      return `<g><ellipse cx="${x + 37}" cy="${y + 39}" rx="25" ry="14" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 31}" cy="${y + 25}" r="13" fill="${fill}" stroke="${accent}" stroke-width="3"/><path d="M${x + 41} ${y + 26} L${x + 58} ${y + 21} L${x + 48} ${y + 31} Z" fill="#fb923c"/><circle cx="${x + 29}" cy="${y + 23}" r="3" fill="#0f172a"/></g>`;
+    case "panda":
+      return `<g><circle cx="${x + 25}" cy="${y + 20}" r="9" fill="${accent}"/><circle cx="${x + 49}" cy="${y + 20}" r="9" fill="${accent}"/><circle cx="${x + 37}" cy="${y + 34}" r="23" fill="#f8fafc" stroke="${accent}" stroke-width="3"/><ellipse cx="${x + 29}" cy="${y + 33}" rx="7" ry="9" fill="${accent}"/><ellipse cx="${x + 45}" cy="${y + 33}" rx="7" ry="9" fill="${accent}"/><circle cx="${x + 37}" cy="${y + 42}" r="4" fill="${accent}"/></g>`;
+    case "rabbit":
+      return `<g><ellipse cx="${x + 29}" cy="${y + 18}" rx="7" ry="17" fill="${fill}" stroke="${accent}" stroke-width="3" transform="rotate(-12 ${x + 29} ${y + 18})"/><ellipse cx="${x + 46}" cy="${y + 18}" rx="7" ry="17" fill="${fill}" stroke="${accent}" stroke-width="3" transform="rotate(12 ${x + 46} ${y + 18})"/><circle cx="${x + 37}" cy="${y + 39}" r="20" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 30}" cy="${y + 36}" r="3" fill="${accent}"/><circle cx="${x + 44}" cy="${y + 36}" r="3" fill="${accent}"/><path d="M${x + 31} ${y + 45} Q${x + 37} ${y + 50}, ${x + 43} ${y + 45}" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="round"/></g>`;
+    case "fox":
+      return `<g><path d="M${x + 16} ${y + 24} L${x + 25} ${y + 10} L${x + 34} ${y + 26} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><path d="M${x + 58} ${y + 24} L${x + 49} ${y + 10} L${x + 40} ${y + 26} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><path d="M${x + 15} ${y + 28} Q${x + 37} ${y + 8}, ${x + 59} ${y + 28} Q${x + 51} ${y + 53}, ${x + 37} ${y + 54} Q${x + 23} ${y + 53}, ${x + 15} ${y + 28} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 30}" cy="${y + 34}" r="3" fill="${accent}"/><circle cx="${x + 44}" cy="${y + 34}" r="3" fill="${accent}"/><path d="M${x + 37} ${y + 40} L${x + 31} ${y + 47} L${x + 43} ${y + 47} Z" fill="#ffffff"/></g>`;
+    case "seal":
+    default:
+      return `<g><ellipse cx="${x + 38}" cy="${y + 38}" rx="27" ry="15" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 32}" cy="${y + 28}" r="12" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 28}" cy="${y + 27}" r="3" fill="${accent}"/><path d="M${x + 36} ${y + 32} C${x + 48} ${y + 29}, ${x + 54} ${y + 33}, ${x + 61} ${y + 40}" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="round"/><path d="M${x + 17} ${y + 43} Q${x + 8} ${y + 52}, ${x + 24} ${y + 51}" fill="${fill}" stroke="${accent}" stroke-width="3"/></g>`;
+  }
+}
+
+function verifyCaptchaChallenge(captchaId: string, captchaSelections: CaptchaSelection[]): void {
   pruneCaptchaChallenges();
   const challenge = captchaChallenges.get(captchaId);
   captchaChallenges.delete(captchaId);
   if (!challenge || new Date(challenge.expiresAt).getTime() <= Date.now()) {
     throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
   }
-  const actualHash = hashCaptchaAnswer(captchaAnswer);
+  const normalizedSelections = normalizeCaptchaSelections(captchaSelections);
+  if (normalizedSelections.length !== captchaSelections.length) {
+    throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
+  }
+  const actualHash = hashCaptchaAnswer(captchaSelections);
   if (actualHash !== challenge.answerHash) {
     throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
   }
 }
 
-function hashCaptchaAnswer(answer: string): string {
-  return createHash("sha256").update(answer.trim().toUpperCase()).digest("hex");
+function hashCaptchaAnswer(answer: CaptchaSelection[]): string {
+  return createHash("sha256").update(normalizeCaptchaSelections(answer).join("|")).digest("hex");
+}
+
+function normalizeCaptchaSelections(selections: CaptchaSelection[]): string[] {
+  return [...new Set(selections.map(captchaSelectionKey))].sort();
+}
+
+function captchaSelectionKey(selection: CaptchaSelection): string {
+  const column = Math.min(captchaColumns - 1, Math.max(0, Math.floor(selection.x * captchaColumns)));
+  const row = Math.min(captchaRows - 1, Math.max(0, Math.floor(selection.y * captchaRows)));
+  return `${row}:${column}`;
+}
+
+function pickUniqueIndexes(count: number, targetCount: number): Set<number> {
+  const indexes = new Set<number>();
+  while (indexes.size < targetCount) {
+    indexes.add(Math.floor(Math.random() * count));
+  }
+  return indexes;
+}
+
+function randomNonTargetCaptchaOption(targetId: string): CaptchaOption {
+  const options = captchaOptions.filter((option) => option.id !== targetId);
+  return options[Math.floor(Math.random() * options.length)] ?? captchaOptions[0];
 }
 
 function exposeCaptchaAnswerForTests(): boolean {

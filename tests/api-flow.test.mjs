@@ -93,7 +93,7 @@ test("auth remains usable in local development when prisma database is unavailab
         email,
         password,
         captchaId: fallbackCaptcha.data.captchaId,
-        captchaAnswer: fallbackCaptcha.data.answer
+        captchaSelections: fallbackCaptcha.data.answer
       },
       browserOrigin
     );
@@ -183,7 +183,7 @@ test("auth validates registration and login payloads at browser boundaries", asy
         email: `  ${email.toUpperCase()}  `,
         password: "StrongLocal123!",
         captchaId: validationCaptcha.data.captchaId,
-        captchaAnswer: validationCaptcha.data.answer
+        captchaSelections: validationCaptcha.data.answer
       },
       origin
     );
@@ -239,7 +239,9 @@ test("auth login requires a valid one-time image captcha", async () => {
 
     const captcha = await getCaptcha(baseUrl, origin);
     assert.match(captcha.data.imageSvg, /^<svg/);
-    assert.equal(captcha.data.answer.length, 5);
+    assert.match(captcha.data.instruction, /^请点击图中所有/);
+    assert.ok(captcha.data.requiredSelections >= 2);
+    assert.equal(captcha.data.answer.length, captcha.data.requiredSelections);
 
     const wrongCaptcha = await rawAuthPost(
       baseUrl,
@@ -248,12 +250,28 @@ test("auth login requires a valid one-time image captcha", async () => {
         email: "demo@imagora.local",
         password: "Demo123!",
         captchaId: captcha.data.captchaId,
-        captchaAnswer: "WRONG"
+        captchaSelections: [{ x: 0.01, y: 0.01 }]
       },
       origin
     );
     assert.equal(wrongCaptcha.status, 400);
     assert.equal(wrongCaptcha.payload.error.code, "CAPTCHA_INVALID");
+
+    const duplicateCaptcha = await getCaptcha(baseUrl, origin);
+    const repeatedSelection = duplicateCaptcha.data.answer[0];
+    const duplicateSelectionLogin = await rawAuthPost(
+      baseUrl,
+      "/api/auth/login",
+      {
+        email: "demo@imagora.local",
+        password: "Demo123!",
+        captchaId: duplicateCaptcha.data.captchaId,
+        captchaSelections: Array.from({ length: duplicateCaptcha.data.requiredSelections }, () => repeatedSelection)
+      },
+      origin
+    );
+    assert.equal(duplicateSelectionLogin.status, 400);
+    assert.equal(duplicateSelectionLogin.payload.error.code, "CAPTCHA_INVALID");
 
     const freshCaptcha = await getCaptcha(baseUrl, origin);
     const loggedIn = await authPost(
@@ -263,7 +281,7 @@ test("auth login requires a valid one-time image captcha", async () => {
         email: "demo@imagora.local",
         password: "Demo123!",
         captchaId: freshCaptcha.data.captchaId,
-        captchaAnswer: freshCaptcha.data.answer
+        captchaSelections: freshCaptcha.data.answer
       },
       origin
     );
@@ -276,7 +294,7 @@ test("auth login requires a valid one-time image captcha", async () => {
         email: "demo@imagora.local",
         password: "Demo123!",
         captchaId: freshCaptcha.data.captchaId,
-        captchaAnswer: freshCaptcha.data.answer
+        captchaSelections: freshCaptcha.data.answer
       },
       origin
     );
@@ -846,7 +864,7 @@ async function login(baseUrl, email, password) {
     email,
     password,
     captchaId: captcha.data.captchaId,
-    captchaAnswer: captcha.data.answer
+    captchaSelections: captcha.data.answer
   });
 }
 
@@ -886,6 +904,8 @@ async function getCaptcha(baseUrl, origin) {
   assert.equal(response.ok, true, JSON.stringify(payload));
   assert.ok(payload.data?.captchaId);
   assert.ok(payload.data?.imageSvg);
+  assert.ok(payload.data?.instruction);
+  assert.ok(payload.data?.requiredSelections);
   assert.ok(payload.data?.expiresAt);
   return payload;
 }

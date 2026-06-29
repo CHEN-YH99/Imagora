@@ -167,7 +167,7 @@ async function login(baseUrl, email, password) {
       email,
       password,
       captchaId: captcha.data.captchaId,
-      captchaAnswer: captcha.data.answer
+      captchaSelections: captcha.data.answer
     })
   });
   const payload = await response.json();
@@ -182,6 +182,7 @@ async function getCaptcha(baseUrl) {
   const payload = await response.json();
   assert.equal(response.ok, true, JSON.stringify(payload));
   assert.ok(payload.data?.captchaId);
+  assert.ok(payload.data?.requiredSelections);
   assert.ok(payload.data?.answer);
   return payload;
 }

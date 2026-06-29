@@ -37,6 +37,10 @@ test("web auth pages validate inputs and registration does not ask for nickname"
   assert.match(appFrame, /autoFocus/);
   assert.match(loginPage, /validateLoginForm/);
   assert.match(loginPage, /role="alert"/);
+  assert.match(loginPage, /captchaSelections/);
+  assert.match(loginPage, /handleCaptchaClick/);
+  assert.match(loginPage, /已选择/);
+  assert.match(loginPage, /aspect-\[18\/13\]/);
   assert.match(loginPage, /data:image\/svg\+xml;utf8/);
   assert.doesNotMatch(loginPage, /dangerouslySetInnerHTML/);
   assert.match(registerPage, /validateRegisterForm/);
@@ -54,9 +58,12 @@ test("web auth pages validate inputs and registration does not ask for nickname"
   assert.match(forgotPasswordPage, /role=\{success \? "status" : "alert"\}/);
   assert.match(verifyEmailPage, /role="status"/);
   assert.match(apiClient, /AbortController/);
+  assert.match(apiClient, /captchaSelections/);
   assert.match(apiClient, /请求超时，请检查网络后重试。/);
   assert.match(apiClient, /INVALID_RESET_TOKEN/);
   assert.match(apiMain, /password: newPasswordSchema/);
+  assert.match(apiMain, /captchaSelections/);
+  assert.match(apiMain, /createCaptchaChallenge/);
   assert.match(nextConfig, /X-Content-Type-Options/);
   assert.match(nextConfig, /X-Frame-Options/);
   assert.match(nextConfig, /Permissions-Policy/);

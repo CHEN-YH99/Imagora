@@ -147,7 +147,7 @@ async function invalidLogin(baseUrl) {
       email: "demo@imagora.local",
       password: "wrong-password",
       captchaId: captchaPayload.data.captchaId,
-      captchaAnswer: captchaPayload.data.answer
+      captchaSelections: captchaPayload.data.answer
     })
   });
   return {

@@ -22,3 +22,4 @@ apps/*/data/
 *-dev*.log
 .DS_Store
 Thumbs.db
+Imagora本地开发闯关执行文档.md

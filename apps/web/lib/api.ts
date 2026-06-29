@@ -14,7 +14,15 @@ export type User = {
 export type CaptchaChallenge = {
   captchaId: string;
   imageSvg: string;
+  instruction: string;
+  targetLabel: string;
+  requiredSelections: number;
   expiresAt: string;
+};
+
+export type CaptchaSelection = {
+  x: number;
+  y: number;
 };
 
 export type CreditAccount = {
@@ -251,11 +259,11 @@ export async function login(
   email: string,
   password: string,
   captchaId: string,
-  captchaAnswer: string
+  captchaSelections: CaptchaSelection[]
 ): Promise<{ user: User }> {
   return apiFetch<{ user: User }>("/api/auth/login", {
     method: "POST",
-    body: { email, password, captchaId, captchaAnswer }
+    body: { email, password, captchaId, captchaSelections }
   });
 }
 
