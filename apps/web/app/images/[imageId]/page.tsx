@@ -165,7 +165,7 @@ export default function ImageDetailPage() {
             <div className="bg-black/26 p-4">
               <img
                 className="max-h-[72vh] w-full rounded-2xl border border-white/12 object-contain"
-                src={image.publicUrl}
+                src={image.thumbnailUrl}
                 alt="生成图片详情预览"
               />
             </div>

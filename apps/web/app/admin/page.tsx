@@ -859,7 +859,7 @@ export default function AdminPage() {
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             {visibleImages.map((image) => (
               <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/20">
-                <img className="aspect-square w-full object-cover" src={image.publicUrl} alt="后台图片预览" />
+                <img className="aspect-square w-full object-cover" src={image.thumbnailUrl} alt="后台图片预览" />
                 <div className="space-y-2 p-3">
                   <StatusPill>{image.visibility}</StatusPill>
                   <button

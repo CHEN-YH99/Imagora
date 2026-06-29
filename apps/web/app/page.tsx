@@ -40,10 +40,7 @@ type StyleOption = {
 type Quality = "1k" | "2k" | "4k";
 
 const modelOptions = [
-  { value: "gpt-image-2", label: "GPT Image 2" },
-  { value: "nano-banana-2", label: "Nano Banana 2" },
-  { value: "nano-banana-pro", label: "Nano Banana Pro" },
-  { value: "seedream-4.5", label: "Seedream 4.5" }
+  { value: "gpt-image-2", label: "GPT Image 2" }
 ];
 
 const aspectRatioOptions = [

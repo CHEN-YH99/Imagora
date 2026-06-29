@@ -286,7 +286,8 @@ export class PrismaStore implements Store {
         userId: image.userId,
         storageKey: image.storageKey,
         thumbnailKey: image.thumbnailKey,
-        publicUrl: image.publicUrl ?? "",
+        thumbnailUrl: image.thumbnailUrl ?? image.publicUrl ?? "",
+        publicUrl: "",
         width: image.width,
         height: image.height,
         fileSize: image.fileSize,
@@ -543,7 +544,8 @@ export class PrismaStore implements Store {
             userId: image.userId,
             storageKey: image.storageKey,
             thumbnailKey: image.thumbnailKey,
-            publicUrl: image.publicUrl,
+            thumbnailUrl: image.thumbnailUrl || null,
+            publicUrl: image.publicUrl || null,
             width: image.width,
             height: image.height,
             fileSize: image.fileSize,
@@ -905,7 +907,11 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
       referenceImageId: task.referenceImageId ?? null
     })),
     referenceImages: data.referenceImages ?? [],
-    generatedImages: data.generatedImages ?? [],
+    generatedImages: (data.generatedImages ?? []).map((image) => ({
+      ...image,
+      thumbnailUrl: image.thumbnailUrl ?? image.publicUrl ?? "",
+      publicUrl: ""
+    })),
     imageFavorites: data.imageFavorites ?? [],
     plans: data.plans ?? seedPlans(now),
     orders: data.orders ?? [],

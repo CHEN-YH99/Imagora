@@ -51,7 +51,7 @@ Required provider settings:
 
 ```text
 OPENAI_API_KEY=...
-OPENAI_IMAGE_MODEL=gpt-image-1
+OPENAI_IMAGE_MODEL=gpt-image-2
 S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 S3_REGION=auto
 S3_BUCKET=imagora

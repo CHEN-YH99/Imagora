@@ -229,7 +229,7 @@ export default function HistoryPage() {
               (image) => (
                 <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/20">
                   <Link className="focus-ring block" href={`/images/${image.id}`}>
-                    <img className="aspect-square w-full object-cover" src={image.publicUrl} alt="历史生成图片" />
+                    <img className="aspect-square w-full object-cover" src={image.thumbnailUrl} alt="历史生成图片" />
                   </Link>
                   <div className="flex flex-wrap gap-2 p-3">
                     <button

@@ -1,4 +1,13 @@
-import type { AspectRatio, ModelId, Quality, StyleId } from "@imagora/shared";
+import { aspectRatioDimensions, type AspectRatio, type ModelId, type Quality, type StyleId } from "@imagora/shared";
+
+export const DEFAULT_OPENAI_MODEL = "gpt-image-2" as const;
+export const MOCK_MODEL = "mock" as const;
+export const SUPPORTED_IMAGE_MODELS = [DEFAULT_OPENAI_MODEL, MOCK_MODEL] as const;
+
+type SupportedImageModel = (typeof SUPPORTED_IMAGE_MODELS)[number];
+type SupportedProviderName = "mock" | "openai";
+type OpenAiImageSize = "1024x1024" | "1024x1536" | "1536x1024";
+type OpenAiImageQuality = "low" | "medium" | "high";
 
 export interface GenerateImageInput {
   taskId: string;
@@ -29,18 +38,161 @@ export interface GenerateImageResult {
 }
 
 export interface ImageGenerationProvider {
-  name: string;
-  modelName: string;
+  name: SupportedProviderName;
+  modelName: SupportedImageModel | string;
   generateImage(input: GenerateImageInput): Promise<GenerateImageResult>;
 }
 
+export type ProviderErrorCode =
+  | "PROVIDER_TIMEOUT"
+  | "PROVIDER_RATE_LIMITED"
+  | "PROVIDER_CONTENT_BLOCKED"
+  | "PROVIDER_EMPTY_RESULT"
+  | "PROVIDER_BAD_RESPONSE"
+  | "PROVIDER_AUTH_FAILED"
+  | "PROVIDER_FAILED";
+
+export class ProviderError extends Error {
+  readonly name = "ProviderError";
+
+  constructor(
+    readonly code: ProviderErrorCode,
+    message: string,
+    readonly options: {
+      retryable: boolean;
+      provider: SupportedProviderName;
+      statusCode?: number;
+      details?: unknown;
+    }
+  ) {
+    super(message);
+  }
+
+  get retryable(): boolean {
+    return this.options.retryable;
+  }
+
+  get provider(): SupportedProviderName {
+    return this.options.provider;
+  }
+
+  get statusCode(): number | undefined {
+    return this.options.statusCode;
+  }
+
+  get details(): unknown {
+    return this.options.details;
+  }
+}
+
+export interface ProviderMetadata {
+  name: SupportedProviderName;
+  modelName: SupportedImageModel | string;
+}
+
+export interface QuoteImageGenerationInput {
+  style: StyleId;
+  quality: Quality;
+  quantity: number;
+  aspectRatio: AspectRatio;
+  model?: ModelId;
+  provider?: string;
+}
+
+export interface ImageGenerationQuote {
+  provider: SupportedProviderName;
+  model: SupportedImageModel;
+  creditCost: number;
+  width: number;
+  height: number;
+  size: OpenAiImageSize;
+  quality: OpenAiImageQuality;
+}
+
+interface ProviderModelConfig {
+  provider: SupportedProviderName;
+  model: SupportedImageModel;
+  label: string;
+  qualityMultiplier: Record<Quality, number>;
+  sizeMultiplier: Record<OpenAiImageSize, number>;
+  quantityMultiplier: number;
+}
+
+interface OpenAiImageResponse {
+  id?: string;
+  data?: OpenAiImageItem[];
+  error?: {
+    message?: string;
+    code?: string;
+    type?: string;
+    param?: string | null;
+  };
+}
+
+interface OpenAiImageItem {
+  b64_json?: string;
+  url?: string;
+}
+
+const providerModelConfigs: Record<SupportedImageModel, ProviderModelConfig> = {
+  "gpt-image-2": {
+    provider: "openai",
+    model: "gpt-image-2",
+    label: "GPT Image 2",
+    qualityMultiplier: {
+      draft: 0.75,
+      standard: 1,
+      high: 1.7
+    },
+    sizeMultiplier: {
+      "1024x1024": 1,
+      "1024x1536": 1.22,
+      "1536x1024": 1.22
+    },
+    quantityMultiplier: 7
+  },
+  mock: {
+    provider: "mock",
+    model: "mock",
+    label: "Imagora Mock",
+    qualityMultiplier: {
+      draft: 0.4,
+      standard: 0.65,
+      high: 1
+    },
+    sizeMultiplier: {
+      "1024x1024": 1,
+      "1024x1536": 1.1,
+      "1536x1024": 1.1
+    },
+    quantityMultiplier: 4
+  }
+};
+
 export class MockImageGenerationProvider implements ImageGenerationProvider {
   readonly name = "mock";
-  readonly modelName = "imagora-mock-v1";
+  readonly modelName = MOCK_MODEL;
 
   async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
     if (/\bfail\b/i.test(input.prompt)) {
-      throw new Error("生成服务返回失败，请调整提示词后重试。");
+      throw new ProviderError("PROVIDER_FAILED", "生成服务返回失败，请调整提示词后重试。", {
+        retryable: false,
+        provider: this.name
+      });
+    }
+
+    if (/\bempty\b/i.test(input.prompt)) {
+      throw new ProviderError("PROVIDER_EMPTY_RESULT", "生成服务未返回图片，请稍后重试。", {
+        retryable: false,
+        provider: this.name
+      });
+    }
+
+    if (/\bblocked\b/i.test(input.prompt)) {
+      throw new ProviderError("PROVIDER_CONTENT_BLOCKED", "提示词触发供应商内容限制，未生成图片。", {
+        retryable: false,
+        provider: this.name
+      });
     }
 
     return {
@@ -59,272 +211,321 @@ export class MockImageGenerationProvider implements ImageGenerationProvider {
 
 export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   readonly name = "openai";
-  readonly modelName = process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-1";
+  readonly modelName = resolveConfiguredOpenAiModel();
   private readonly apiKey = requiredEnv("OPENAI_API_KEY");
-  private readonly baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  private readonly baseUrl = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
   private readonly timeoutMs = envNumber("OPENAI_TIMEOUT_MS", 120_000);
+  private readonly maxRetries = envNumber("OPENAI_MAX_RETRIES", 2, true);
+  private readonly initialBackoffMs = envNumber("OPENAI_RETRY_BASE_MS", 600);
 
   async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
-    // model 字段优先，其次 env 配置，最后默认 gpt-image-1
-    const model = input.model && input.model !== "mock" ? input.model : this.modelName;
-    return model === "gpt-image-2" ? this.generateWithImageTwo(input) : this.generateWithImageOne(input, model);
-  }
+    const model = resolveProviderModel(input.model, this.name);
+    if (model !== DEFAULT_OPENAI_MODEL) {
+      throw new ProviderError("PROVIDER_BAD_RESPONSE", `OpenAI provider does not support model "${model}"`, {
+        retryable: false,
+        provider: this.name
+      });
+    }
 
-  // gpt-image-1：支持 n>1，用 response_format: b64_json
-  private async generateWithImageOne(input: GenerateImageInput, model: string): Promise<GenerateImageResult> {
-    const response = await fetch(`${this.baseUrl}/images/generations`, {
-      method: "POST",
-      signal: AbortSignal.timeout(this.timeoutMs),
-      headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const size = openAiSize(input.width, input.height);
+    const quality = openAiQuality(input.quality);
+    const images: ProviderImage[] = [];
+    const requestIds = new Set<string>();
+
+    for (let index = 0; index < input.quantity; index += 1) {
+      const payload = await this.requestGeneration({
         model,
         prompt: buildPrompt(input),
-        n: input.quantity,
-        size: openAiSize(input.width, input.height),
-        quality: openAiQuality(input.quality),
-        response_format: "b64_json"
-      })
-    });
-    const payload = (await response.json().catch(() => ({}))) as OpenAiImageResponse;
-    if (!response.ok) {
-      throw new Error(payload.error?.message ?? `OpenAI ${model} failed with ${response.status}`);
-    }
-    const items = payload.data ?? [];
-    if (!items.length) throw new Error(`OpenAI ${model} returned no images`);
-    return {
-      providerRequestId: payload.id ?? `openai_${input.taskId}`,
-      images: items.map((item, index) => {
-        if (!item.b64_json) throw new Error(`OpenAI ${model} response missing b64_json`);
-        return {
-          bytes: item.b64_json,
-          mimeType: "image/png" as const,
-          width: input.width,
-          height: input.height,
-          index
-        };
-      }),
-      raw: { provider: this.name, model }
-    };
-  }
-
-  // gpt-image-2：不支持 n>1，循环调用；用 output_format 而非 response_format
-  private async generateWithImageTwo(input: GenerateImageInput): Promise<GenerateImageResult> {
-    const images: ProviderImage[] = [];
-    for (let index = 0; index < input.quantity; index++) {
-      const response = await fetch(`${this.baseUrl}/images/generations`, {
-        method: "POST",
-        signal: AbortSignal.timeout(this.timeoutMs),
-        headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "gpt-image-2",
-          prompt: buildPrompt(input),
-          n: 1,
-          size: openAiSize(input.width, input.height),
-          quality: openAiQuality(input.quality),
-          output_format: "png"
-        })
+        size,
+        quality,
+        n: 1,
+        output_format: "png"
       });
-      const payload = (await response.json().catch(() => ({}))) as OpenAiImageResponse;
-      if (!response.ok) {
-        throw new Error(payload.error?.message ?? `OpenAI gpt-image-2 failed with ${response.status}`);
+      if (payload.id) {
+        requestIds.add(payload.id);
       }
       const item = payload.data?.[0];
-      if (!item) throw new Error("OpenAI gpt-image-2 returned no image");
-      const bytes = item.b64_json ?? item.url ?? "";
-      if (!bytes) throw new Error("OpenAI gpt-image-2 response missing image data");
-      images.push({ bytes, mimeType: "image/png", width: input.width, height: input.height, index });
-    }
-    return {
-      providerRequestId: `openai_gpt-image-2_${input.taskId}`,
-      images,
-      raw: { provider: this.name, model: "gpt-image-2" }
-    };
-  }
-}
-
-/**
- * Stability AI Provider (Stable Diffusion) - 骨架占位
- *
- * 使用前需要配置环境变量：
- * - STABILITY_API_KEY: Stability AI API 密钥
- * - STABILITY_ENGINE: 引擎版本（默认 stable-diffusion-xl-1024-v1-0）
- * - STABILITY_BASE_URL: API 地址（默认 https://api.stability.ai）
- */
-export class StabilityAiProvider implements ImageGenerationProvider {
-  readonly name = "stability";
-  readonly modelName = process.env.STABILITY_ENGINE ?? "core";
-  private readonly apiKey = requiredEnv("STABILITY_API_KEY");
-  private readonly baseUrl = process.env.STABILITY_BASE_URL ?? "https://api.stability.ai";
-  private readonly timeoutMs = envNumber("STABILITY_TIMEOUT_MS", 120_000);
-
-  async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
-    const endpoint = `${this.baseUrl}/v2beta/stable-image/generate/${this.modelName}`;
-    const images: ProviderImage[] = [];
-    for (let index = 0; index < input.quantity; index += 1) {
-      const form = new FormData();
-      form.append("prompt", buildPrompt(input));
-      form.append("aspect_ratio", stabilityAspectRatio(input.aspectRatio));
-      form.append("output_format", "png");
-      if (input.negativePrompt) {
-        form.append("negative_prompt", input.negativePrompt);
-      }
-      const response = await fetch(endpoint, {
-        method: "POST",
-        signal: AbortSignal.timeout(this.timeoutMs),
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          Accept: "application/json"
-        },
-        body: form
-      });
-      const payload = (await response.json().catch(() => ({}))) as StabilityImageResponse;
-      if (!response.ok) {
-        const message = payload.errors?.[0] ?? payload.name ?? `Stability AI failed with ${response.status}`;
-        throw new Error(message);
-      }
-      if (!payload.image) {
-        throw new Error("Stability AI response did not include image data");
+      const bytes = extractOpenAiImageBytes(item, payload);
+      if (!bytes) {
+        throw new ProviderError("PROVIDER_EMPTY_RESULT", "OpenAI 未返回图片数据。", {
+          retryable: false,
+          provider: this.name,
+          details: payload
+        });
       }
       images.push({
-        bytes: payload.image,
+        bytes,
         mimeType: "image/png",
         width: input.width,
         height: input.height,
         index
       });
     }
+
+    if (!images.length) {
+      throw new ProviderError("PROVIDER_EMPTY_RESULT", "OpenAI 未返回任何图片。", {
+        retryable: false,
+        provider: this.name
+      });
+    }
+
     return {
-      providerRequestId: `stability_${input.taskId}`,
+      providerRequestId: requestIds.size === 1 ? [...requestIds][0] : `openai_${input.taskId}`,
       images,
-      raw: { provider: this.name, model: this.modelName }
+      raw: { provider: this.name, model, requestIds: [...requestIds] }
     };
   }
-}
 
-/**
- * Midjourney Provider (通过第三方 API) - 骨架占位
- *
- * 使用前需要配置环境变量：
- * - MIDJOURNEY_API_KEY: Midjourney API 密钥
- * - MIDJOURNEY_BASE_URL: 第三方 API 地址（如 https://api.midjourney.com）
- * - MIDJOURNEY_TIMEOUT_MS: 超时时间（默认 300000ms / 5分钟）
- *
- * 注意：Midjourney 官方没有直接 API，需要使用第三方服务或 Discord Bot
- */
-export class MidjourneyProvider implements ImageGenerationProvider {
-  readonly name = "midjourney";
-  readonly modelName = "midjourney-v6";
-  private readonly apiKey = requiredEnv("MIDJOURNEY_API_KEY");
-  private readonly baseUrl = requiredEnv("MIDJOURNEY_BASE_URL");
-  private readonly timeoutMs = envNumber("MIDJOURNEY_TIMEOUT_MS", 300_000);
-
-  async generateImage(_input: GenerateImageInput): Promise<GenerateImageResult> {
-    // TODO: 实现 Midjourney 图片生成
-    // Midjourney 生成通常需要轮询，因为生成时间较长
-    throw new Error(
-      "MidjourneyProvider not implemented yet. Implement via third-party API:\n" +
-        `  API: ${this.baseUrl}, Timeout: ${this.timeoutMs}ms\n` +
-        "  Note: Midjourney requires polling for completion. Consider using a queue-based approach."
-    );
+  private async requestGeneration(body: {
+    model: typeof DEFAULT_OPENAI_MODEL;
+    prompt: string;
+    size: OpenAiImageSize;
+    quality: OpenAiImageQuality;
+    n: number;
+    output_format: "png";
+  }): Promise<OpenAiImageResponse> {
+    let attempt = 0;
+    while (true) {
+      try {
+        return await this.performRequest(body);
+      } catch (error) {
+        const providerError = normalizeProviderError(error, this.name);
+        if (!providerError.retryable || attempt >= this.maxRetries) {
+          throw providerError;
+        }
+        attempt += 1;
+        await sleep(this.initialBackoffMs * 2 ** (attempt - 1));
+      }
+    }
   }
-}
 
-/**
- * 阿里云通义万相 Provider - 骨架占位
- *
- * 使用前需要配置环境变量：
- * - ALIYUN_ACCESS_KEY_ID: 阿里云 Access Key ID
- * - ALIYUN_ACCESS_KEY_SECRET: 阿里云 Access Key Secret
- * - ALIYUN_WANX_ENDPOINT: 通义万相 API 端点（默认 wanx.cn-beijing.aliyuncs.com）
- * - ALIYUN_WANX_MODEL: 模型版本（默认 wanx-v1）
- */
-export class AliyunWanxProvider implements ImageGenerationProvider {
-  readonly name = "aliyun-wanx";
-  readonly modelName = process.env.ALIYUN_WANX_MODEL ?? "wanx-v1";
-  private readonly accessKeyId = requiredEnv("ALIYUN_ACCESS_KEY_ID");
-  private readonly accessKeySecret = requiredEnv("ALIYUN_ACCESS_KEY_SECRET");
-  private readonly endpoint = process.env.ALIYUN_WANX_ENDPOINT ?? "wanx.cn-beijing.aliyuncs.com";
-  private readonly timeoutMs = envNumber("ALIYUN_WANX_TIMEOUT_MS", 120_000);
+  private async performRequest(body: {
+    model: typeof DEFAULT_OPENAI_MODEL;
+    prompt: string;
+    size: OpenAiImageSize;
+    quality: OpenAiImageQuality;
+    n: number;
+    output_format: "png";
+  }): Promise<OpenAiImageResponse> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/images/generations`, {
+        method: "POST",
+        signal: AbortSignal.timeout(this.timeoutMs),
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
+      });
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new ProviderError("PROVIDER_TIMEOUT", "OpenAI 图片生成超时，请稍后重试。", {
+          retryable: true,
+          provider: this.name
+        });
+      }
+      throw new ProviderError("PROVIDER_FAILED", "连接 OpenAI 失败，请稍后重试。", {
+        retryable: true,
+        provider: this.name,
+        details: error
+      });
+    }
 
-  async generateImage(_input: GenerateImageInput): Promise<GenerateImageResult> {
-    // TODO: 实现阿里云通义万相图片生成
-    // 参考文档: https://help.aliyun.com/zh/dashscope/developer-reference/api-details-9
-    throw new Error(
-      "AliyunWanxProvider not implemented yet. Install @alicloud/wanx SDK:\n" +
-        `  Endpoint: ${this.endpoint}, Model: ${this.modelName}, Timeout: ${this.timeoutMs}ms\n` +
-        "  Reference: https://help.aliyun.com/zh/dashscope/developer-reference/api-details-9"
-    );
+    const payload = (await response.json().catch(() => ({}))) as OpenAiImageResponse;
+    if (!response.ok) {
+      throw mapOpenAiError(response.status, payload, this.name);
+    }
+
+    if (!Array.isArray(payload.data)) {
+      throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI 返回格式异常。", {
+        retryable: false,
+        provider: this.name,
+        statusCode: response.status,
+        details: payload
+      });
+    }
+
+    return payload;
   }
 }
 
 export function createImageGenerationProvider(name = process.env.AI_PROVIDER ?? "mock"): ImageGenerationProvider {
-  switch (name) {
+  switch (normalizeProviderName(name)) {
     case "mock":
       return new MockImageGenerationProvider();
     case "openai":
       return new OpenAiImageGenerationProvider();
-    case "stability":
-      return new StabilityAiProvider();
-    case "midjourney":
-      return new MidjourneyProvider();
-    case "aliyun-wanx":
-      return new AliyunWanxProvider();
-    default:
-      throw new Error(`Unsupported AI provider: ${name}`);
   }
-}
-
-export interface ProviderMetadata {
-  name: string;
-  modelName: string;
 }
 
 export function getActiveProviderMetadata(name = process.env.AI_PROVIDER ?? "mock"): ProviderMetadata {
-  switch (name) {
-    case "mock":
-      return { name: "mock", modelName: "imagora-mock-v1" };
-    case "openai":
-      return { name: "openai", modelName: process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-1" };
-    case "stability":
-      return { name: "stability", modelName: process.env.STABILITY_ENGINE ?? "stable-diffusion-xl-1024-v1-0" };
-    case "midjourney":
-      return { name: "midjourney", modelName: "midjourney-v6" };
-    case "aliyun-wanx":
-      return { name: "aliyun-wanx", modelName: process.env.ALIYUN_WANX_MODEL ?? "wanx-v1" };
-    default:
-      throw new Error(`Unsupported AI provider: ${name}`);
+  const normalized = normalizeProviderName(name);
+  return normalized === "mock"
+    ? { name: "mock", modelName: MOCK_MODEL }
+    : { name: "openai", modelName: resolveConfiguredOpenAiModel() };
+}
+
+export function listSupportedModels(name?: string): SupportedImageModel[] {
+  const provider = name ? normalizeProviderName(name) : undefined;
+  return SUPPORTED_IMAGE_MODELS.filter((model) => !provider || providerModelConfigs[model].provider === provider);
+}
+
+export function resolveProviderModel(inputModel?: ModelId, providerName = process.env.AI_PROVIDER ?? "mock"): SupportedImageModel {
+  const provider = normalizeProviderName(providerName);
+  const requestedModel =
+    inputModel && SUPPORTED_IMAGE_MODELS.includes(inputModel as SupportedImageModel)
+      ? (inputModel as SupportedImageModel)
+      : provider === "mock"
+        ? MOCK_MODEL
+        : resolveConfiguredOpenAiModel();
+
+  const config = providerModelConfigs[requestedModel];
+  if (!config || config.provider !== provider) {
+    throw new ProviderError(
+      "PROVIDER_BAD_RESPONSE",
+      `Provider "${provider}" does not support model "${requestedModel}".`,
+      {
+        retryable: false,
+        provider
+      }
+    );
   }
+
+  return requestedModel;
 }
 
-interface OpenAiImageResponse {
-  id?: string;
-  data?: Array<{ b64_json?: string; url?: string }>;
-  error?: { message?: string };
+export function quoteImageGeneration(input: QuoteImageGenerationInput): ImageGenerationQuote {
+  const provider = normalizeProviderName(input.provider ?? process.env.AI_PROVIDER ?? "mock");
+  const model = resolveProviderModel(input.model, provider);
+  const config = providerModelConfigs[model];
+  const dimension = aspectRatioDimensions[input.aspectRatio];
+  const size = openAiSize(dimension.width, dimension.height);
+  const quality = openAiQuality(input.quality);
+  const modelUnitCost = config.quantityMultiplier * config.qualityMultiplier[input.quality] * config.sizeMultiplier[size];
+  return {
+    provider,
+    model,
+    creditCost: Math.ceil(modelUnitCost * input.quantity),
+    width: dimension.width,
+    height: dimension.height,
+    size,
+    quality
+  };
 }
 
-interface StabilityImageResponse {
-  image?: string;
-  finish_reason?: string;
-  seed?: number;
-  name?: string;
-  errors?: string[];
+export function isProviderError(error: unknown): error is ProviderError {
+  return error instanceof ProviderError;
 }
 
-function stabilityAspectRatio(aspectRatio: AspectRatio): string {
-  switch (aspectRatio) {
-    case "1:1":
-      return "1:1";
-    case "3:4":
-      return "3:4";
-    case "4:3":
-      return "4:3";
-    case "9:16":
-      return "9:16";
-    case "16:9":
-      return "16:9";
-    default:
-      return "1:1";
+function normalizeProviderName(name: string): SupportedProviderName {
+  const normalized = name.trim().toLowerCase();
+  if (normalized === "mock" || normalized === "openai") {
+    return normalized;
   }
+  throw new Error(`Unsupported AI provider: ${name}`);
+}
+
+function resolveConfiguredOpenAiModel(): typeof DEFAULT_OPENAI_MODEL {
+  const value = process.env.OPENAI_IMAGE_MODEL?.trim();
+  if (!value || value === DEFAULT_OPENAI_MODEL) {
+    return DEFAULT_OPENAI_MODEL;
+  }
+  throw new Error(`Unsupported OPENAI_IMAGE_MODEL: ${value}`);
+}
+
+function normalizeProviderError(error: unknown, provider: SupportedProviderName): ProviderError {
+  if (error instanceof ProviderError) {
+    return error;
+  }
+  if (isAbortError(error)) {
+    return new ProviderError("PROVIDER_TIMEOUT", "供应商请求超时。", {
+      retryable: true,
+      provider
+    });
+  }
+  return new ProviderError("PROVIDER_FAILED", error instanceof Error ? error.message : "供应商请求失败。", {
+    retryable: true,
+    provider,
+    details: error
+  });
+}
+
+function extractOpenAiImageBytes(item: OpenAiImageItem | undefined, payload: OpenAiImageResponse): string {
+  const bytes = item?.b64_json?.trim();
+  if (bytes) {
+    return bytes;
+  }
+
+  if (typeof item?.url === "string" && item.url.trim()) {
+    throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI GPT 图像模型必须返回 b64_json，不能返回 url。", {
+      retryable: false,
+      provider: "openai",
+      details: { payload, item }
+    });
+  }
+
+  throw new ProviderError("PROVIDER_EMPTY_RESULT", "OpenAI 未返回图片数据。", {
+    retryable: false,
+    provider: "openai",
+    details: payload
+  });
+}
+
+function mapOpenAiError(status: number, payload: OpenAiImageResponse, provider: SupportedProviderName): ProviderError {
+  const message = payload.error?.message ?? `OpenAI returned ${status}`;
+  const code = payload.error?.code?.toLowerCase() ?? "";
+  const type = payload.error?.type?.toLowerCase() ?? "";
+  const statusCode = status;
+
+  if (status === 401 || status === 403) {
+    return new ProviderError("PROVIDER_AUTH_FAILED", message, {
+      retryable: false,
+      provider,
+      statusCode,
+      details: payload
+    });
+  }
+
+  if (
+    status === 400 &&
+    (code.includes("content_policy") ||
+      code.includes("safety") ||
+      code.includes("moderation") ||
+      type.includes("content_policy"))
+  ) {
+    return new ProviderError("PROVIDER_CONTENT_BLOCKED", message, {
+      retryable: false,
+      provider,
+      statusCode,
+      details: payload
+    });
+  }
+
+  if (status === 429) {
+    return new ProviderError("PROVIDER_RATE_LIMITED", message, {
+      retryable: true,
+      provider,
+      statusCode,
+      details: payload
+    });
+  }
+
+  if (status >= 500) {
+    return new ProviderError("PROVIDER_FAILED", message, {
+      retryable: true,
+      provider,
+      statusCode,
+      details: payload
+    });
+  }
+
+  return new ProviderError("PROVIDER_BAD_RESPONSE", message, {
+    retryable: false,
+    provider,
+    statusCode,
+    details: payload
+  });
 }
 
 function buildPrompt(input: GenerateImageInput): string {
@@ -338,14 +539,14 @@ function buildPrompt(input: GenerateImageInput): string {
   return parts.filter(Boolean).join("\n");
 }
 
-function openAiSize(width: number, height: number): "1024x1024" | "1024x1536" | "1536x1024" {
+function openAiSize(width: number, height: number): OpenAiImageSize {
   if (width === height) {
     return "1024x1024";
   }
   return height > width ? "1024x1536" : "1536x1024";
 }
 
-function openAiQuality(quality: Quality): "low" | "medium" | "high" {
+function openAiQuality(quality: Quality): OpenAiImageQuality {
   switch (quality) {
     case "draft":
       return "low";
@@ -364,9 +565,19 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-function envNumber(name: string, fallback: number): number {
+function envNumber(name: string, fallback: number, allowZero = false): number {
   const value = Number(process.env[name]);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+  return Number.isFinite(value) && (allowZero ? value >= 0 : value > 0) ? value : fallback;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function createSvg(input: GenerateImageInput, index: number): string {

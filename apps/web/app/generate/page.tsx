@@ -21,10 +21,7 @@ const qualityOptions = [
 ];
 
 const modelOptions = [
-  { value: "gpt-image-2", label: "GPT Image 2" },
-  { value: "nano-banana-2", label: "Nano Banana 2" },
-  { value: "nano-banana-pro", label: "Nano Banana Pro" },
-  { value: "seedream-4.5", label: "Seedream 4.5" }
+  { value: "gpt-image-2", label: "GPT Image 2" }
 ];
 
 const aspectRatioOptions = [
@@ -435,7 +432,7 @@ function GenerateExperience() {
               <img
                 key={image.id}
                 className="aspect-square w-full rounded-2xl border border-white/12 object-cover"
-                src={image.publicUrl}
+                src={image.thumbnailUrl}
                 alt="生成图片结果"
               />
             ))}

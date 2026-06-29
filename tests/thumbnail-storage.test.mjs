@@ -61,6 +61,9 @@ test("worker stores SVG thumbnails with matching SVG metadata", async () => {
     assert.equal(image.mimeType, "image/svg+xml");
     assert.match(image.storageKey, /\.svg$/);
     assert.match(image.thumbnailKey, /-thumb\.svg$/);
+    assert.match(image.thumbnailUrl, /^https:\/\/cdn\.example\/generated\//);
+    assert.match(image.thumbnailUrl, /-thumb\.svg$/);
+    assert.notEqual(image.thumbnailUrl, image.publicUrl);
 
     const originalUpload = objectStorage.puts.find((upload) => upload.path.endsWith(`/${image.storageKey}`));
     const thumbnailUpload = objectStorage.puts.find((upload) => upload.path.endsWith(`/${image.thumbnailKey}`));

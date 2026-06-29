@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,7 +67,7 @@ test("auth remains usable in local development when prisma database is unavailab
 
   try {
     const baseUrl = `http://127.0.0.1:${port}`;
-    await waitForHealth(baseUrl);
+    await waitForHealth(baseUrl, 12000);
 
     const browserOrigin = "http://localhost:3100";
     const preflight = await fetch(`${baseUrl}/api/auth/register`, {
@@ -126,7 +127,7 @@ test("auth validates registration and login payloads at browser boundaries", asy
 
   try {
     const baseUrl = `http://127.0.0.1:${port}`;
-    await waitForHealth(baseUrl);
+    await waitForHealth(baseUrl, 12000);
 
     const injectedNickname = await rawAuthPost(
       baseUrl,
@@ -885,6 +886,116 @@ test("api and worker complete generation and enforce admin safety rules", async 
   }
 });
 
+test("api and worker complete generation with openai provider flow", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-api-openai-"));
+  const port = 4700 + Math.floor(Math.random() * 400);
+  const storePath = join(dir, "store.json");
+  const openAiServer = createFakeOpenAiServer([
+    {
+      status: 200,
+      body: {
+        id: "openai_req_1",
+        data: [{ b64_json: onePixelPngBase64 }]
+      }
+    },
+    {
+      status: 200,
+      body: {
+        id: "openai_req_2",
+        data: [{ b64_json: onePixelPngBase64 }]
+      }
+    }
+  ]);
+  await openAiServer.listen();
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    IMAGORA_STORE_PATH: storePath,
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    ORDER_PENDING_TTL_MINUTES: "30",
+    WORKER_POLL_INTERVAL_MS: "300",
+    QUEUE_PROVIDER: "inline",
+    AI_PROVIDER: "openai",
+    OPENAI_API_KEY: "sk-test",
+    OPENAI_BASE_URL: `http://127.0.0.1:${openAiServer.port}`,
+    OPENAI_TIMEOUT_MS: "1000",
+    OPENAI_MAX_RETRIES: "0",
+    OPENAI_RETRY_BASE_MS: "10",
+    OPENAI_IMAGE_MODEL: "gpt-image-2"
+  };
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
+  const worker = spawn(process.execPath, ["apps/worker/dist/main.js"], { env, stdio: "ignore" });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl);
+
+    const demo = await login(baseUrl, "demo@imagora.local", "Demo123!");
+    const demoSession = demo.session;
+    const startingCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const clientRequestId = crypto.randomUUID();
+    const created = await post(
+      baseUrl,
+      "/api/generation/tasks",
+      {
+        clientRequestId,
+        prompt: "A realistic product showcase on a white studio background",
+        style: "product_photography",
+        aspectRatio: "1:1",
+        quantity: 2,
+        quality: "standard"
+      },
+      demoSession
+    );
+
+    assert.equal(created.data.task.modelProvider, "openai");
+    assert.equal(created.data.task.modelName, "gpt-image-2");
+    assert.equal(created.data.task.quantity, 2);
+    assert.equal(created.data.balanceAfter, startingCredits.data.account.balance - created.data.task.creditCost);
+
+    const completed = await waitForTask(baseUrl, demoSession, created.data.task.id);
+    assert.equal(completed.data.task.status, "SUCCEEDED");
+    assert.equal(completed.data.task.modelProvider, "openai");
+    assert.equal(completed.data.task.modelName, "gpt-image-2");
+    assert.equal(completed.data.images.length, 2);
+    for (const image of completed.data.images) {
+      assert.equal(image.mimeType, "image/png");
+      assert.match(image.storageKey, /\.png$/);
+      assert.match(image.thumbnailKey, /-thumb\.jpg$/);
+      assert.match(image.thumbnailUrl, /^data:image\/jpeg;base64,/);
+      assert.notEqual(image.thumbnailUrl, image.publicUrl);
+    }
+
+    assert.equal(openAiServer.requests.length, 2);
+    for (const request of openAiServer.requests) {
+      assert.equal(request.method, "POST");
+      assert.equal(request.path, "/images/generations");
+      assert.match(request.authorization ?? "", /^Bearer sk-test$/);
+      const body = JSON.parse(request.body);
+      assert.equal(body.model, "gpt-image-2");
+      assert.equal(body.n, 1);
+      assert.equal(body.output_format, "png");
+      assert.equal(body.size, "1024x1024");
+      assert.equal(body.quality, "medium");
+      assert.match(body.prompt, /A realistic product showcase/);
+      assert.match(body.prompt, /Style: product photography/);
+      assert.match(body.prompt, /Aspect ratio: 1:1/);
+    }
+
+    const download = await post(baseUrl, `/api/images/${completed.data.images[0].id}/download-url`, {}, demoSession);
+    assert.match(download.data.url, /^mock-signed:\/\//);
+    assert.match(download.data.fileName, /\.png$/);
+  } finally {
+    api.kill();
+    worker.kill();
+    await openAiServer.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 function runProcess(command, args, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, stdio: ["ignore", "ignore", "pipe"] });
@@ -1035,8 +1146,9 @@ function readSetCookie(response) {
   return setCookie;
 }
 
-async function waitForHealth(baseUrl) {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
+async function waitForHealth(baseUrl, timeoutMs = 6000) {
+  const attempts = Math.max(1, Math.ceil(timeoutMs / 200));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await fetch(`${baseUrl}/health`);
       if (response.ok) {
@@ -1168,4 +1280,61 @@ async function markOrderExpired(storePath, orderId) {
     order.createdAt = expiredAt;
     order.updatedAt = expiredAt;
   });
+}
+
+function createFakeOpenAiServer(responses) {
+  const requests = [];
+  let port = 0;
+  const server = createHttpServer((request, response) => {
+    const next = responses.shift();
+    assert.ok(next, "Unexpected OpenAI request");
+    const chunks = [];
+    request.on("data", (chunk) => {
+      chunks.push(chunk);
+    });
+    request.on("end", async () => {
+      requests.push({
+        method: request.method,
+        path: request.url,
+        authorization: request.headers.authorization,
+        body: Buffer.concat(chunks).toString("utf8")
+      });
+      if (next.delayMs) {
+        await sleep(next.delayMs);
+      }
+      response.statusCode = next.status;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(next.body));
+    });
+  });
+
+  return {
+    requests,
+    get port() {
+      return port;
+    },
+    listen() {
+      return new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          const address = server.address();
+          assert.ok(address && typeof address === "object");
+          port = address.port;
+          resolve();
+        });
+      });
+    },
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  };
 }

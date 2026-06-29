@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { createImageGenerationProvider } from "@imagora/ai-providers";
+import { createImageGenerationProvider, isProviderError } from "@imagora/ai-providers";
 import { createStore } from "@imagora/database";
 import { startGenerationWorker, type GenerationQueueJob } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
 import { createObjectStorage } from "@imagora/storage";
-import type { GeneratedImage, GenerationTask, StoreData } from "@imagora/shared";
+import type { GeneratedImage, GenerationTask, ModelId, StoreData } from "@imagora/shared";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -71,23 +71,30 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
       height: task.height,
       quantity: task.quantity,
       quality: task.quality,
-      model: task.modelName as import("@imagora/shared").ModelId | undefined,
+      model: task.modelName as ModelId | undefined,
       referenceImageUrl: task.referenceImageId
         ? data.referenceImages.find((image) => image.id === task.referenceImageId && !image.deletedAt)?.publicUrl
         : null
     });
     console.log(`[imagora-worker] task ${task.id} provider request ${result.providerRequestId}`);
 
-    for (const image of result.images) {
-      const safetyResult = await safety.checkImage({ mimeType: image.mimeType, bytes: image.bytes });
-      if (safetyResult.status === "BLOCKED") {
-        failTask(data, task, safetyResult.reasonCode, safetyResult.reasonMessage);
-        return;
-      }
-      data.generatedImages.push(await createImage(task, image.index, image.bytes, image.mimeType));
+    const blockedImage = await firstBlockedGeneratedImage(result.images);
+    if (blockedImage) {
+      recordSafetyEvent(data, task, blockedImage.index, blockedImage.reasonCode, blockedImage.reasonMessage, blockedImage.provider);
+      failTask(data, task, blockedImage.reasonCode, blockedImage.reasonMessage, "BLOCKED");
+      return;
     }
+
+    const createdImages = await createImages(task, result.images);
+    data.generatedImages.push(...createdImages);
   } catch (error) {
-    failTask(data, task, "PROVIDER_FAILED", error instanceof Error ? error.message : "Provider failed");
+    if (isProviderError(error) && error.code === "PROVIDER_CONTENT_BLOCKED") {
+      recordSafetyEvent(data, task, 0, error.code, error.message, error.provider);
+      failTask(data, task, error.code, error.message, "BLOCKED");
+      return;
+    }
+    const failure = mapProviderFailure(error);
+    failTask(data, task, failure.code, failure.message);
     return;
   }
 
@@ -97,15 +104,94 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
   console.log(`[imagora-worker] task ${task.id} completed with ${task.quantity} image(s)`);
 }
 
-function failTask(data: StoreData, task: GenerationTask, code: string, message: string): void {
+async function firstBlockedGeneratedImage(
+  images: Array<{ index: number; bytes: string; mimeType: string }>
+): Promise<{ index: number; reasonCode: string; reasonMessage: string; provider: string } | null> {
+  for (const image of images) {
+    const safetyResult = await safety.checkImage({ mimeType: image.mimeType, bytes: image.bytes });
+    if (safetyResult.status === "BLOCKED") {
+      return {
+        index: image.index,
+        reasonCode: safetyResult.reasonCode,
+        reasonMessage: safetyResult.reasonMessage,
+        provider: safetyResult.provider
+      };
+    }
+  }
+  return null;
+}
+
+async function createImages(
+  task: GenerationTask,
+  images: Array<{ index: number; bytes: string; mimeType: string }>
+): Promise<GeneratedImage[]> {
+  const createdImages: GeneratedImage[] = [];
+  try {
+    for (const image of images) {
+      createdImages.push(await createImage(task, image.index, image.bytes, image.mimeType));
+    }
+    return createdImages;
+  } catch (error) {
+    await cleanupCreatedImages(createdImages);
+    throw error;
+  }
+}
+
+async function cleanupCreatedImages(images: GeneratedImage[]): Promise<void> {
+  await Promise.allSettled(
+    images.flatMap((image) => [storage.deleteObject(image.storageKey), storage.deleteObject(image.thumbnailKey)])
+  );
+}
+
+function recordSafetyEvent(
+  data: StoreData,
+  task: GenerationTask,
+  imageIndex: number,
+  reasonCode: string,
+  reasonMessage: string,
+  providerName: string
+): void {
+  data.safetyEvents.push({
+    id: randomUUID(),
+    userId: task.userId,
+    targetType: "GENERATED_IMAGE",
+    targetId: `${task.id}:${imageIndex}`,
+    status: "BLOCKED",
+    reasonCode,
+    reasonMessage,
+    provider: providerName,
+    createdAt: new Date().toISOString()
+  });
+}
+
+function mapProviderFailure(error: unknown): { code: string; message: string } {
+  if (isProviderError(error)) {
+    return {
+      code: error.code,
+      message: error.message
+    };
+  }
+  return {
+    code: "PROVIDER_FAILED",
+    message: error instanceof Error ? error.message : "Provider failed"
+  };
+}
+
+function failTask(
+  data: StoreData,
+  task: GenerationTask,
+  code: string,
+  message: string,
+  status: GenerationTask["status"] = "FAILED"
+): void {
   const now = new Date().toISOString();
-  task.status = "FAILED";
+  task.status = status;
   task.failureCode = code;
   task.failureMessage = message;
   task.completedAt = now;
   task.updatedAt = now;
   refundTask(data, task, "Task failed before image delivery");
-  console.log(`[imagora-worker] task ${task.id} failed and refunded`);
+  console.log(`[imagora-worker] task ${task.id} ${status.toLowerCase()} and refunded`);
 }
 
 function refundStaleRunningTasks(data: StoreData): void {
@@ -163,21 +249,30 @@ async function createImage(
     bodyEncoding: isBase64Mime(mimeType) ? "base64" : "utf8",
     mimeType
   });
-  const thumbnail = await thumbnailObject(task, body, mimeType);
-  const thumbnailKey = `generated/${task.userId}/${task.id}/${id}-thumb.${thumbnail.extension}`;
-  await storage.putObject({
-    key: thumbnailKey,
-    body: thumbnail.body,
-    bodyEncoding: thumbnail.bodyEncoding,
-    mimeType: thumbnail.mimeType
-  });
+  let thumbnailKey = "";
+  let thumbnailUrl = "";
+  try {
+    const thumbnail = await thumbnailObject(task, body, mimeType);
+    thumbnailKey = `generated/${task.userId}/${task.id}/${id}-thumb.${thumbnail.extension}`;
+    const storedThumbnail = await storage.putObject({
+      key: thumbnailKey,
+      body: thumbnail.body,
+      bodyEncoding: thumbnail.bodyEncoding,
+      mimeType: thumbnail.mimeType
+    });
+    thumbnailUrl = storedThumbnail.publicUrl;
+  } catch (error) {
+    await cleanupStorageKeys([stored.key, thumbnailKey]);
+    throw error;
+  }
   return {
     id,
     taskId: task.id,
     userId: task.userId,
     storageKey: stored.key,
     thumbnailKey,
-    publicUrl: stored.publicUrl,
+    thumbnailUrl,
+    publicUrl: "",
     width: task.width,
     height: task.height,
     fileSize: stored.fileSize,
@@ -187,6 +282,11 @@ async function createImage(
     deletedAt: null,
     createdAt: now
   };
+}
+
+async function cleanupStorageKeys(keys: string[]): Promise<void> {
+  const targets = keys.filter(Boolean);
+  await Promise.allSettled(targets.map((key) => storage.deleteObject(key)));
 }
 
 interface ThumbnailObject {

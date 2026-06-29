@@ -79,6 +79,7 @@ export type GeneratedImage = {
   id: string;
   taskId: string;
   storageKey?: string;
+  thumbnailUrl: string;
   publicUrl: string;
   thumbnailKey?: string;
   width: number;

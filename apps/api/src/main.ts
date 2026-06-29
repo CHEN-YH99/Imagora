@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import cors from "@fastify/cors";
 import pino from "pino";
-import { getActiveProviderMetadata } from "@imagora/ai-providers";
+import { getActiveProviderMetadata, quoteImageGeneration, resolveProviderModel } from "@imagora/ai-providers";
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
 import { buildVerificationEmail, createMailer } from "@imagora/mailer";
 import { createPaymentProvider, type VerifiedPaymentEvent } from "@imagora/payments";
@@ -15,7 +15,6 @@ import {
   type ApiEnvelope,
   type AspectRatio,
   aspectRatioDimensions,
-  calculateCreditCost,
   type GeneratedImage,
   type GenerationTask,
   maxPromptLength,
@@ -46,7 +45,6 @@ const safetyProvider = createSafetyProvider();
 const paymentProvider = createPaymentProvider();
 const generationQueue = createGenerationQueue();
 const storage = createObjectStorage();
-const providerMetadata = getActiveProviderMetadata();
 
 const logger = pino({
   level: process.env.LOG_LEVEL ?? (isProduction ? "info" : "debug"),
@@ -569,13 +567,16 @@ app.post("/api/generation/quote", async (request) => {
   assertFeatureEnabled("generation");
   await requireAuth(request);
   const input = generationInputSchema.parse(request.body);
-  return envelope(request, { creditCost: quote(input), balanceRequired: quote(input) });
+  const estimatedCost = quote(input);
+  return envelope(request, { creditCost: estimatedCost, balanceRequired: estimatedCost });
 });
 
 app.post("/api/generation/tasks", async (request, reply) => {
   assertFeatureEnabled("generation");
   const { user } = await requireAuth(request);
   const input = generationInputSchema.parse(request.body);
+  const { providerMetadata: resolvedProviderMetadata, model: resolvedModel } = resolveGenerationProviderSelection(input.model);
+  const cost = quote({ ...input, model: resolvedModel });
   const result = await store.update(async (data) => {
     const duplicate = data.generationTasks.find(
       (task) => task.userId === user.id && task.clientRequestId === input.clientRequestId
@@ -611,7 +612,6 @@ app.post("/api/generation/tasks", async (request, reply) => {
       });
       throw new AppError("CONTENT_BLOCKED", "Prompt was blocked by safety rules", 400, { ...safety });
     }
-    const cost = quote(input);
     const account = mustFindCreditAccount(data, user.id);
     if (account.balance < cost) {
       throw new AppError("INSUFFICIENT_CREDITS", "Credit balance is not enough", 402, {
@@ -634,8 +634,8 @@ app.post("/api/generation/tasks", async (request, reply) => {
       height: dimension.height,
       quantity: input.quantity,
       quality: input.quality,
-      modelProvider: providerMetadata.name,
-      modelName: input.model ?? providerMetadata.modelName,
+      modelProvider: resolvedProviderMetadata.name,
+      modelName: resolvedModel,
       status: "PENDING",
       creditCost: cost,
       failureCode: null,
@@ -1497,9 +1497,7 @@ const generationInputSchema = z.object({
   aspectRatio: z.enum(["1:1", "3:4", "4:3", "9:16", "16:9"]),
   quantity: z.number().int().min(1).max(maxQuantity),
   quality: z.enum(["draft", "standard", "high"]),
-  model: z
-    .enum(["gpt-image-1", "gpt-image-2", "nano-banana-2", "nano-banana-pro", "seedream-4.5", "mock"])
-    .default("gpt-image-2")
+  model: z.enum(["gpt-image-2", "mock"]).default("gpt-image-2")
 });
 
 const referenceUploadSchema = z.object({
@@ -1737,7 +1735,52 @@ function quote(input: {
   aspectRatio: AspectRatio;
   model?: ModelId;
 }): number {
-  return calculateCreditCost(input);
+  const { model } = resolveGenerationProviderSelection(input.model);
+  return quoteImageGeneration({
+    style: input.style,
+    quality: input.quality,
+    quantity: input.quantity,
+    aspectRatio: input.aspectRatio,
+    model
+  }).creditCost;
+}
+
+function resolveGenerationProviderSelection(model?: ModelId): { providerMetadata: ReturnType<typeof getActiveProviderMetadata>; model: ModelId } {
+  const requestedModel = parseGenerationModel(model);
+  const providerMetadata = getActiveProviderMetadata();
+  const fallbackModel: ModelId = providerMetadata.name === "mock" ? "mock" : "gpt-image-2";
+  try {
+    const resolvedModel = resolveProviderModel(requestedModel ?? fallbackModel);
+    return {
+      providerMetadata: {
+        ...providerMetadata,
+        modelName: resolvedModel
+      },
+      model: resolvedModel
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Provider model is not configured";
+    if (providerMetadata.name === "mock" && requestedModel === "gpt-image-2") {
+      return {
+        providerMetadata: {
+          ...providerMetadata,
+          modelName: "mock"
+        },
+        model: "mock"
+      };
+    }
+    throw new AppError("VALIDATION_ERROR", message, 400, { model: requestedModel });
+  }
+}
+
+function parseGenerationModel(model?: ModelId): ModelId {
+  if (!model) {
+    return "gpt-image-2";
+  }
+  if (model === "gpt-image-2" || model === "mock") {
+    return model;
+  }
+  throw new AppError("VALIDATION_ERROR", "Image model is not supported", 400, { model });
 }
 
 function mustFindUser(data: StoreData, userId: string): User {

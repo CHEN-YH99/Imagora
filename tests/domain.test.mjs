@@ -1,31 +1,323 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import {
+  MockImageGenerationProvider,
+  OpenAiImageGenerationProvider,
+  ProviderError,
+  isProviderError,
+  quoteImageGeneration,
+  resolveProviderModel
+} from "../packages/ai-providers/dist/index.js";
 import { createInitialData, JsonStore, verifyPassword } from "../packages/database/dist/index.js";
 import { SmtpMailer } from "../packages/mailer/dist/index.js";
 import { StripePaymentProvider } from "../packages/payments/dist/index.js";
 import { calculateCreditCost, checkPromptSafety } from "../packages/shared/dist/index.js";
+
+const onePixelPngBase64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 
 test("credit cost increases with quantity and quality", () => {
   const standardOne = calculateCreditCost({
     style: "product_photography",
     quality: "standard",
     quantity: 1,
-    aspectRatio: "1:1"
+    aspectRatio: "1:1",
+    model: "mock"
   });
   const highTwo = calculateCreditCost({
     style: "product_photography",
     quality: "high",
     quantity: 2,
-    aspectRatio: "1:1"
+    aspectRatio: "1:1",
+    model: "mock"
   });
 
   assert.equal(standardOne, 7);
   assert.ok(highTwo > standardOne * 2);
+});
+
+test("provider quote resolves active mock provider model and charges by quality, size, quantity", () => {
+  const previous = snapshotEnv(["AI_PROVIDER"]);
+  try {
+    process.env.AI_PROVIDER = "mock";
+    const resolvedModel = resolveProviderModel("mock", "mock");
+    const quote = quoteImageGeneration({
+      style: "illustration",
+      quality: "high",
+      quantity: 3,
+      aspectRatio: "16:9",
+      model: resolvedModel
+    });
+
+    assert.equal(resolvedModel, "mock");
+    assert.equal(quote.provider, "mock");
+    assert.equal(quote.model, "mock");
+    assert.equal(quote.size, "1536x1024");
+    assert.equal(quote.creditCost, 14);
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
+test("mock provider exposes content blocked and empty result contract errors", async () => {
+  const provider = new MockImageGenerationProvider();
+  await assert.rejects(
+    () =>
+      provider.generateImage({
+        taskId: "task-blocked",
+        prompt: "blocked concept frame",
+        style: "poster",
+        aspectRatio: "1:1",
+        width: 1024,
+        height: 1024,
+        quantity: 1,
+        quality: "draft"
+      }),
+    (error) => {
+      assert.equal(isProviderError(error), true);
+      assert.equal(error.code, "PROVIDER_CONTENT_BLOCKED");
+      return true;
+    }
+  );
+
+  await assert.rejects(
+    () =>
+      provider.generateImage({
+        taskId: "task-empty",
+        prompt: "empty result request",
+        style: "poster",
+        aspectRatio: "1:1",
+        width: 1024,
+        height: 1024,
+        quantity: 1,
+        quality: "draft"
+      }),
+    (error) => {
+      assert.equal(isProviderError(error), true);
+      assert.equal(error.code, "PROVIDER_EMPTY_RESULT");
+      return true;
+    }
+  );
+});
+
+test("openai provider retries once on rate limit and returns images", async () => {
+  const server = createFakeOpenAiServer([
+    {
+      status: 429,
+      body: {
+        error: {
+          message: "Slow down",
+          code: "rate_limit_exceeded"
+        }
+      }
+    },
+    {
+      status: 200,
+      body: {
+        id: "req_retry_success",
+        data: [{ b64_json: onePixelPngBase64 }]
+      }
+    }
+  ]);
+  const previous = snapshotEnv([
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_TIMEOUT_MS",
+    "OPENAI_MAX_RETRIES",
+    "OPENAI_RETRY_BASE_MS",
+    "OPENAI_IMAGE_MODEL"
+  ]);
+
+  await server.listen();
+  try {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${server.port}`;
+    process.env.OPENAI_TIMEOUT_MS = "500";
+    process.env.OPENAI_MAX_RETRIES = "2";
+    process.env.OPENAI_RETRY_BASE_MS = "10";
+    process.env.OPENAI_IMAGE_MODEL = "gpt-image-2";
+
+    const provider = new OpenAiImageGenerationProvider();
+    const result = await provider.generateImage({
+      taskId: "task-openai-retry",
+      prompt: "A clean product visualization",
+      style: "product_photography",
+      aspectRatio: "1:1",
+      width: 1024,
+      height: 1024,
+      quantity: 1,
+      quality: "standard"
+    });
+
+    assert.equal(server.requests.length, 2);
+    assert.equal(result.images.length, 1);
+    assert.equal(result.providerRequestId, "req_retry_success");
+    assert.match(server.requests[0].authorization ?? "", /^Bearer sk-test$/);
+  } finally {
+    restoreEnv(previous);
+    await server.close();
+  }
+});
+
+test("openai provider maps timeout, moderation, auth and empty result errors", async () => {
+  const previous = snapshotEnv([
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_TIMEOUT_MS",
+    "OPENAI_MAX_RETRIES",
+    "OPENAI_RETRY_BASE_MS",
+    "OPENAI_IMAGE_MODEL"
+  ]);
+
+  process.env.OPENAI_API_KEY = "sk-test";
+  process.env.OPENAI_TIMEOUT_MS = "50";
+  process.env.OPENAI_MAX_RETRIES = "0";
+  process.env.OPENAI_RETRY_BASE_MS = "10";
+  process.env.OPENAI_IMAGE_MODEL = "gpt-image-2";
+
+  const timeoutServer = createFakeOpenAiServer([
+    {
+      status: 200,
+      body: {
+        id: "late_response",
+        data: [{ b64_json: onePixelPngBase64 }]
+      },
+      delayMs: 120
+    }
+  ]);
+  const moderationServer = createFakeOpenAiServer([
+    {
+      status: 400,
+      body: {
+        error: {
+          message: "Blocked by policy",
+          code: "content_policy_violation",
+          type: "content_policy_error"
+        }
+      }
+    }
+  ]);
+  const authServer = createFakeOpenAiServer([
+    {
+      status: 401,
+      body: {
+        error: {
+          message: "Bad key"
+        }
+      }
+    }
+  ]);
+  const emptyServer = createFakeOpenAiServer([
+    {
+      status: 200,
+      body: {
+        id: "empty_result",
+        data: [{}]
+      }
+    }
+  ]);
+
+  await timeoutServer.listen();
+  await moderationServer.listen();
+  await authServer.listen();
+  await emptyServer.listen();
+
+  try {
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${timeoutServer.port}`;
+    await assert.rejects(
+      () => new OpenAiImageGenerationProvider().generateImage(fakeOpenAiInput("timeout")),
+      (error) => {
+        assert.equal(error instanceof ProviderError, true);
+        assert.equal(error.code, "PROVIDER_TIMEOUT");
+        return true;
+      }
+    );
+
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${moderationServer.port}`;
+    await assert.rejects(
+      () => new OpenAiImageGenerationProvider().generateImage(fakeOpenAiInput("moderation")),
+      (error) => {
+        assert.equal(error instanceof ProviderError, true);
+        assert.equal(error.code, "PROVIDER_CONTENT_BLOCKED");
+        return true;
+      }
+    );
+
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${authServer.port}`;
+    await assert.rejects(
+      () => new OpenAiImageGenerationProvider().generateImage(fakeOpenAiInput("auth")),
+      (error) => {
+        assert.equal(error instanceof ProviderError, true);
+        assert.equal(error.code, "PROVIDER_AUTH_FAILED");
+        return true;
+      }
+    );
+
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${emptyServer.port}`;
+    await assert.rejects(
+      () => new OpenAiImageGenerationProvider().generateImage(fakeOpenAiInput("empty")),
+      (error) => {
+        assert.equal(error instanceof ProviderError, true);
+        assert.equal(error.code, "PROVIDER_EMPTY_RESULT");
+        return true;
+      }
+    );
+  } finally {
+    restoreEnv(previous);
+    await timeoutServer.close();
+    await moderationServer.close();
+    await authServer.close();
+    await emptyServer.close();
+  }
+});
+
+test("openai provider rejects url-only image responses", async () => {
+  const server = createFakeOpenAiServer([
+    {
+      status: 200,
+      body: {
+        id: "url_only_response",
+        data: [{ url: "https://cdn.example/generated.png" }]
+      }
+    }
+  ]);
+  const previous = snapshotEnv([
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_TIMEOUT_MS",
+    "OPENAI_MAX_RETRIES",
+    "OPENAI_RETRY_BASE_MS",
+    "OPENAI_IMAGE_MODEL"
+  ]);
+
+  await server.listen();
+  try {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${server.port}`;
+    process.env.OPENAI_TIMEOUT_MS = "200";
+    process.env.OPENAI_MAX_RETRIES = "0";
+    process.env.OPENAI_RETRY_BASE_MS = "10";
+    process.env.OPENAI_IMAGE_MODEL = "gpt-image-2";
+
+    await assert.rejects(
+      () => new OpenAiImageGenerationProvider().generateImage(fakeOpenAiInput("url-only")),
+      (error) => {
+        assert.equal(error instanceof ProviderError, true);
+        assert.equal(error.code, "PROVIDER_BAD_RESPONSE");
+        assert.match(error.message, /必须返回 b64_json/);
+        return true;
+      }
+    );
+  } finally {
+    restoreEnv(previous);
+    await server.close();
+  }
 });
 
 test("local prompt safety blocks configured terms", () => {
@@ -356,4 +648,80 @@ function createFakeSmtpServer() {
       });
     }
   };
+}
+
+function fakeOpenAiInput(taskId) {
+  return {
+    taskId,
+    prompt: "A premium studio portrait",
+    style: "realistic",
+    aspectRatio: "1:1",
+    width: 1024,
+    height: 1024,
+    quantity: 1,
+    quality: "standard"
+  };
+}
+
+function createFakeOpenAiServer(responses) {
+  const requests = [];
+  let port = 0;
+  const server = createServer((request, response) => {
+    const next = responses.shift();
+    assert.ok(next, "Unexpected OpenAI request");
+    const chunks = [];
+    request.on("data", (chunk) => {
+      chunks.push(chunk);
+    });
+    request.on("end", async () => {
+      requests.push({
+        method: request.method,
+        path: request.url,
+        authorization: request.headers.authorization,
+        body: Buffer.concat(chunks).toString("utf8")
+      });
+      if (next.delayMs) {
+        await sleep(next.delayMs);
+      }
+      response.statusCode = next.status;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(next.body));
+    });
+  });
+
+  return {
+    requests,
+    get port() {
+      return port;
+    },
+    listen() {
+      return new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          const address = server.address();
+          assert.ok(address && typeof address === "object");
+          port = address.port;
+          resolve();
+        });
+      });
+    },
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

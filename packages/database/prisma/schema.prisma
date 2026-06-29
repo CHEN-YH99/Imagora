@@ -236,6 +236,7 @@ model GeneratedImage {
   user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   storageKey   String            @map("storage_key")
   thumbnailKey String            @map("thumbnail_key")
+  thumbnailUrl String?           @map("thumbnail_url")
   publicUrl    String?           @map("public_url")
   width        Int
   height       Int
