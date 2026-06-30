@@ -20,9 +20,7 @@ const qualityOptions = [
   { value: "high", label: "4K", desc: "最高画质，耗时较长" }
 ];
 
-const modelOptions = [
-  { value: "gpt-image-2", label: "GPT Image 2" }
-];
+const modelOptions = [{ value: "gpt-image-2", label: "GPT Image 2" }];
 
 const aspectRatioOptions = [
   { value: "1:1", label: "1:1 — 方形" },

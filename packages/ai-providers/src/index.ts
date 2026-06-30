@@ -371,7 +371,10 @@ export function listSupportedModels(name?: string): SupportedImageModel[] {
   return SUPPORTED_IMAGE_MODELS.filter((model) => !provider || providerModelConfigs[model].provider === provider);
 }
 
-export function resolveProviderModel(inputModel?: ModelId, providerName = process.env.AI_PROVIDER ?? "mock"): SupportedImageModel {
+export function resolveProviderModel(
+  inputModel?: ModelId,
+  providerName = process.env.AI_PROVIDER ?? "mock"
+): SupportedImageModel {
   const provider = normalizeProviderName(providerName);
   const requestedModel =
     inputModel && SUPPORTED_IMAGE_MODELS.includes(inputModel as SupportedImageModel)
@@ -402,7 +405,8 @@ export function quoteImageGeneration(input: QuoteImageGenerationInput): ImageGen
   const dimension = aspectRatioDimensions[input.aspectRatio];
   const size = openAiSize(dimension.width, dimension.height);
   const quality = openAiQuality(input.quality);
-  const modelUnitCost = config.quantityMultiplier * config.qualityMultiplier[input.quality] * config.sizeMultiplier[size];
+  const modelUnitCost =
+    config.quantityMultiplier * config.qualityMultiplier[input.quality] * config.sizeMultiplier[size];
   return {
     provider,
     model,

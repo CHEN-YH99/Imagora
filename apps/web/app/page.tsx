@@ -39,9 +39,7 @@ type StyleOption = {
 
 type Quality = "1k" | "2k" | "4k";
 
-const modelOptions = [
-  { value: "gpt-image-2", label: "GPT Image 2" }
-];
+const modelOptions = [{ value: "gpt-image-2", label: "GPT Image 2" }];
 
 const aspectRatioOptions = [
   { value: "1:1", label: "1:1  方形" },

@@ -80,7 +80,14 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
 
     const blockedImage = await firstBlockedGeneratedImage(result.images);
     if (blockedImage) {
-      recordSafetyEvent(data, task, blockedImage.index, blockedImage.reasonCode, blockedImage.reasonMessage, blockedImage.provider);
+      recordSafetyEvent(
+        data,
+        task,
+        blockedImage.index,
+        blockedImage.reasonCode,
+        blockedImage.reasonMessage,
+        blockedImage.provider
+      );
       failTask(data, task, blockedImage.reasonCode, blockedImage.reasonMessage, "BLOCKED");
       return;
     }

@@ -575,7 +575,9 @@ app.post("/api/generation/tasks", async (request, reply) => {
   assertFeatureEnabled("generation");
   const { user } = await requireAuth(request);
   const input = generationInputSchema.parse(request.body);
-  const { providerMetadata: resolvedProviderMetadata, model: resolvedModel } = resolveGenerationProviderSelection(input.model);
+  const { providerMetadata: resolvedProviderMetadata, model: resolvedModel } = resolveGenerationProviderSelection(
+    input.model
+  );
   const cost = quote({ ...input, model: resolvedModel });
   const result = await store.update(async (data) => {
     const duplicate = data.generationTasks.find(
@@ -902,7 +904,14 @@ app.post("/api/orders", async (request, reply) => {
         providerEventId: `checkout:${payment.paymentIntentId}`,
         orderId: order.id,
         eventType: "checkout.created",
-        payload: { checkoutUrl: payment.checkoutUrl, paymentIntentId: payment.paymentIntentId },
+        payload: {
+          checkoutUrl: payment.checkoutUrl,
+          paymentIntentId: payment.paymentIntentId,
+          orderId: order.id,
+          orderNo: order.orderNo,
+          amountCents: order.amountCents,
+          currency: order.currency
+        },
         processedAt: now,
         createdAt: now
       });
@@ -917,7 +926,11 @@ app.get("/api/orders", async (request) => {
   const { user } = await requireAuth(request);
   return store.update((data) => {
     const maintenance = runOrderMaintenance(data);
-    const orders = data.orders.filter((order) => order.userId === user.id).sort(descCreated);
+    const query = optionalPaginationSchema.parse(request.query);
+    const orders = data.orders
+      .filter((order) => order.userId === user.id)
+      .sort(descCreated)
+      .slice(0, query.limit ?? Number.POSITIVE_INFINITY);
     return envelope(request, { orders, maintenance });
   });
 });
@@ -935,24 +948,47 @@ app.get("/api/orders/:orderId", async (request) => {
 
 app.post("/api/orders/:orderId/pay", async (request) => {
   assertFeatureEnabled("payments");
-  assertMockPaymentAllowed();
   const { user } = await requireAuth(request);
   const { orderId } = orderParamSchema.parse(request.params);
-  return store.update((data) => {
+  return store.update(async (data) => {
     runOrderMaintenance(data);
     const order = mustFindOwnOrder(data, user.id, orderId);
-    if (order.status !== "PENDING" && order.status !== "PAID") {
+    if (order.status === "PAID") {
+      return envelope(request, {
+        order,
+        balanceAfter: mustFindCreditAccount(data, user.id).balance,
+        checkoutUrl: null
+      });
+    }
+    if (order.status !== "PENDING") {
       throw new AppError("ORDER_NOT_PAYABLE", "Order is not payable", 400);
     }
+    if (order.paymentProvider !== paymentProvider.name) {
+      throw new AppError("VALIDATION_ERROR", "Payment provider is not enabled", 400);
+    }
+    if (order.paymentProvider !== "mock") {
+      const checkoutUrl = await ensureCheckoutUrl(data, order);
+      return envelope(request, { order, checkoutUrl });
+    }
+    assertMockPaymentAllowed();
     const result = applyPaymentSucceeded(data, {
       provider: order.paymentProvider,
       providerEventId: `mock:${order.id}:paid`,
       orderId: order.id,
+      orderNo: order.orderNo,
       eventType: "payment.succeeded",
       amountCents: order.amountCents,
-      payload: { mock: true, amountCents: order.amountCents }
+      currency: order.currency,
+      paymentIntentId: order.paymentIntentId,
+      payload: {
+        mock: true,
+        orderId: order.id,
+        orderNo: order.orderNo,
+        amountCents: order.amountCents,
+        currency: order.currency
+      }
     });
-    return envelope(request, { order: result.order, balanceAfter: result.balanceAfter });
+    return envelope(request, { order: result.order, balanceAfter: result.balanceAfter, checkoutUrl: null });
   });
 });
 
@@ -981,8 +1017,11 @@ app.post("/api/payments/webhooks/:provider", async (request) => {
       provider: event.provider,
       providerEventId: event.providerEventId,
       orderId: event.orderId,
+      orderNo: event.orderNo,
       eventType: event.eventType,
       amountCents: event.amountCents,
+      currency: event.currency,
+      paymentIntentId: event.paymentIntentId,
       payload: payloadRecord(request.body)
     });
     return envelope(request, result);
@@ -1510,6 +1549,10 @@ const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30)
 });
 
+const optionalPaginationSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional()
+});
+
 const userStatusSchema = z.enum(["ACTIVE", "SUSPENDED", "DELETED"]);
 const userRoleSchema = z.enum(["USER", "ADMIN"]);
 const taskStatusSchema = z.enum(["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"]);
@@ -1745,7 +1788,10 @@ function quote(input: {
   }).creditCost;
 }
 
-function resolveGenerationProviderSelection(model?: ModelId): { providerMetadata: ReturnType<typeof getActiveProviderMetadata>; model: ModelId } {
+function resolveGenerationProviderSelection(model?: ModelId): {
+  providerMetadata: ReturnType<typeof getActiveProviderMetadata>;
+  model: ModelId;
+} {
   const requestedModel = parseGenerationModel(model);
   const providerMetadata = getActiveProviderMetadata();
   const fallbackModel: ModelId = providerMetadata.name === "mock" ? "mock" : "gpt-image-2";
@@ -1847,6 +1893,51 @@ function mustFindOrder(data: StoreData, orderId: string): Order {
   return order;
 }
 
+async function ensureCheckoutUrl(data: StoreData, order: Order): Promise<string> {
+  const existingCheckoutUrl = findCheckoutUrl(data, order);
+  if (existingCheckoutUrl) {
+    return existingCheckoutUrl;
+  }
+  const payment = await paymentProvider.createPayment({
+    orderId: order.id,
+    orderNo: order.orderNo,
+    amountCents: order.amountCents,
+    currency: order.currency
+  });
+  const now = new Date().toISOString();
+  order.paymentIntentId = payment.paymentIntentId;
+  order.updatedAt = now;
+  data.paymentEvents.push({
+    id: randomUUID(),
+    provider: payment.provider,
+    providerEventId: `checkout:${payment.paymentIntentId}`,
+    orderId: order.id,
+    eventType: "checkout.created",
+    payload: {
+      checkoutUrl: payment.checkoutUrl,
+      paymentIntentId: payment.paymentIntentId,
+      orderId: order.id,
+      orderNo: order.orderNo,
+      amountCents: order.amountCents,
+      currency: order.currency
+    },
+    processedAt: now,
+    createdAt: now
+  });
+  return payment.checkoutUrl;
+}
+
+function findCheckoutUrl(data: StoreData, order: Order): string | null {
+  const event = data.paymentEvents
+    .filter(
+      (item) =>
+        item.provider === order.paymentProvider && item.orderId === order.id && item.eventType === "checkout.created"
+    )
+    .sort(descCreated)[0];
+  const checkoutUrl = event?.payload.checkoutUrl;
+  return typeof checkoutUrl === "string" && checkoutUrl.length > 0 ? checkoutUrl : null;
+}
+
 function runOrderMaintenance(data: StoreData): OrderMaintenanceResult {
   const now = new Date().toISOString();
   const closedExpiredOrders = closeExpiredPendingOrders(data, now);
@@ -1885,11 +1976,16 @@ function reconcileSucceededPaymentEvents(data: StoreData, now: string): number {
     if (!order || order.status === "PAID") {
       continue;
     }
-    if (paymentEventAmount(event.payload) !== order.amountCents) {
+    if (
+      paymentEventAmount(event.payload) !== order.amountCents ||
+      paymentEventOrderNo(event.payload) !== order.orderNo ||
+      paymentEventCurrency(event.payload) !== normalizeCurrency(order.currency)
+    ) {
       continue;
     }
     order.status = "PAID";
-    order.paymentIntentId = order.paymentIntentId ?? `${event.provider}_pi_${order.id}`;
+    order.paymentIntentId =
+      order.paymentIntentId ?? paymentEventIntentId(event.payload) ?? `${event.provider}_pi_${order.id}`;
     order.paidAt = order.paidAt ?? event.processedAt;
     order.updatedAt = now;
     reconciled += 1;
@@ -1922,14 +2018,56 @@ function paymentEventAmount(payload: Record<string, unknown>): number | null {
   return typeof amount === "number" && Number.isInteger(amount) ? amount : null;
 }
 
+function paymentEventOrderNo(payload: Record<string, unknown>): string | null {
+  const orderNo = payload.orderNo;
+  return typeof orderNo === "string" && orderNo.length > 0 ? orderNo : null;
+}
+
+function paymentEventCurrency(payload: Record<string, unknown>): string | null {
+  const currency = payload.currency;
+  return typeof currency === "string" && currency.length > 0 ? normalizeCurrency(currency) : null;
+}
+
+function paymentEventIntentId(payload: Record<string, unknown>): string | null {
+  const paymentIntentId = payload.paymentIntentId;
+  return typeof paymentIntentId === "string" && paymentIntentId.length > 0 ? paymentIntentId : null;
+}
+
+function normalizeCurrency(currency: string): string {
+  return currency.trim().toUpperCase();
+}
+
+function normalizedPaymentPayload(input: {
+  providerEventId: string;
+  orderId: string;
+  orderNo: string;
+  amountCents: number;
+  currency: string;
+  paymentIntentId: string | null;
+  payload: Record<string, unknown>;
+}): Record<string, unknown> {
+  return {
+    ...input.payload,
+    providerEventId: input.providerEventId,
+    orderId: input.orderId,
+    orderNo: input.orderNo,
+    amountCents: input.amountCents,
+    currency: normalizeCurrency(input.currency),
+    paymentIntentId: input.paymentIntentId
+  };
+}
+
 function applyPaymentSucceeded(
   data: StoreData,
   input: {
     provider: string;
     providerEventId: string;
     orderId: string;
+    orderNo: string;
     eventType: string;
     amountCents: number;
+    currency: string;
+    paymentIntentId: string | null;
     payload: Record<string, unknown>;
   }
 ): { order: Order; balanceAfter: number; credited: boolean; duplicateEvent: boolean; reason: string | null } {
@@ -1964,10 +2102,30 @@ function applyPaymentSucceeded(
     providerEventId: input.providerEventId,
     orderId: order.id,
     eventType: input.eventType,
-    payload: input.payload,
+    payload: normalizedPaymentPayload(input),
     processedAt: now,
     createdAt: now
   });
+
+  if (input.orderNo !== order.orderNo) {
+    return {
+      order,
+      balanceAfter: mustFindCreditAccount(data, order.userId).balance,
+      credited: false,
+      duplicateEvent: false,
+      reason: "ORDER_NO_MISMATCH"
+    };
+  }
+
+  if (normalizeCurrency(input.currency) !== normalizeCurrency(order.currency)) {
+    return {
+      order,
+      balanceAfter: mustFindCreditAccount(data, order.userId).balance,
+      credited: false,
+      duplicateEvent: false,
+      reason: "CURRENCY_MISMATCH"
+    };
+  }
 
   if (input.amountCents !== order.amountCents) {
     return {
@@ -2000,7 +2158,7 @@ function applyPaymentSucceeded(
   }
 
   order.status = "PAID";
-  order.paymentIntentId = order.paymentIntentId ?? `${input.provider}_pi_${order.id}`;
+  order.paymentIntentId = order.paymentIntentId ?? input.paymentIntentId ?? `${input.provider}_pi_${order.id}`;
   order.paidAt = now;
   order.updatedAt = now;
   grantCredits(
@@ -3019,7 +3177,12 @@ function operationalAlertsSnapshot(data: StoreData, http: ReturnType<typeof http
       return false;
     }
     const order = data.orders.find((item) => item.id === event.orderId);
-    return Boolean(order && paymentEventAmount(event.payload) !== order.amountCents);
+    return Boolean(
+      order &&
+      (paymentEventAmount(event.payload) !== order.amountCents ||
+        paymentEventOrderNo(event.payload) !== order.orderNo ||
+        paymentEventCurrency(event.payload) !== normalizeCurrency(order.currency))
+    );
   }).length;
   const amountMismatchThreshold = envNumber("ALERT_PAYMENT_AMOUNT_MISMATCH_MAX", 0);
   if (amountMismatchEvents > amountMismatchThreshold) {

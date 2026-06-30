@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Edit2, MailCheck, Save, Send, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Edit2, MailCheck, Save, Send, X } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import {
   apiFetch,
@@ -23,6 +23,7 @@ export default function AccountPage() {
   const [entries, setEntries] = useState<CreditLedgerEntry[]>([]);
   const [recentOrders, setRecentOrders] = useState<Order[]>([]);
   const [message, setMessage] = useState("");
+  const [messageTone, setMessageTone] = useState<"success" | "danger">("danger");
   const [editingNickname, setEditingNickname] = useState(false);
   const [nicknameDraft, setNicknameDraft] = useState("");
   const [savingNickname, setSavingNickname] = useState(false);
@@ -39,13 +40,14 @@ export default function AccountPage() {
         apiFetch<{ user: User }>("/api/users/me"),
         apiFetch<{ account: CreditAccount }>("/api/users/me/credits"),
         apiFetch<{ entries: CreditLedgerEntry[] }>("/api/users/me/credit-ledger?limit=50"),
-        apiFetch<{ orders: Order[] }>("/api/orders?limit=5")
+        apiFetch<{ orders: Order[] }>("/api/orders?limit=12")
       ]);
       setUser(userResult.user);
       setAccount(accountResult.account);
       setEntries(ledgerResult.entries);
       setRecentOrders(ordersResult.orders);
     } catch (error) {
+      setMessageTone("danger");
       setMessage(error instanceof Error ? error.message : "账户信息加载失败，请稍后重试。");
     }
   }
@@ -68,8 +70,10 @@ export default function AccountPage() {
         method: "POST",
         body: {}
       });
+      setMessageTone("success");
       setMessage("验证邮件已重新发送，请前往邮箱完成验证。");
     } catch (error) {
+      setMessageTone("danger");
       setMessage(error instanceof Error ? error.message : "验证邮件发送失败，请稍后重试。");
     } finally {
       setResendingVerification(false);
@@ -79,6 +83,7 @@ export default function AccountPage() {
   async function saveNickname() {
     const trimmed = nicknameDraft.trim();
     if (!trimmed || trimmed.length > 80) {
+      setMessageTone("danger");
       setMessage("昵称长度须在 1 到 80 个字符之间。");
       return;
     }
@@ -92,22 +97,37 @@ export default function AccountPage() {
       setUser(result.user);
       setEditingNickname(false);
       setNicknameDraft("");
+      setMessageTone("success");
+      setMessage("昵称已更新。");
     } catch (error) {
+      setMessageTone("danger");
       setMessage(error instanceof Error ? error.message : "昵称保存失败，请稍后重试。");
     } finally {
       setSavingNickname(false);
     }
   }
 
+  const latestGrantEntry = entries.find((entry) => entry.type === "GRANT" && entry.amount > 0);
+  const exceptionalOrders = recentOrders.filter((order) =>
+    ["PENDING", "CLOSED", "CANCELED", "REFUNDED"].includes(order.status)
+  );
+  const visibleRecentOrders = recentOrders.slice(0, 5);
+  const paidOrders = recentOrders.filter((order) => order.status === "PAID");
+
   return (
     <AppFrame title="账户中心" subtitle="查看用户资料、积分余额和积分流水，确保每一次发放、消耗和退回都有记录。">
       {message ? (
         <div className="mb-5">
-          <InlineNotice tone="danger">
-            {message}{" "}
-            <button className="underline underline-offset-4" onClick={() => void loadAll()} type="button">
-              重新加载账户
-            </button>
+          <InlineNotice tone={messageTone}>
+            {message}
+            {messageTone === "danger" ? (
+              <>
+                {" "}
+                <button className="underline underline-offset-4" onClick={() => void loadAll()} type="button">
+                  重新加载账户
+                </button>
+              </>
+            ) : null}
           </InlineNotice>
         </div>
       ) : null}
@@ -216,7 +236,79 @@ export default function AccountPage() {
             </div>
           </Panel>
 
-          {recentOrders.length > 0 ? (
+          <Panel>
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="size-5 text-mint" aria-hidden="true" />
+              <h2 className="text-lg font-semibold">权益到账</h2>
+            </div>
+            {latestGrantEntry ? (
+              <div className="mt-4 rounded-2xl border border-mint/20 bg-mint/8 p-4">
+                <p className="text-sm text-white/76">{formatLedgerRemark(latestGrantEntry.remark)}</p>
+                <p className="mt-2 text-2xl font-semibold text-mint">+{latestGrantEntry.amount} 积分</p>
+                <p className="mt-2 text-xs text-white/46">
+                  {new Date(latestGrantEntry.createdAt).toLocaleString("zh-CN")} · 到账后余额{" "}
+                  {formatCredits(latestGrantEntry.balanceAfter)}
+                </p>
+              </div>
+            ) : (
+              <EmptyState
+                title="暂未检测到到账权益"
+                description="完成支付后，到账积分会优先显示在这里，方便快速确认充值结果。"
+                actionLabel="查看积分套餐"
+                actionHref="/pricing"
+              />
+            )}
+            {paidOrders.length > 0 ? (
+              <p className="mt-4 text-sm text-white/56">最近已完成 {paidOrders.length} 笔充值，到账后会自动写入积分流水。</p>
+            ) : null}
+          </Panel>
+
+          <Panel>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="size-5 text-ember" aria-hidden="true" />
+                <h2 className="text-lg font-semibold">异常订单</h2>
+              </div>
+              <Link className="focus-ring text-sm text-white/50 transition-colors hover:text-white" href="/orders">
+                去订单页处理
+              </Link>
+            </div>
+            {exceptionalOrders.length > 0 ? (
+              <div className="mt-4 space-y-3">
+                {exceptionalOrders.map((order) => (
+                  <article key={order.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-medium">{order.orderNo}</p>
+                        <p className="mt-1 text-xs text-white/46">
+                          {formatMoney(order.amountCents, order.currency)} · {formatPaymentProvider(order.paymentProvider)}
+                        </p>
+                      </div>
+                      <StatusPill>{order.status}</StatusPill>
+                    </div>
+                    <p className="mt-3 text-sm text-white/62">
+                      {order.status === "PENDING"
+                        ? "订单仍待支付，若已完成支付回跳但未到账，请先去订单页刷新状态。"
+                        : order.status === "CLOSED"
+                          ? "订单已超时关闭，本次支付未完成，需要重新创建订单。"
+                          : order.status === "CANCELED"
+                            ? "订单已取消，不会再自动发放积分。"
+                            : "订单已退款，请核对余额和退款记录。"}
+                    </p>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                title="近期没有异常订单"
+                description="待支付、已关闭、已取消和已退款订单会在这里集中提示，省得你翻半天。"
+                actionLabel="查看全部订单"
+                actionHref="/orders"
+              />
+            )}
+          </Panel>
+
+          {visibleRecentOrders.length > 0 ? (
             <Panel>
               <div className="mb-4 flex items-center justify-between gap-3">
                 <h2 className="text-lg font-semibold">最近订单</h2>
@@ -225,7 +317,7 @@ export default function AccountPage() {
                 </Link>
               </div>
               <div className="space-y-3">
-                {recentOrders.map((order) => (
+                {visibleRecentOrders.map((order) => (
                   <article
                     key={order.id}
                     className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-black/20 p-3"

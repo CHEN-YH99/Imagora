@@ -17,8 +17,11 @@ export interface VerifiedPaymentEvent {
   provider: string;
   providerEventId: string;
   orderId: string;
+  orderNo: string;
   eventType: "payment.succeeded";
   amountCents: number;
+  currency: string;
+  paymentIntentId: string | null;
 }
 
 export interface PaymentProvider {
@@ -47,8 +50,11 @@ export class MockPaymentProvider implements PaymentProvider {
       provider: this.name,
       providerEventId: parsedPayload.providerEventId,
       orderId: parsedPayload.orderId,
+      orderNo: parsedPayload.orderNo,
       eventType: "payment.succeeded",
-      amountCents: parsedPayload.amountCents
+      amountCents: parsedPayload.amountCents,
+      currency: parsedPayload.currency.toUpperCase(),
+      paymentIntentId: `mock_pi_${parsedPayload.orderId}`
     };
   }
 }
@@ -60,20 +66,24 @@ export class StripePaymentProvider implements PaymentProvider {
   private readonly successUrl = process.env.STRIPE_SUCCESS_URL ?? "http://127.0.0.1:3100/orders?paid=1";
   private readonly cancelUrl = process.env.STRIPE_CANCEL_URL ?? "http://127.0.0.1:3100/pricing?canceled=1";
   private readonly timeoutMs = envNumber("STRIPE_TIMEOUT_MS", 15_000);
+  private readonly apiBaseUrl = (process.env.STRIPE_API_BASE_URL ?? "https://api.stripe.com").replace(/\/$/, "");
 
   async createPayment(input: CreatePaymentInput): Promise<CreatePaymentResult> {
     const body = new URLSearchParams({
       mode: "payment",
       success_url: this.successUrl,
       cancel_url: this.cancelUrl,
+      client_reference_id: input.orderId,
       "line_items[0][quantity]": "1",
       "line_items[0][price_data][currency]": input.currency.toLowerCase(),
       "line_items[0][price_data][unit_amount]": String(input.amountCents),
       "line_items[0][price_data][product_data][name]": `Imagora credits ${input.orderNo}`,
       "metadata[orderId]": input.orderId,
-      "metadata[orderNo]": input.orderNo
+      "metadata[orderNo]": input.orderNo,
+      "payment_intent_data[metadata][orderId]": input.orderId,
+      "payment_intent_data[metadata][orderNo]": input.orderNo
     });
-    const response = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+    const response = await fetch(`${this.apiBaseUrl}/v1/checkout/sessions`, {
       method: "POST",
       signal: AbortSignal.timeout(this.timeoutMs),
       headers: {
@@ -108,16 +118,22 @@ export class StripePaymentProvider implements PaymentProvider {
     }
     const object = event.data?.object ?? {};
     const orderId = stringValue(object.metadata?.orderId) ?? stringValue(object.client_reference_id);
+    const orderNo = stringValue(object.metadata?.orderNo);
     const amountCents = numberValue(object.amount_total) ?? numberValue(object.amount_received);
-    if (!event.id || !orderId || amountCents === null) {
-      throw new Error("Stripe webhook payload is missing order id or amount");
+    const currency = stringValue(object.currency)?.toUpperCase();
+    const paymentIntentId = stringValue(object.payment_intent) ?? stringValue(object.id);
+    if (!event.id || !orderId || !orderNo || amountCents === null || !currency) {
+      throw new Error("Stripe webhook payload is missing order identity, amount, or currency");
     }
     return {
       provider: this.name,
       providerEventId: event.id,
       orderId,
+      orderNo,
       eventType: "payment.succeeded",
-      amountCents
+      amountCents,
+      currency,
+      paymentIntentId
     };
   }
 }
@@ -232,7 +248,10 @@ interface StripeEvent {
       amount_received?: unknown;
       amount_total?: unknown;
       client_reference_id?: unknown;
+      currency?: unknown;
+      id?: unknown;
       metadata?: Record<string, unknown>;
+      payment_intent?: unknown;
     };
   };
 }
@@ -295,7 +314,13 @@ function envNumber(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-function isMockWebhook(value: unknown): value is { providerEventId: string; orderId: string; amountCents: number } {
+function isMockWebhook(value: unknown): value is {
+  providerEventId: string;
+  orderId: string;
+  orderNo: string;
+  amountCents: number;
+  currency: string;
+} {
   if (typeof value !== "object" || value === null) {
     return false;
   }
@@ -303,7 +328,9 @@ function isMockWebhook(value: unknown): value is { providerEventId: string; orde
   return (
     typeof record.providerEventId === "string" &&
     typeof record.orderId === "string" &&
-    typeof record.amountCents === "number"
+    typeof record.orderNo === "string" &&
+    typeof record.amountCents === "number" &&
+    typeof record.currency === "string"
   );
 }
 

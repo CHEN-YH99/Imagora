@@ -20,7 +20,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "smoke": "node infra/scripts/smoke-test.mjs",
+    "smoke": "node --env-file=.env infra/scripts/smoke-test.mjs",
     "load:smoke": "node infra/scripts/load-smoke.mjs",
     "backup:json": "node infra/scripts/backup-json-store.mjs",
     "restore:json": "node infra/scripts/restore-json-store.mjs",

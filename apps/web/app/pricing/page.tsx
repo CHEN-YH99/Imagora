@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
 import { Check, Coins } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel } from "../../components/AppFrame";
 import {
@@ -16,10 +17,41 @@ import {
 const paymentProvider = process.env.NEXT_PUBLIC_PAYMENT_PROVIDER ?? "mock";
 
 export default function PricingPage() {
+  return (
+    <Suspense
+      fallback={
+        <AppFrame title="积分套餐" subtitle="按创作规模选择积分包，套餐价格、积分额度和有效期以服务端配置为准。">
+          <Panel>
+            <p className="text-sm text-white/60">套餐加载中...</p>
+          </Panel>
+        </AppFrame>
+      }
+    >
+      <PricingView />
+    </Suspense>
+  );
+}
+
+function PricingView() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [plans, setPlans] = useState<Plan[]>([]);
   const [message, setMessage] = useState("");
+  const [returnNotice, setReturnNotice] = useState<{ tone: "danger" | "info"; text: string } | null>(null);
 
   useEffect(() => {
+    const canceled = searchParams.get("canceled");
+    if (canceled === "1") {
+      setReturnNotice({
+        tone: "danger",
+        text: "你在支付页面取消了支付，订单仍保留为待支付，可在订单页继续完成支付或重新选择套餐。"
+      });
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("canceled");
+        router.replace(`${url.pathname}${url.search}`);
+      }
+    }
     void loadPlans();
   }, []);
 
@@ -55,6 +87,11 @@ export default function PricingPage() {
 
   return (
     <AppFrame title="积分套餐" subtitle="按创作规模选择积分包，套餐价格、积分额度和有效期以服务端配置为准。">
+      {returnNotice ? (
+        <div className="mb-5">
+          <InlineNotice tone={returnNotice.tone}>{returnNotice.text}</InlineNotice>
+        </div>
+      ) : null}
       {message ? (
         <div className="mb-5">
           <InlineNotice tone={message.includes("失败") ? "danger" : "success"}>{message}</InlineNotice>

@@ -1,18 +1,63 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { apiFetch, formatMoney, formatPaymentProvider, type Order } from "../../lib/api";
 
 export default function OrdersPage() {
+  return (
+    <Suspense
+      fallback={
+        <AppFrame title="订单记录" subtitle="查看积分订单的状态、金额、支付渠道和创建时间，便于核对充值结果。">
+          <Panel>
+            <p className="text-sm text-white/60">订单加载中...</p>
+          </Panel>
+        </AppFrame>
+      }
+    >
+      <OrdersView />
+    </Suspense>
+  );
+}
+
+function OrdersView() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [orders, setOrders] = useState<Order[]>([]);
   const [message, setMessage] = useState("");
+  const [returnNotice, setReturnNotice] = useState<{ tone: "success" | "danger" | "info"; text: string } | null>(null);
   const [payingOrderId, setPayingOrderId] = useState<string | null>(null);
 
   useEffect(() => {
+    const paid = searchParams.get("paid");
+    const canceled = searchParams.get("canceled");
+    if (paid === "1") {
+      setReturnNotice({
+        tone: "info",
+        text: "支付完成回跳成功。我们正在等待支付平台回调，积分到账后会在订单列表显示已支付。"
+      });
+      clearPaymentReturnParams();
+    } else if (canceled === "1") {
+      setReturnNotice({
+        tone: "danger",
+        text: "你在支付页面取消了支付，订单保持待支付状态。如果是网络异常，可以点击订单上的继续支付重新尝试。"
+      });
+      clearPaymentReturnParams();
+    }
     void loadOrders();
   }, []);
+
+  function clearPaymentReturnParams() {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete("paid");
+    url.searchParams.delete("canceled");
+    router.replace(`${url.pathname}${url.search}`);
+  }
 
   async function loadOrders() {
     setMessage("");
@@ -25,12 +70,19 @@ export default function OrdersPage() {
     setPayingOrderId(order.id);
     setMessage("");
     try {
-      const result = await apiFetch<{ order: Order; balanceAfter: number }>(`/api/orders/${order.id}/pay`, {
-        method: "POST",
-        body: {}
-      });
+      const result = await apiFetch<{ order: Order; balanceAfter?: number; checkoutUrl?: string | null }>(
+        `/api/orders/${order.id}/pay`,
+        {
+          method: "POST",
+          body: {}
+        }
+      );
+      if (result.checkoutUrl) {
+        window.location.href = result.checkoutUrl;
+        return;
+      }
       setOrders((current) => current.map((item) => (item.id === order.id ? { ...item, ...result.order } : item)));
-      setMessage(`订单已支付成功，当前余额已同步到账。`);
+      setMessage(typeof result.balanceAfter === "number" ? "订单已支付成功，当前余额已同步到账。" : "订单状态已同步。");
       await loadOrders();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "订单支付失败，请稍后重试。");
@@ -42,6 +94,28 @@ export default function OrdersPage() {
   return (
     <AppFrame title="订单记录" subtitle="查看积分订单的状态、金额、支付渠道和创建时间，便于核对充值结果。">
       <Panel>
+        {returnNotice ? (
+          <div className="mb-4">
+            <InlineNotice tone={returnNotice.tone === "info" ? "info" : returnNotice.tone}>
+              {returnNotice.text}
+              {returnNotice.tone === "danger" ? (
+                <>
+                  {" "}
+                  <Link className="underline underline-offset-4" href="/pricing">
+                    返回套餐页
+                  </Link>
+                </>
+              ) : (
+                <>
+                  {" "}
+                  <button className="underline underline-offset-4" onClick={() => void loadOrders()} type="button">
+                    立即刷新订单
+                  </button>
+                </>
+              )}
+            </InlineNotice>
+          </div>
+        ) : null}
         {message ? (
           <div className="mb-4">
             <InlineNotice tone={message.includes("成功") ? "success" : "danger"}>

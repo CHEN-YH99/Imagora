@@ -446,8 +446,10 @@ test("stripe webhook accepts a matching signature when multiple v1 signatures ar
       data: {
         object: {
           amount_total: 9900,
+          currency: "usd",
           metadata: {
-            orderId: "order_multi_signature"
+            orderId: "order_multi_signature",
+            orderNo: "IM20260629001"
           }
         }
       }
@@ -462,8 +464,55 @@ test("stripe webhook accepts a matching signature when multiple v1 signatures ar
     assert.equal(event.provider, "stripe");
     assert.equal(event.providerEventId, "evt_multi_signature");
     assert.equal(event.orderId, "order_multi_signature");
+    assert.equal(event.orderNo, "IM20260629001");
     assert.equal(event.amountCents, 9900);
+    assert.equal(event.currency, "USD");
   } finally {
+    restoreEnv(previous);
+  }
+});
+
+test("stripe checkout session carries immutable server order identity", async () => {
+  const previous = snapshotEnv(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_API_BASE_URL"]);
+  const previousFetch = globalThis.fetch;
+  const requests = [];
+  try {
+    process.env.STRIPE_SECRET_KEY = "sk_test_local";
+    process.env.STRIPE_WEBHOOK_SECRET = "whsec_local";
+    process.env.STRIPE_API_BASE_URL = "http://127.0.0.1:18123";
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url: String(url), init });
+      return new Response(
+        JSON.stringify({
+          id: "cs_test_server_order_identity",
+          url: "https://checkout.stripe.test/pay/cs_test_server_order_identity"
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    };
+
+    const payment = await new StripePaymentProvider().createPayment({
+      orderId: "order_server_identity",
+      orderNo: "IM20260629002",
+      amountCents: 1900,
+      currency: "USD"
+    });
+
+    assert.equal(payment.paymentIntentId, "cs_test_server_order_identity");
+    assert.equal(payment.checkoutUrl, "https://checkout.stripe.test/pay/cs_test_server_order_identity");
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, "http://127.0.0.1:18123/v1/checkout/sessions");
+    assert.equal(requests[0].init.headers.Authorization, "Bearer sk_test_local");
+    const body = new URLSearchParams(String(requests[0].init.body));
+    assert.equal(body.get("client_reference_id"), "order_server_identity");
+    assert.equal(body.get("line_items[0][price_data][currency]"), "usd");
+    assert.equal(body.get("line_items[0][price_data][unit_amount]"), "1900");
+    assert.equal(body.get("metadata[orderId]"), "order_server_identity");
+    assert.equal(body.get("metadata[orderNo]"), "IM20260629002");
+    assert.equal(body.get("payment_intent_data[metadata][orderId]"), "order_server_identity");
+    assert.equal(body.get("payment_intent_data[metadata][orderNo]"), "IM20260629002");
+  } finally {
+    globalThis.fetch = previousFetch;
     restoreEnv(previous);
   }
 });

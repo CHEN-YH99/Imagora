@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
@@ -558,7 +559,9 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const webhookPayload = {
       providerEventId,
       orderId: orderCreated.data.order.id,
-      amountCents: orderCreated.data.order.amountCents
+      orderNo: orderCreated.data.order.orderNo,
+      amountCents: orderCreated.data.order.amountCents,
+      currency: orderCreated.data.order.currency
     };
     const webhookPaid = await post(baseUrl, "/api/payments/webhooks/mock", webhookPayload);
     const webhookDuplicate = await post(baseUrl, "/api/payments/webhooks/mock", webhookPayload);
@@ -584,13 +587,55 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const mismatchWebhook = await post(baseUrl, "/api/payments/webhooks/mock", {
       providerEventId: `evt_${crypto.randomUUID()}`,
       orderId: mismatchOrder.data.order.id,
-      amountCents: mismatchOrder.data.order.amountCents + 1
+      orderNo: mismatchOrder.data.order.orderNo,
+      amountCents: mismatchOrder.data.order.amountCents + 1,
+      currency: mismatchOrder.data.order.currency
     });
     const afterMismatchCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     assert.equal(mismatchWebhook.data.credited, false);
     assert.equal(mismatchWebhook.data.reason, "AMOUNT_MISMATCH");
     assert.equal(mismatchWebhook.data.order.status, "PENDING");
     assert.equal(afterMismatchCredits.data.account.balance, beforeMismatchCredits.data.account.balance);
+
+    const beforeCurrencyMismatchCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const currencyMismatchOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock" },
+      demoSession
+    );
+    const currencyMismatchWebhook = await post(baseUrl, "/api/payments/webhooks/mock", {
+      providerEventId: `evt_${crypto.randomUUID()}`,
+      orderId: currencyMismatchOrder.data.order.id,
+      orderNo: currencyMismatchOrder.data.order.orderNo,
+      amountCents: currencyMismatchOrder.data.order.amountCents,
+      currency: "EUR"
+    });
+    const afterCurrencyMismatchCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    assert.equal(currencyMismatchWebhook.data.credited, false);
+    assert.equal(currencyMismatchWebhook.data.reason, "CURRENCY_MISMATCH");
+    assert.equal(currencyMismatchWebhook.data.order.status, "PENDING");
+    assert.equal(afterCurrencyMismatchCredits.data.account.balance, beforeCurrencyMismatchCredits.data.account.balance);
+
+    const beforeOrderNoMismatchCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const orderNoMismatchOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock" },
+      demoSession
+    );
+    const orderNoMismatchWebhook = await post(baseUrl, "/api/payments/webhooks/mock", {
+      providerEventId: `evt_${crypto.randomUUID()}`,
+      orderId: orderNoMismatchOrder.data.order.id,
+      orderNo: "IM-TAMPERED-ORDER-NO",
+      amountCents: orderNoMismatchOrder.data.order.amountCents,
+      currency: orderNoMismatchOrder.data.order.currency
+    });
+    const afterOrderNoMismatchCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    assert.equal(orderNoMismatchWebhook.data.credited, false);
+    assert.equal(orderNoMismatchWebhook.data.reason, "ORDER_NO_MISMATCH");
+    assert.equal(orderNoMismatchWebhook.data.order.status, "PENDING");
+    assert.equal(afterOrderNoMismatchCredits.data.account.balance, beforeOrderNoMismatchCredits.data.account.balance);
 
     const storeAfterPayment = await readStore(storePath);
     assert.equal(
@@ -713,7 +758,9 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const lateWebhookPaid = await post(baseUrl, "/api/payments/webhooks/mock", {
       providerEventId: `evt_${crypto.randomUUID()}`,
       orderId: lateWebhookOrder.data.order.id,
-      amountCents: lateWebhookOrder.data.order.amountCents
+      orderNo: lateWebhookOrder.data.order.orderNo,
+      amountCents: lateWebhookOrder.data.order.amountCents,
+      currency: lateWebhookOrder.data.order.currency
     });
     assert.equal(lateWebhookPaid.data.credited, true);
     assert.equal(lateWebhookPaid.data.order.status, "PAID");
@@ -996,6 +1043,215 @@ test("api and worker complete generation with openai provider flow", async () =>
   }
 });
 
+test("api wires stripe provider into checkout, webhook signing and credit grant", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-api-stripe-"));
+  const port = await reserveUnusedPort();
+  const storePath = join(dir, "store.json");
+  const origin = "http://127.0.0.1:3100";
+  const stripeServer = createFakeStripeServer();
+  await stripeServer.listen();
+  const stripeSecret = "sk_test_local_e2e";
+  const webhookSecret = "whsec_local_e2e";
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    IMAGORA_STORE_PATH: storePath,
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    ORDER_PENDING_TTL_MINUTES: "30",
+    WORKER_POLL_INTERVAL_MS: "300",
+    PAYMENT_PROVIDER: "stripe",
+    STRIPE_SECRET_KEY: stripeSecret,
+    STRIPE_WEBHOOK_SECRET: webhookSecret,
+    STRIPE_API_BASE_URL: `http://127.0.0.1:${stripeServer.port}`,
+    STRIPE_SUCCESS_URL: `${origin}/orders?paid=1`,
+    STRIPE_CANCEL_URL: `${origin}/pricing?canceled=1`,
+    STRIPE_TIMEOUT_MS: "5000",
+    STRIPE_WEBHOOK_TOLERANCE_SECONDS: "300",
+    WEB_ORIGIN: origin,
+    CSRF_ALLOWED_ORIGINS: origin
+  };
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl);
+
+    const demo = await login(baseUrl, "demo@imagora.local", "Demo123!");
+    const demoSession = demo.session;
+
+    const wrongProviderReject = await fetch(`${baseUrl}/api/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: demoSession,
+        Origin: origin
+      },
+      body: JSON.stringify({ planId: "starter", paymentProvider: "mock" })
+    });
+    const wrongProviderPayload = await wrongProviderReject.json();
+    assert.equal(wrongProviderReject.status, 400);
+    assert.equal(wrongProviderPayload.error.code, "VALIDATION_ERROR");
+
+    const beforeCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const orderCreated = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "stripe" },
+      demoSession
+    );
+    assert.equal(orderCreated.data.order.paymentProvider, "stripe");
+    assert.equal(orderCreated.data.order.status, "PENDING");
+    assert.ok(orderCreated.data.checkoutUrl);
+    assert.match(orderCreated.data.checkoutUrl, /^https:\/\/checkout\.stripe\.test\//);
+    assert.equal(stripeServer.requests.length, 1);
+    assert.equal(stripeServer.requests[0].path, "/v1/checkout/sessions");
+    assert.match(stripeServer.requests[0].authorization ?? "", new RegExp(`^Bearer ${stripeSecret}$`));
+    const checkoutBody = new URLSearchParams(stripeServer.requests[0].body);
+    assert.equal(checkoutBody.get("metadata[orderId]"), orderCreated.data.order.id);
+    assert.equal(checkoutBody.get("metadata[orderNo]"), orderCreated.data.order.orderNo);
+    assert.equal(
+      checkoutBody.get("line_items[0][price_data][unit_amount]"),
+      String(orderCreated.data.order.amountCents)
+    );
+    assert.equal(
+      checkoutBody.get("line_items[0][price_data][currency]"),
+      orderCreated.data.order.currency.toLowerCase()
+    );
+
+    const sessionId = stripeServer.lastSessionId();
+    const eventId = `evt_${crypto.randomUUID()}`;
+    const payload = stripeEventPayload({
+      eventId,
+      sessionId,
+      orderId: orderCreated.data.order.id,
+      orderNo: orderCreated.data.order.orderNo,
+      amountCents: orderCreated.data.order.amountCents,
+      currency: orderCreated.data.order.currency
+    });
+
+    const missingSignature = await fetch(`${baseUrl}/api/payments/webhooks/stripe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload
+    });
+    assert.equal(missingSignature.status, 400);
+
+    const tamperedPayload = stripeEventPayload({
+      eventId,
+      sessionId,
+      orderId: orderCreated.data.order.id,
+      orderNo: orderCreated.data.order.orderNo,
+      amountCents: orderCreated.data.order.amountCents + 1,
+      currency: orderCreated.data.order.currency
+    });
+    const tamperedWebhook = await fetch(`${baseUrl}/api/payments/webhooks/stripe`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Stripe-Signature": stripeSignatureHeader(webhookSecret, payload)
+      },
+      body: tamperedPayload
+    });
+    assert.equal(tamperedWebhook.status, 400);
+
+    const webhookResponse = await postStripeWebhook(baseUrl, webhookSecret, payload);
+    assert.equal(webhookResponse.status, 200);
+    const webhookBody = await webhookResponse.json();
+    assert.equal(webhookBody.data.credited, true);
+    assert.equal(webhookBody.data.order.status, "PAID");
+    assert.equal(webhookBody.data.order.paymentProvider, "stripe");
+    assert.equal(webhookBody.data.balanceAfter, beforeCredits.data.account.balance + orderCreated.data.plan.credits);
+
+    const duplicateWebhook = await postStripeWebhook(baseUrl, webhookSecret, payload);
+    assert.equal(duplicateWebhook.status, 200);
+    const duplicateBody = await duplicateWebhook.json();
+    assert.equal(duplicateBody.data.credited, false);
+    assert.equal(duplicateBody.data.duplicateEvent, true);
+    assert.equal(duplicateBody.data.balanceAfter, webhookBody.data.balanceAfter);
+
+    const afterCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    assert.equal(afterCredits.data.account.balance, webhookBody.data.balanceAfter);
+
+    const orderAfterPay = await get(baseUrl, `/api/orders/${orderCreated.data.order.id}`, demoSession);
+    assert.equal(orderAfterPay.data.order.status, "PAID");
+    assert.equal(orderAfterPay.data.order.paymentProvider, "stripe");
+    assert.equal(orderAfterPay.data.order.paymentIntentId, sessionId);
+
+    const requestCountBeforePaidRetry = stripeServer.requests.length;
+    const repayPaidOrder = await post(baseUrl, `/api/orders/${orderCreated.data.order.id}/pay`, {}, demoSession);
+    assert.equal(repayPaidOrder.data.order.status, "PAID");
+    assert.equal(repayPaidOrder.data.checkoutUrl, null);
+    assert.equal(repayPaidOrder.data.balanceAfter, webhookBody.data.balanceAfter);
+    assert.equal(stripeServer.requests.length, requestCountBeforePaidRetry);
+
+    const amountMismatchOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "stripe" },
+      demoSession
+    );
+    const amountMismatchSession = stripeServer.lastSessionId();
+    const amountMismatchPayload = stripeEventPayload({
+      eventId: `evt_${crypto.randomUUID()}`,
+      sessionId: amountMismatchSession,
+      orderId: amountMismatchOrder.data.order.id,
+      orderNo: amountMismatchOrder.data.order.orderNo,
+      amountCents: amountMismatchOrder.data.order.amountCents + 1,
+      currency: amountMismatchOrder.data.order.currency
+    });
+    const amountMismatchResponse = await postStripeWebhook(baseUrl, webhookSecret, amountMismatchPayload);
+    assert.equal(amountMismatchResponse.status, 200);
+    const amountMismatchBody = await amountMismatchResponse.json();
+    assert.equal(amountMismatchBody.data.credited, false);
+    assert.equal(amountMismatchBody.data.reason, "AMOUNT_MISMATCH");
+    const amountMismatchAfter = await get(baseUrl, `/api/orders/${amountMismatchOrder.data.order.id}`, demoSession);
+    assert.equal(amountMismatchAfter.data.order.status, "PENDING");
+
+    const orderNoMismatchOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "stripe" },
+      demoSession
+    );
+    const orderNoMismatchSession = stripeServer.lastSessionId();
+    const orderNoMismatchPayload = stripeEventPayload({
+      eventId: `evt_${crypto.randomUUID()}`,
+      sessionId: orderNoMismatchSession,
+      orderId: orderNoMismatchOrder.data.order.id,
+      orderNo: "IM-STRIPE-TAMPER",
+      amountCents: orderNoMismatchOrder.data.order.amountCents,
+      currency: orderNoMismatchOrder.data.order.currency
+    });
+    const orderNoMismatchResponse = await postStripeWebhook(baseUrl, webhookSecret, orderNoMismatchPayload);
+    const orderNoMismatchBody = await orderNoMismatchResponse.json();
+    assert.equal(orderNoMismatchBody.data.credited, false);
+    assert.equal(orderNoMismatchBody.data.reason, "ORDER_NO_MISMATCH");
+
+    const continueOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "stripe" },
+      demoSession
+    );
+    const continuePayResponse = await post(baseUrl, `/api/orders/${continueOrder.data.order.id}/pay`, {}, demoSession);
+    assert.equal(continuePayResponse.data.order.status, "PENDING");
+    assert.ok(continuePayResponse.data.checkoutUrl);
+    assert.match(continuePayResponse.data.checkoutUrl, /^https:\/\/checkout\.stripe\.test\//);
+
+    const storeAfter = await readStore(storePath);
+    const stripeEvents = storeAfter.paymentEvents.filter((event) => event.provider === "stripe");
+    assert.ok(stripeEvents.some((event) => event.providerEventId === eventId));
+    assert.equal(stripeEvents.filter((event) => event.providerEventId === eventId).length, 1);
+  } finally {
+    api.kill();
+    await stripeServer.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 function runProcess(command, args, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, stdio: ["ignore", "ignore", "pipe"] });
@@ -1265,7 +1521,13 @@ async function seedSucceededPaymentEvent(storePath, orderId, providerEventId, am
       providerEventId,
       orderId,
       eventType: "payment.succeeded",
-      payload: { providerEventId, orderId, amountCents },
+      payload: {
+        providerEventId,
+        orderId,
+        orderNo: order.orderNo,
+        amountCents,
+        currency: order.currency
+      },
       processedAt: now,
       createdAt: now
     });
@@ -1279,6 +1541,106 @@ async function markOrderExpired(storePath, orderId) {
     const expiredAt = new Date(Date.now() - 31 * 60 * 1000).toISOString();
     order.createdAt = expiredAt;
     order.updatedAt = expiredAt;
+  });
+}
+
+
+function createFakeStripeServer() {
+  const requests = [];
+  let port = 0;
+  let lastSessionId = null;
+  const server = createHttpServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => {
+      chunks.push(chunk);
+    });
+    request.on("end", () => {
+      requests.push({
+        method: request.method,
+        path: request.url,
+        authorization: request.headers.authorization,
+        body: Buffer.concat(chunks).toString("utf8")
+      });
+      const sessionId = `cs_test_${requests.length}_${Math.random().toString(36).slice(2, 10)}`;
+      lastSessionId = sessionId;
+      response.statusCode = 200;
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({
+          id: sessionId,
+          url: `https://checkout.stripe.test/pay/${sessionId}`
+        })
+      );
+    });
+  });
+
+  return {
+    requests,
+    get port() {
+      return port;
+    },
+    lastSessionId() {
+      return lastSessionId;
+    },
+    listen() {
+      return new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          const address = server.address();
+          assert.ok(address && typeof address === "object");
+          port = address.port;
+          resolve();
+        });
+      });
+    },
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  };
+}
+
+function stripeEventPayload({ eventId, sessionId, orderId, orderNo, amountCents, currency }) {
+  return JSON.stringify({
+    id: eventId,
+    type: "checkout.session.completed",
+    data: {
+      object: {
+        id: sessionId,
+        amount_total: amountCents,
+        currency: currency.toLowerCase(),
+        client_reference_id: orderId,
+        payment_intent: sessionId,
+        metadata: {
+          orderId,
+          orderNo
+        }
+      }
+    }
+  });
+}
+
+function stripeSignatureHeader(secret, payload, timestamp = Math.floor(Date.now() / 1000)) {
+  const signature = createHmac("sha256", secret).update(`${timestamp}.${payload}`).digest("hex");
+  return `t=${timestamp},v1=${signature}`;
+}
+
+async function postStripeWebhook(baseUrl, secret, payload) {
+  return fetch(`${baseUrl}/api/payments/webhooks/stripe`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Stripe-Signature": stripeSignatureHeader(secret, payload)
+    },
+    body: payload
   });
 }
 

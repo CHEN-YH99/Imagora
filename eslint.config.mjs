@@ -11,6 +11,7 @@ export default tseslint.config(
       "**/*.tsbuildinfo",
       "**/next-env.d.ts",
       "packages/database/prisma/generated/**",
+      "packages/database/generated/**",
       "apps/web/.next/**"
     ]
   },
@@ -48,7 +49,9 @@ export default tseslint.config(
         clearTimeout: "readonly",
         setInterval: "readonly",
         clearInterval: "readonly",
-        URL: "readonly"
+        URL: "readonly",
+        URLSearchParams: "readonly",
+        Response: "readonly"
       }
     },
     rules: {
