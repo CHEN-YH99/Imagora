@@ -259,7 +259,9 @@ export default function AccountPage() {
               />
             )}
             {paidOrders.length > 0 ? (
-              <p className="mt-4 text-sm text-white/56">最近已完成 {paidOrders.length} 笔充值，到账后会自动写入积分流水。</p>
+              <p className="mt-4 text-sm text-white/56">
+                最近已完成 {paidOrders.length} 笔充值，到账后会自动写入积分流水。
+              </p>
             ) : null}
           </Panel>
 
@@ -281,7 +283,8 @@ export default function AccountPage() {
                       <div>
                         <p className="text-sm font-medium">{order.orderNo}</p>
                         <p className="mt-1 text-xs text-white/46">
-                          {formatMoney(order.amountCents, order.currency)} · {formatPaymentProvider(order.paymentProvider)}
+                          {formatMoney(order.amountCents, order.currency)} ·{" "}
+                          {formatPaymentProvider(order.paymentProvider)}
                         </p>
                       </div>
                       <StatusPill>{order.status}</StatusPill>

@@ -819,6 +819,7 @@ app.delete("/api/images/:imageId/favorite", async (request) => {
   const { user } = await requireAuth(request);
   const { imageId } = imageParamSchema.parse(request.params);
   return store.update((data) => {
+    mustFindOwnImage(data, user.id, imageId);
     data.imageFavorites = data.imageFavorites.filter(
       (favorite) => !(favorite.userId === user.id && favorite.imageId === imageId)
     );

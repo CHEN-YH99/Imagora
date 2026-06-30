@@ -508,6 +508,15 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const foreignDownloadPayload = await foreignDownload.json();
     assert.equal(foreignDownload.status, 404);
     assert.equal(foreignDownloadPayload.error.code, "NOT_FOUND");
+    const foreignFavoriteRemoval = await fetch(`${baseUrl}/api/images/${generatedImageId}/favorite`, {
+      method: "DELETE",
+      headers: {
+        Cookie: otherUserSession
+      }
+    });
+    const foreignFavoriteRemovalPayload = await foreignFavoriteRemoval.json();
+    assert.equal(foreignFavoriteRemoval.status, 404);
+    assert.equal(foreignFavoriteRemovalPayload.error.code, "NOT_FOUND");
 
     const beforeFailedCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     const failedCreated = await post(
@@ -1543,7 +1552,6 @@ async function markOrderExpired(storePath, orderId) {
     order.updatedAt = expiredAt;
   });
 }
-
 
 function createFakeStripeServer() {
   const requests = [];

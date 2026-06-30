@@ -65,7 +65,13 @@ export default function FavoritesPage() {
           {images.map((image) => (
             <article key={image.id} className="rounded-2xl border border-white/12 bg-black/20 p-3">
               <Link className="focus-ring block" href={`/images/${image.id}`}>
-                <img className="aspect-square rounded-xl object-cover" src={image.thumbnailUrl} alt="收藏的生成图片" />
+                <img
+                  className="aspect-square rounded-xl object-cover"
+                  src={image.thumbnailUrl}
+                  alt="收藏的生成图片"
+                  loading="lazy"
+                  decoding="async"
+                />
               </Link>
               <div className="mt-3 flex items-center justify-between gap-3">
                 <p className="inline-flex items-center gap-2 text-sm text-white/64">

@@ -432,6 +432,8 @@ function GenerateExperience() {
                 className="aspect-square w-full rounded-2xl border border-white/12 object-cover"
                 src={image.thumbnailUrl}
                 alt="生成图片结果"
+                loading="lazy"
+                decoding="async"
               />
             ))}
             {images.length === 0 ? (

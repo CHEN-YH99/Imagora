@@ -142,7 +142,11 @@ function solveCaptcha(captcha) {
   }
 
   const svg = String(captcha.imageSvg ?? "");
-  const tileGroups = [...svg.matchAll(/<g><rect\b[^>]*fill="([^"]+)"[^>]*\/>(.*?)<circle\b[^>]*r="2"\s+fill="(?:#dbeafe|#ccfbf1)"\/><\/g>/gs)];
+  const tileGroups = [
+    ...svg.matchAll(
+      /<g><rect\b[^>]*fill="([^"]+)"[^>]*\/>(.*?)<circle\b[^>]*r="2"\s+fill="(?:#dbeafe|#ccfbf1)"\/><\/g>/gs
+    )
+  ];
   assertEqual(tileGroups.length, captchaTiles, `captcha tile count should be ${captchaTiles}`);
 
   const selections = tileGroups.flatMap((match, index) => {
@@ -203,7 +207,10 @@ async function ensureApiService() {
     return;
   }
   assertLocalUrl(apiBaseUrl, "API_BASE_URL");
-  await assertReadable(resolve(rootDir, "apps", "api", "dist", "main.js"), "API build output is missing. Run `npm run build` first.");
+  await assertReadable(
+    resolve(rootDir, "apps", "api", "dist", "main.js"),
+    "API build output is missing. Run `npm run build` first."
+  );
 
   const url = new URL(apiBaseUrl);
   const port = url.port || defaultPort(url.protocol);
@@ -250,16 +257,20 @@ async function ensureWebService() {
   const nextBin = resolve(rootDir, "node_modules", "next", "dist", "bin", "next");
   await assertReadable(nextBin, "Next.js CLI is missing. Run `npm install` first.");
 
-  const child = spawn(process.execPath, [nextBin, "start", "-p", url.port || defaultPort(url.protocol), "-H", url.hostname], {
-    cwd: resolve(rootDir, "apps", "web"),
-    env: {
-      ...process.env,
-      PORT: url.port || defaultPort(url.protocol),
-      HOSTNAME: url.hostname,
-      NEXT_PUBLIC_API_BASE_URL: apiBaseUrl
-    },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
+  const child = spawn(
+    process.execPath,
+    [nextBin, "start", "-p", url.port || defaultPort(url.protocol), "-H", url.hostname],
+    {
+      cwd: resolve(rootDir, "apps", "web"),
+      env: {
+        ...process.env,
+        PORT: url.port || defaultPort(url.protocol),
+        HOSTNAME: url.hostname,
+        NEXT_PUBLIC_API_BASE_URL: apiBaseUrl
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    }
+  );
   managedProcesses.push(trackManagedProcess("web", child));
   await waitForCondition(probeWebHome, smokeTimeoutMs, "web home");
 }
@@ -368,9 +379,7 @@ async function waitForCondition(probe, timeoutMs, name) {
     }
     const crashed = managedProcesses.find((processState) => processState.child.exitCode !== null);
     if (crashed) {
-      throw new Error(
-        `${crashed.name} exited before ${name} became ready.\n${summarizeProcessOutput(crashed)}`
-      );
+      throw new Error(`${crashed.name} exited before ${name} became ready.\n${summarizeProcessOutput(crashed)}`);
     }
     await sleep(250);
   }
