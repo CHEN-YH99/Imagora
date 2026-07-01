@@ -15,15 +15,18 @@ import {
   formatOperationalRunbook,
   formatPaymentProvider,
   formatPlanName,
+  formatQualityLabel,
   formatSafetyRuleTerm,
   formatStatusLabel,
   formatStyleLabel,
   formatTargetType,
+  type AuditLog,
   type AdminMetrics,
   type AdminOperationalMetrics,
   type GeneratedImage,
   type Order,
   type OrderMaintenance,
+  type PaymentEvent,
   type Plan,
   type SafetyRule,
   type Task,
@@ -44,13 +47,30 @@ type UserDetail = {
   recentTasks: Task[];
 };
 
-type AuditLog = {
-  id: string;
-  action: string;
-  targetType: string;
-  targetId: string;
-  createdAt: string;
+type TaskDetail = {
+  task: Task;
+  user: User;
+  images: GeneratedImage[];
 };
+
+type ImageDetail = {
+  image: GeneratedImage;
+  user: User;
+  task: Task;
+};
+
+type OrderDetail = {
+  order: Order;
+  user: User;
+  plan: Plan;
+  paymentEvents: PaymentEvent[];
+};
+
+type SelectedDetail =
+  | { kind: "user"; data: UserDetail }
+  | { kind: "task"; data: TaskDetail }
+  | { kind: "image"; data: ImageDetail }
+  | { kind: "order"; data: OrderDetail };
 
 type CreditAdjustmentDraft = {
   amount: string;
@@ -125,6 +145,34 @@ function withQuery(path: string, params: Record<string, string | number | undefi
   return queryString ? `${path}?${queryString}` : path;
 }
 
+function filterValue(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function toApiDateTime(value: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function detailDialogLabel(kind: SelectedDetail["kind"]): string {
+  switch (kind) {
+    case "user":
+      return "用户";
+    case "task":
+      return "任务";
+    case "image":
+      return "图片";
+    case "order":
+      return "订单";
+    default:
+      return "详情";
+  }
+}
+
 export default function AdminPage() {
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [operationalMetrics, setOperationalMetrics] = useState<AdminOperationalMetrics | null>(null);
@@ -141,11 +189,18 @@ export default function AdminPage() {
   const [taskStatusFilter, setTaskStatusFilter] = useState<"ALL" | Task["status"]>("ALL");
   const [orderStatusFilter, setOrderStatusFilter] = useState<"ALL" | Order["status"]>("ALL");
   const [imageVisibilityFilter, setImageVisibilityFilter] = useState<"ALL" | GeneratedImage["visibility"]>("ALL");
+  const [createdFrom, setCreatedFrom] = useState("");
+  const [createdTo, setCreatedTo] = useState("");
+  const [userIdFilter, setUserIdFilter] = useState("");
+  const [orderNoFilter, setOrderNoFilter] = useState("");
   const [userSearch, setUserSearch] = useState("");
   const [userStatusFilter, setUserStatusFilter] = useState<"ALL" | User["status"]>("ALL");
-  const [orderSearch, setOrderSearch] = useState("");
-  const [userDetail, setUserDetail] = useState<UserDetail | null>(null);
-  const [userDetailLoading, setUserDetailLoading] = useState(false);
+  const [adminUserIdFilter, setAdminUserIdFilter] = useState("");
+  const [auditActionFilter, setAuditActionFilter] = useState("");
+  const [auditTargetTypeFilter, setAuditTargetTypeFilter] = useState("");
+  const [auditTargetIdFilter, setAuditTargetIdFilter] = useState("");
+  const [selectedDetail, setSelectedDetail] = useState<SelectedDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [creditAdjustments, setCreditAdjustments] = useState<Record<string, CreditAdjustmentDraft>>({});
   const [planDraft, setPlanDraft] = useState<PlanFormState>(emptyPlanForm);
   const [planEdits, setPlanEdits] = useState<
@@ -157,7 +212,19 @@ export default function AdminPage() {
 
   useEffect(() => {
     void load();
-  }, [taskStatusFilter, orderStatusFilter, imageVisibilityFilter]);
+  }, [
+    taskStatusFilter,
+    orderStatusFilter,
+    imageVisibilityFilter,
+    createdFrom,
+    createdTo,
+    userIdFilter,
+    orderNoFilter,
+    adminUserIdFilter,
+    auditActionFilter,
+    auditTargetTypeFilter,
+    auditTargetIdFilter
+  ]);
 
   const visibleUsers = useMemo(
     () =>
@@ -177,31 +244,65 @@ export default function AdminPage() {
 
   const visibleImages = useMemo(() => images.slice(0, 8), [images]);
 
-  const visibleOrders = useMemo(
-    () =>
-      orders
-        .filter(
-          (order) => !orderSearch.trim() || order.orderNo.toLowerCase().includes(orderSearch.trim().toLowerCase())
-        )
-        .slice(0, 12),
-    [orderSearch, orders]
-  );
+  const visibleOrders = useMemo(() => orders.slice(0, 12), [orders]);
 
   async function openUserDetail(userId: string) {
-    setUserDetailLoading(true);
-    setUserDetail(null);
+    setDetailLoading(true);
+    setSelectedDetail(null);
     try {
       const result = await apiFetch<UserDetail>(`/api/admin/users/${userId}`);
-      setUserDetail(result);
+      setSelectedDetail({ kind: "user", data: result });
     } catch (error) {
       setNotice({ tone: "danger", text: error instanceof Error ? error.message : "用户详情加载失败，请稍后重试。" });
     } finally {
-      setUserDetailLoading(false);
+      setDetailLoading(false);
+    }
+  }
+
+  async function openTaskDetail(taskId: string) {
+    setDetailLoading(true);
+    setSelectedDetail(null);
+    try {
+      const result = await apiFetch<TaskDetail>(`/api/admin/generation/tasks/${taskId}`);
+      setSelectedDetail({ kind: "task", data: result });
+    } catch (error) {
+      setNotice({ tone: "danger", text: error instanceof Error ? error.message : "任务详情加载失败，请稍后重试。" });
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  async function openImageDetail(imageId: string) {
+    setDetailLoading(true);
+    setSelectedDetail(null);
+    try {
+      const result = await apiFetch<ImageDetail>(`/api/admin/images/${imageId}`);
+      setSelectedDetail({ kind: "image", data: result });
+    } catch (error) {
+      setNotice({ tone: "danger", text: error instanceof Error ? error.message : "图片详情加载失败，请稍后重试。" });
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  async function openOrderDetail(orderId: string) {
+    setDetailLoading(true);
+    setSelectedDetail(null);
+    try {
+      const result = await apiFetch<OrderDetail>(`/api/admin/orders/${orderId}`);
+      setSelectedDetail({ kind: "order", data: result });
+    } catch (error) {
+      setNotice({ tone: "danger", text: error instanceof Error ? error.message : "订单详情加载失败，请稍后重试。" });
+    } finally {
+      setDetailLoading(false);
     }
   }
 
   async function load(preserveNotice = false) {
     try {
+      const createdFromFilter = toApiDateTime(createdFrom);
+      const createdToFilter = toApiDateTime(createdTo);
+      const selectedUserId = filterValue(userIdFilter);
       const [
         dashboard,
         operations,
@@ -219,24 +320,42 @@ export default function AdminPage() {
         apiFetch<{ tasks: Task[] }>(
           withQuery("/api/admin/generation/tasks", {
             limit: 30,
-            status: taskStatusFilter === "ALL" ? undefined : taskStatusFilter
+            status: taskStatusFilter === "ALL" ? undefined : taskStatusFilter,
+            userId: selectedUserId,
+            createdFrom: createdFromFilter,
+            createdTo: createdToFilter
           })
         ),
         apiFetch<{ images: GeneratedImage[] }>(
           withQuery("/api/admin/images", {
             limit: 24,
-            visibility: imageVisibilityFilter === "ALL" ? undefined : imageVisibilityFilter
+            visibility: imageVisibilityFilter === "ALL" ? undefined : imageVisibilityFilter,
+            userId: selectedUserId,
+            createdFrom: createdFromFilter,
+            createdTo: createdToFilter
           })
         ),
         apiFetch<{ orders: Order[] }>(
           withQuery("/api/admin/orders", {
             limit: 30,
-            status: orderStatusFilter === "ALL" ? undefined : orderStatusFilter
+            status: orderStatusFilter === "ALL" ? undefined : orderStatusFilter,
+            userId: selectedUserId,
+            orderNo: filterValue(orderNoFilter),
+            createdFrom: createdFromFilter,
+            createdTo: createdToFilter
           })
         ),
         apiFetch<{ plans: Plan[] }>("/api/admin/plans"),
         apiFetch<{ rules: SafetyRule[] }>("/api/admin/safety-rules"),
-        apiFetch<{ logs: AuditLog[] }>("/api/admin/audit-logs")
+        apiFetch<{ logs: AuditLog[] }>(
+          withQuery("/api/admin/audit-logs", {
+            limit: 30,
+            adminUserId: filterValue(adminUserIdFilter),
+            action: filterValue(auditActionFilter),
+            targetType: filterValue(auditTargetTypeFilter),
+            targetId: filterValue(auditTargetIdFilter)
+          })
+        )
       ]);
       setMetrics(dashboard.metrics);
       setOperationalMetrics(operations);
@@ -358,6 +477,13 @@ export default function AdminPage() {
   function requestUserStatusChange(user: User) {
     const nextStatus = user.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE";
     openConfirm({ kind: "user-status", userId: user.id, userEmail: user.email, nextStatus });
+  }
+
+  function resetEnterpriseFilters() {
+    setCreatedFrom("");
+    setCreatedTo("");
+    setUserIdFilter("");
+    setOrderNoFilter("");
   }
 
   function requestCreditAdjustment(user: User) {
@@ -695,6 +821,64 @@ export default function AdminPage() {
         )}
       </Panel>
 
+      <Panel className="mt-5">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-xl font-semibold">组合筛选</h2>
+          <button
+            className="focus-ring rounded-full border border-white/12 bg-white/8 px-4 py-2 text-sm font-semibold text-white transition-colors hover:border-mint/70"
+            onClick={resetEnterpriseFilters}
+            type="button"
+          >
+            清空筛选
+          </button>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <Field label="时间范围">
+            <div className="grid gap-2 sm:grid-cols-2">
+              <input
+                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                type="datetime-local"
+                value={createdFrom}
+                onChange={(event) => setCreatedFrom(event.target.value)}
+              />
+              <input
+                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                type="datetime-local"
+                value={createdTo}
+                onChange={(event) => setCreatedTo(event.target.value)}
+              />
+            </div>
+          </Field>
+          <Field label="用户筛选">
+            <select
+              className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+              value={userIdFilter}
+              onChange={(event) => setUserIdFilter(event.target.value)}
+            >
+              <option value="">全部用户</option>
+              {users.map((user) => (
+                <option key={user.id} value={user.id}>
+                  {user.email}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="订单号筛选">
+            <input
+              className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+              placeholder="输入订单号"
+              value={orderNoFilter}
+              onChange={(event) => setOrderNoFilter(event.target.value)}
+            />
+          </Field>
+          <Field label="筛选说明">
+            <p className="rounded-2xl border border-white/10 bg-black/20 px-4 py-2 text-sm text-white/60">
+              时间、用户和订单号会同步作用于任务、图片和订单列表。
+            </p>
+          </Field>
+        </div>
+      </Panel>
+
       <div className="mt-5 grid gap-5 xl:grid-cols-2">
         <Panel>
           <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
@@ -819,8 +1003,21 @@ export default function AdminPage() {
             {visibleTasks.map((task) => (
               <article key={task.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
                 <div className="flex items-start justify-between gap-3">
-                  <p className="line-clamp-2 text-sm text-white/70">{task.prompt}</p>
-                  <StatusPill>{task.status}</StatusPill>
+                  <div>
+                    <p className="line-clamp-2 text-sm text-white/70">{task.prompt}</p>
+                    <p className="mt-1 break-all text-xs text-white/36">{task.userId}</p>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <StatusPill>{task.status}</StatusPill>
+                    <button
+                      className="focus-ring inline-flex items-center gap-1 rounded-full border border-white/12 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:border-mint/70"
+                      onClick={() => void openTaskDetail(task.id)}
+                      type="button"
+                    >
+                      <Eye className="size-3" aria-hidden="true" />
+                      详情
+                    </button>
+                  </div>
                 </div>
                 <p className="mt-2 text-xs text-white/42">
                   {formatCredits(task.creditCost)} · {formatStyleLabel(task.style)} · {task.aspectRatio}
@@ -870,6 +1067,14 @@ export default function AdminPage() {
                   <StatusPill>{image.visibility}</StatusPill>
                   <button
                     className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full border border-white/12 px-2 py-2 text-xs text-white transition-colors hover:border-mint/70"
+                    onClick={() => void openImageDetail(image.id)}
+                    type="button"
+                  >
+                    <Eye className="size-3" aria-hidden="true" />
+                    详情
+                  </button>
+                  <button
+                    className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full border border-white/12 px-2 py-2 text-xs text-white transition-colors hover:border-mint/70"
                     onClick={() => requestImageVisibilityChange(image)}
                     type="button"
                   >
@@ -900,11 +1105,11 @@ export default function AdminPage() {
           <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
             <h2 className="text-xl font-semibold">订单管理</h2>
             <div className="grid min-w-[260px] gap-2 sm:grid-cols-2">
-              <Field label="订单号搜索">
+              <Field label="订单号筛选">
                 <input
                   className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                  value={orderSearch}
-                  onChange={(event) => setOrderSearch(event.target.value)}
+                  value={orderNoFilter}
+                  onChange={(event) => setOrderNoFilter(event.target.value)}
                 />
               </Field>
               <Field label="订单状态">
@@ -932,9 +1137,20 @@ export default function AdminPage() {
                     <p className="mt-1 text-sm text-white/50">
                       {formatMoney(order.amountCents, order.currency)} · {formatPaymentProvider(order.paymentProvider)}
                     </p>
+                    <p className="mt-1 break-all text-xs text-white/36">{order.userId}</p>
                     <p className="mt-1 text-xs text-white/40">{new Date(order.createdAt).toLocaleString("zh-CN")}</p>
                   </div>
-                  <StatusPill>{order.status}</StatusPill>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <StatusPill>{order.status}</StatusPill>
+                    <button
+                      className="focus-ring inline-flex items-center gap-1 rounded-full border border-white/12 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:border-mint/70"
+                      onClick={() => void openOrderDetail(order.id)}
+                      type="button"
+                    >
+                      <Eye className="size-3" aria-hidden="true" />
+                      详情
+                    </button>
+                  </div>
                 </div>
               </article>
             ))}
@@ -1188,100 +1404,208 @@ export default function AdminPage() {
         </ConfirmDialog>
       ) : null}
 
-      {userDetail ? (
+      {selectedDetail ? (
         <div
           className="fixed inset-0 z-50 flex items-start justify-end bg-black/60 p-4"
-          onClick={() => setUserDetail(null)}
+          onClick={() => setSelectedDetail(null)}
           role="presentation"
         >
           <aside
-            aria-label="用户详情"
+            aria-label={`${detailDialogLabel(selectedDetail.kind)}详情`}
             aria-modal="true"
             className="h-full w-full max-w-md overflow-y-auto rounded-[1.5rem] border border-white/12 bg-ink p-6"
             onClick={(event) => event.stopPropagation()}
             role="dialog"
           >
             <div className="mb-5 flex items-center justify-between gap-3">
-              <h2 className="text-xl font-semibold">用户详情</h2>
+              <h2 className="text-xl font-semibold">{detailDialogLabel(selectedDetail.kind)}详情</h2>
               <button
                 className="focus-ring inline-flex size-8 items-center justify-center rounded-full border border-white/12 text-white/60 hover:bg-white/10"
-                onClick={() => setUserDetail(null)}
+                onClick={() => setSelectedDetail(null)}
                 type="button"
               >
                 <X className="size-4" aria-hidden="true" />
               </button>
             </div>
-            <div className="space-y-4 text-sm">
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                <p className="font-medium">{userDetail.user.email}</p>
-                <p className="mt-1 text-white/54">{formatNickname(userDetail.user.nickname)}</p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <StatusPill>{userDetail.user.role}</StatusPill>
-                  <StatusPill>{userDetail.user.status}</StatusPill>
-                  <StatusPill>{userDetail.user.emailVerifiedAt ? "ACTIVE" : "PENDING"}</StatusPill>
-                </div>
-              </div>
-              {userDetail.account ? (
+            {selectedDetail.kind === "user" ? (
+              <div className="space-y-4 text-sm">
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="text-white/50">积分余额</p>
-                  <p className="mt-1 text-2xl font-semibold text-volt">{formatCredits(userDetail.account.balance)}</p>
-                  <p className="mt-1 text-xs text-white/40">
-                    累计获得 {formatCredits(userDetail.account.totalEarned)} · 累计消耗{" "}
-                    {formatCredits(userDetail.account.totalSpent)}
-                  </p>
+                  <p className="font-medium">{selectedDetail.data.user.email}</p>
+                  <p className="mt-1 text-white/54">{formatNickname(selectedDetail.data.user.nickname)}</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <StatusPill>{selectedDetail.data.user.role}</StatusPill>
+                    <StatusPill>{selectedDetail.data.user.status}</StatusPill>
+                    <StatusPill>{selectedDetail.data.user.emailVerifiedAt ? "ACTIVE" : "PENDING"}</StatusPill>
+                  </div>
                 </div>
-              ) : null}
-              <div className="grid grid-cols-3 gap-3">
-                <MiniStat label="任务" value={userDetail.stats.totalTasks} />
-                <MiniStat label="订单" value={userDetail.stats.paidOrders} />
-                <MiniStat label="图片" value={userDetail.stats.totalImages} />
+                {selectedDetail.data.account ? (
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                    <p className="text-white/50">积分余额</p>
+                    <p className="mt-1 text-2xl font-semibold text-volt">
+                      {formatCredits(selectedDetail.data.account.balance)}
+                    </p>
+                    <p className="mt-1 text-xs text-white/40">
+                      累计获得 {formatCredits(selectedDetail.data.account.totalEarned)} · 累计消耗{" "}
+                      {formatCredits(selectedDetail.data.account.totalSpent)}
+                    </p>
+                  </div>
+                ) : null}
+                <div className="grid grid-cols-3 gap-3">
+                  <MiniStat label="任务" value={selectedDetail.data.stats.totalTasks} />
+                  <MiniStat label="订单" value={selectedDetail.data.stats.paidOrders} />
+                  <MiniStat label="图片" value={selectedDetail.data.stats.totalImages} />
+                </div>
+                {selectedDetail.data.recentOrders.length > 0 ? (
+                  <div>
+                    <p className="mb-2 text-white/50">最近订单</p>
+                    <div className="space-y-2">
+                      {selectedDetail.data.recentOrders.map((order) => (
+                        <div
+                          key={order.id}
+                          className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-3"
+                        >
+                          <div>
+                            <p className="text-xs font-medium">{order.orderNo}</p>
+                            <p className="mt-0.5 text-xs text-white/40">
+                              {formatMoney(order.amountCents, order.currency)}
+                            </p>
+                          </div>
+                          <StatusPill>{order.status}</StatusPill>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {selectedDetail.data.recentTasks.length > 0 ? (
+                  <div>
+                    <p className="mb-2 text-white/50">最近任务</p>
+                    <div className="space-y-2">
+                      {selectedDetail.data.recentTasks.map((task) => (
+                        <div key={task.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                          <p className="line-clamp-1 text-xs text-white/70">{task.prompt}</p>
+                          <div className="mt-1 flex items-center gap-2">
+                            <StatusPill>{task.status}</StatusPill>
+                            <span className="text-xs text-white/40">{formatCredits(task.creditCost)}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </div>
-              {userDetail.recentOrders.length > 0 ? (
-                <div>
-                  <p className="mb-2 text-white/50">最近订单</p>
-                  <div className="space-y-2">
-                    {userDetail.recentOrders.map((order) => (
-                      <div
-                        key={order.id}
-                        className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-3"
-                      >
-                        <div>
-                          <p className="text-xs font-medium">{order.orderNo}</p>
-                          <p className="mt-0.5 text-xs text-white/40">
-                            {formatMoney(order.amountCents, order.currency)}
+            ) : selectedDetail.kind === "task" ? (
+              <div className="space-y-4 text-sm">
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="font-medium">{selectedDetail.data.task.prompt}</p>
+                  <p className="mt-1 text-xs text-white/40">{selectedDetail.data.user.email}</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <StatusPill>{selectedDetail.data.task.status}</StatusPill>
+                    <StatusPill>{formatStyleLabel(selectedDetail.data.task.style)}</StatusPill>
+                    <StatusPill>{formatQualityLabel(selectedDetail.data.task.quality)}</StatusPill>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <MiniStat label="尺寸" value={`${selectedDetail.data.task.width}×${selectedDetail.data.task.height}`} />
+                  <MiniStat label="数量" value={selectedDetail.data.task.quantity} />
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-white/70">
+                  <p>客户端请求：{selectedDetail.data.task.clientRequestId}</p>
+                  <p className="mt-1">模型：{selectedDetail.data.task.modelProvider} / {selectedDetail.data.task.modelName}</p>
+                  <p className="mt-1">创建时间：{new Date(selectedDetail.data.task.createdAt).toLocaleString("zh-CN")}</p>
+                  <p className="mt-1">更新时间：{new Date(selectedDetail.data.task.updatedAt).toLocaleString("zh-CN")}</p>
+                  <p className="mt-1">开始时间：{selectedDetail.data.task.startedAt ? new Date(selectedDetail.data.task.startedAt).toLocaleString("zh-CN") : "-"}</p>
+                  <p className="mt-1">完成时间：{selectedDetail.data.task.completedAt ? new Date(selectedDetail.data.task.completedAt).toLocaleString("zh-CN") : "-"}</p>
+                  <p className="mt-1">失败码：{selectedDetail.data.task.failureCode ?? "-"}</p>
+                  <p className="mt-1">失败原因：{selectedDetail.data.task.failureMessage ?? "-"}</p>
+                </div>
+                {selectedDetail.data.images.length > 0 ? (
+                  <div>
+                    <p className="mb-2 text-white/50">关联图片</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      {selectedDetail.data.images.map((image) => (
+                        <article key={image.id} className="overflow-hidden rounded-xl border border-white/10 bg-white/5">
+                          <img src={image.thumbnailUrl} alt="任务图片" className="aspect-square w-full object-cover" />
+                          <div className="space-y-1 p-3 text-xs text-white/60">
+                            <p>{image.visibility}</p>
+                            <p>{image.width}×{image.height}</p>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : selectedDetail.kind === "image" ? (
+              <div className="space-y-4 text-sm">
+                <div className="overflow-hidden rounded-2xl border border-white/10 bg-white/5">
+                  <img src={selectedDetail.data.image.thumbnailUrl} alt="图片详情预览" className="w-full object-cover" />
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="font-medium">{selectedDetail.data.user.email}</p>
+                  <p className="mt-1 text-xs text-white/40">任务：{selectedDetail.data.task.id}</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <StatusPill>{selectedDetail.data.image.visibility}</StatusPill>
+                    <StatusPill>{selectedDetail.data.image.safetyStatus ?? "UNKNOWN"}</StatusPill>
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-white/70">
+                  <p>图片编号：{selectedDetail.data.image.id}</p>
+                  <p className="mt-1">任务编号：{selectedDetail.data.image.taskId}</p>
+                  <p className="mt-1">用户编号：{selectedDetail.data.image.userId}</p>
+                  <p className="mt-1">尺寸：{selectedDetail.data.image.width}×{selectedDetail.data.image.height}</p>
+                  <p className="mt-1">创建时间：{new Date(selectedDetail.data.image.createdAt).toLocaleString("zh-CN")}</p>
+                  <p className="mt-1">删除时间：{selectedDetail.data.image.deletedAt ?? "-"}</p>
+                  <p className="mt-1">原图：{selectedDetail.data.image.publicUrl}</p>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4 text-sm">
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="font-medium">{selectedDetail.data.order.orderNo}</p>
+                  <p className="mt-1 text-white/50">
+                    {formatMoney(selectedDetail.data.order.amountCents, selectedDetail.data.order.currency)} ·{" "}
+                    {formatPaymentProvider(selectedDetail.data.order.paymentProvider)}
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <StatusPill>{selectedDetail.data.order.status}</StatusPill>
+                    <StatusPill>{selectedDetail.data.plan.name}</StatusPill>
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-white/70">
+                  <p>用户：{selectedDetail.data.user.email}</p>
+                  <p className="mt-1">支付单号：{selectedDetail.data.order.paymentIntentId ?? "-"}</p>
+                  <p className="mt-1">套餐：{selectedDetail.data.plan.id}</p>
+                  <p className="mt-1">创建时间：{new Date(selectedDetail.data.order.createdAt).toLocaleString("zh-CN")}</p>
+                  <p className="mt-1">更新时间：{selectedDetail.data.order.updatedAt ? new Date(selectedDetail.data.order.updatedAt).toLocaleString("zh-CN") : "-"}</p>
+                  <p className="mt-1">支付时间：{selectedDetail.data.order.paidAt ? new Date(selectedDetail.data.order.paidAt).toLocaleString("zh-CN") : "-"}</p>
+                </div>
+                {selectedDetail.data.paymentEvents.length > 0 ? (
+                  <div>
+                    <p className="mb-2 text-white/50">支付事件</p>
+                    <div className="space-y-2">
+                      {selectedDetail.data.paymentEvents.map((event) => (
+                        <article key={event.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                          <p className="text-xs font-medium">{event.eventType}</p>
+                          <p className="mt-1 text-xs text-white/40">{event.providerEventId}</p>
+                          <p className="mt-1 text-xs text-white/40">
+                            {new Date(event.createdAt).toLocaleString("zh-CN")} · 处理于{" "}
+                            {new Date(event.processedAt).toLocaleString("zh-CN")}
                           </p>
-                        </div>
-                        <StatusPill>{order.status}</StatusPill>
-                      </div>
-                    ))}
+                        </article>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ) : null}
-              {userDetail.recentTasks.length > 0 ? (
-                <div>
-                  <p className="mb-2 text-white/50">最近任务</p>
-                  <div className="space-y-2">
-                    {userDetail.recentTasks.map((task) => (
-                      <div key={task.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
-                        <p className="line-clamp-1 text-xs text-white/70">{task.prompt}</p>
-                        <div className="mt-1 flex items-center gap-2">
-                          <StatusPill>{task.status}</StatusPill>
-                          <span className="text-xs text-white/40">{formatCredits(task.creditCost)}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </div>
+                ) : null}
+              </div>
+            )}
           </aside>
         </div>
       ) : null}
 
-      {userDetailLoading ? (
+      {detailLoading ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <p className="rounded-2xl border border-white/12 bg-ink px-6 py-4 text-sm text-white/70">
-            正在加载用户详情...
+            正在加载详情...
           </p>
         </div>
       ) : null}
@@ -1298,7 +1622,7 @@ function Metric({ label, value }: { label: string; value: number | string }) {
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: number }) {
+function MiniStat({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-center">
       <p className="text-lg font-semibold">{value}</p>

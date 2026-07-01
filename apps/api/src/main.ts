@@ -1138,6 +1138,14 @@ app.patch("/api/admin/users/:userId/status", async (request) => {
     if (target.id === admin.id) {
       throw new AppError("VALIDATION_ERROR", "Admin cannot change own status here", 400);
     }
+    if (target.role === "ADMIN" && input.status !== "ACTIVE") {
+      const otherActiveAdmins = data.users.filter(
+        (user) => user.id !== target.id && user.role === "ADMIN" && user.status === "ACTIVE"
+      );
+      if (otherActiveAdmins.length === 0) {
+        throw new AppError("VALIDATION_ERROR", "Cannot remove the last active administrator", 400);
+      }
+    }
     const before = { status: target.status };
     target.status = input.status;
     target.updatedAt = new Date().toISOString();
@@ -1186,9 +1194,20 @@ app.get("/api/admin/generation/tasks", async (request) => {
   const tasks = data.generationTasks
     .filter((task) => !query.status || task.status === query.status)
     .filter((task) => !query.userId || task.userId === query.userId)
+    .filter((task) => matchesCreatedRange(task.createdAt, query))
     .sort(descCreated)
     .slice(0, query.limit);
   return envelope(request, { tasks });
+});
+
+app.get("/api/admin/generation/tasks/:taskId", async (request) => {
+  await requireAdmin(request);
+  const { taskId } = idParamSchema.parse(request.params);
+  const data = await store.read();
+  const task = mustFindTask(data, taskId);
+  const user = mustFindUser(data, task.userId);
+  const images = data.generatedImages.filter((image) => image.taskId === task.id).sort(descCreated);
+  return envelope(request, { task, user: withoutPassword(user), images });
 });
 
 app.get("/api/admin/images", async (request) => {
@@ -1197,9 +1216,20 @@ app.get("/api/admin/images", async (request) => {
   const images = data.generatedImages
     .filter((image) => !query.visibility || image.visibility === query.visibility)
     .filter((image) => !query.userId || image.userId === query.userId)
+    .filter((image) => matchesCreatedRange(image.createdAt, query))
     .sort(descCreated)
     .slice(0, query.limit);
   return envelope(request, { images });
+});
+
+app.get("/api/admin/images/:imageId", async (request) => {
+  await requireAdmin(request);
+  const { imageId } = imageParamSchema.parse(request.params);
+  const data = await store.read();
+  const image = mustFindImage(data, imageId);
+  const user = mustFindUser(data, image.userId);
+  const task = mustFindTask(data, image.taskId);
+  return envelope(request, { image, user: withoutPassword(user), task });
 });
 
 app.patch("/api/admin/images/:imageId/visibility", async (request) => {
@@ -1234,9 +1264,25 @@ app.get("/api/admin/orders", async (request) => {
   const orders = data.orders
     .filter((order) => !query.status || order.status === query.status)
     .filter((order) => !query.userId || order.userId === query.userId)
+    .filter((order) => !query.orderNo || order.orderNo.toLowerCase().includes(query.orderNo.toLowerCase()))
+    .filter((order) => matchesCreatedRange(order.createdAt, query))
     .sort(descCreated)
     .slice(0, query.limit);
   return envelope(request, { orders });
+});
+
+app.get("/api/admin/orders/:orderId", async (request) => {
+  await requireAdmin(request);
+  const { orderId } = orderParamSchema.parse(request.params);
+  const data = await store.read();
+  const order = mustFindOrder(data, orderId);
+  const user = mustFindUser(data, order.userId);
+  const plan = data.plans.find((item) => item.id === order.planId);
+  if (!plan) {
+    throw new AppError("NOT_FOUND", "Plan was not found", 404);
+  }
+  const paymentEvents = data.paymentEvents.filter((event) => event.orderId === order.id).sort(descCreated);
+  return envelope(request, { order, user: withoutPassword(user), plan, paymentEvents });
 });
 
 app.get("/api/admin/plans", async (request) => {
@@ -1294,8 +1340,16 @@ app.patch("/api/admin/plans/:planId", async (request) => {
 });
 
 app.get("/api/admin/audit-logs", async (request) => {
+  const query = adminAuditQuerySchema.parse(request.query);
   const { data } = await requireAdmin(request);
-  return envelope(request, { logs: data.adminAuditLogs.sort(descCreated) });
+  const logs = data.adminAuditLogs
+    .filter((log) => !query.adminUserId || log.adminUserId === query.adminUserId)
+    .filter((log) => !query.action || log.action === query.action)
+    .filter((log) => !query.targetType || log.targetType === query.targetType)
+    .filter((log) => !query.targetId || log.targetId === query.targetId)
+    .sort(descCreated)
+    .slice(0, query.limit);
+  return envelope(request, { logs });
 });
 
 app.get("/api/admin/safety-rules", async (request) => {
@@ -1550,6 +1604,11 @@ const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30)
 });
 
+const adminRangeQuerySchema = paginationSchema.extend({
+  createdFrom: z.string().datetime().optional(),
+  createdTo: z.string().datetime().optional()
+});
+
 const optionalPaginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional()
 });
@@ -1570,19 +1629,27 @@ const adminUserQuerySchema = paginationSchema.extend({
   search: z.string().trim().max(120).optional()
 });
 
-const adminTaskQuerySchema = paginationSchema.extend({
+const adminTaskQuerySchema = adminRangeQuerySchema.extend({
   status: taskStatusSchema.optional(),
   userId: z.string().min(1).optional()
 });
 
-const adminImageQuerySchema = paginationSchema.extend({
+const adminImageQuerySchema = adminRangeQuerySchema.extend({
   visibility: imageVisibilitySchema.optional(),
   userId: z.string().min(1).optional()
 });
 
-const adminOrderQuerySchema = paginationSchema.extend({
+const adminOrderQuerySchema = adminRangeQuerySchema.extend({
   status: orderStatusSchema.optional(),
-  userId: z.string().min(1).optional()
+  userId: z.string().min(1).optional(),
+  orderNo: z.string().trim().min(1).max(80).optional()
+});
+
+const adminAuditQuerySchema = paginationSchema.extend({
+  adminUserId: z.string().min(1).optional(),
+  action: z.string().trim().min(1).max(120).optional(),
+  targetType: z.string().trim().min(1).max(80).optional(),
+  targetId: z.string().trim().min(1).max(120).optional()
 });
 
 const idParamSchema = z.object({ taskId: z.string().min(1) });
@@ -1846,6 +1913,14 @@ function mustFindCreditAccount(data: StoreData, userId: string) {
   return account;
 }
 
+function mustFindTask(data: StoreData, taskId: string): GenerationTask {
+  const task = data.generationTasks.find((item) => item.id === taskId);
+  if (!task) {
+    throw new AppError("NOT_FOUND", "Task was not found", 404);
+  }
+  return task;
+}
+
 function mustFindOwnTask(data: StoreData, userId: string, taskId: string): GenerationTask {
   const task = data.generationTasks.find((item) => item.id === taskId && item.userId === userId);
   if (!task) {
@@ -1872,6 +1947,14 @@ function mustFindOwnReferenceImage(data: StoreData, userId: string, referenceIma
 
 function mustFindOwnImage(data: StoreData, userId: string, imageId: string): GeneratedImage {
   const image = data.generatedImages.find((item) => item.id === imageId && item.userId === userId && !item.deletedAt);
+  if (!image) {
+    throw new AppError("NOT_FOUND", "Image was not found", 404);
+  }
+  return image;
+}
+
+function mustFindImage(data: StoreData, imageId: string): GeneratedImage {
+  const image = data.generatedImages.find((item) => item.id === imageId && !item.deletedAt);
   if (!image) {
     throw new AppError("NOT_FOUND", "Image was not found", 404);
   }
@@ -2360,6 +2443,20 @@ function audit(
 function stripAdminReason<T extends { reason: string }>(input: T): Omit<T, "reason"> {
   const { reason: _reason, ...rest } = input;
   return rest;
+}
+
+function matchesCreatedRange(
+  createdAt: string,
+  query: { createdFrom?: string | undefined; createdTo?: string | undefined }
+): boolean {
+  const createdTime = new Date(createdAt).getTime();
+  if (query.createdFrom && createdTime < new Date(query.createdFrom).getTime()) {
+    return false;
+  }
+  if (query.createdTo && createdTime > new Date(query.createdTo).getTime()) {
+    return false;
+  }
+  return true;
 }
 
 function inspectReferenceUpload(input: z.infer<typeof referenceUploadSchema>): InspectedReferenceUpload {

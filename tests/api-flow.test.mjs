@@ -859,8 +859,37 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const succeededTasks = await get(baseUrl, "/api/admin/generation/tasks?status=SUCCEEDED&limit=5", adminSession);
     assert.ok(succeededTasks.data.tasks.some((task) => task.id === taskId));
     assert.ok(succeededTasks.data.tasks.every((task) => task.status === "SUCCEEDED"));
+
+    const adminTaskDetail = await get(baseUrl, `/api/admin/generation/tasks/${taskId}`, adminSession);
+    assert.equal(adminTaskDetail.data.task.id, taskId);
+    assert.equal(adminTaskDetail.data.user.id, demo.data.user.id);
+    assert.ok(adminTaskDetail.data.images.some((image) => image.id === generatedImageId));
+
+    const futureCreatedFrom = encodeURIComponent("2999-01-01T00:00:00.000Z");
+    const futureTasks = await get(
+      baseUrl,
+      `/api/admin/generation/tasks?status=SUCCEEDED&userId=${demo.data.user.id}&createdFrom=${futureCreatedFrom}&limit=10`,
+      adminSession
+    );
+    assert.equal(futureTasks.data.tasks.length, 0);
+
     const paidOrders = await get(baseUrl, "/api/admin/orders?status=PAID&limit=10", adminSession);
     assert.ok(paidOrders.data.orders.every((order) => order.status === "PAID"));
+
+    const paidOrderByNumber = await get(
+      baseUrl,
+      `/api/admin/orders?status=PAID&userId=${demo.data.user.id}&orderNo=${encodeURIComponent(orderCreated.data.order.orderNo)}&limit=20`,
+      adminSession
+    );
+    assert.deepEqual(
+      paidOrderByNumber.data.orders.map((order) => order.id),
+      [orderCreated.data.order.id]
+    );
+
+    const adminOrderDetail = await get(baseUrl, `/api/admin/orders/${orderCreated.data.order.id}`, adminSession);
+    assert.equal(adminOrderDetail.data.order.id, orderCreated.data.order.id);
+    assert.equal(adminOrderDetail.data.user.id, demo.data.user.id);
+    assert.equal(adminOrderDetail.data.plan.id, orderCreated.data.plan.id);
 
     const hiddenImage = await patch(
       baseUrl,
@@ -872,8 +901,30 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const hiddenImages = await get(baseUrl, "/api/admin/images?visibility=HIDDEN&limit=10", adminSession);
     assert.ok(hiddenImages.data.images.some((image) => image.id === generatedImageId));
     assert.ok(hiddenImages.data.images.every((image) => image.visibility === "HIDDEN"));
+    const adminImageDetail = await get(baseUrl, `/api/admin/images/${generatedImageId}`, adminSession);
+    assert.equal(adminImageDetail.data.image.id, generatedImageId);
+    assert.equal(adminImageDetail.data.user.id, demo.data.user.id);
+    assert.equal(adminImageDetail.data.task.id, taskId);
+    const futureHiddenImages = await get(
+      baseUrl,
+      `/api/admin/images?visibility=HIDDEN&userId=${demo.data.user.id}&createdFrom=${futureCreatedFrom}&limit=10`,
+      adminSession
+    );
+    assert.equal(futureHiddenImages.data.images.length, 0);
     const visibleImagesAfterHide = await get(baseUrl, "/api/images?limit=50", demoSession);
     assert.ok(!visibleImagesAfterHide.data.images.some((image) => image.id === generatedImageId));
+
+    const selfSuspend = await fetch(`${baseUrl}/api/admin/users/${admin.data.user.id}/status`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: adminSession
+      },
+      body: JSON.stringify({ status: "SUSPENDED", reason: "防止误封自己" })
+    });
+    const selfSuspendPayload = await selfSuspend.json();
+    assert.equal(selfSuspend.status, 400);
+    assert.equal(selfSuspendPayload.error.code, "VALIDATION_ERROR");
 
     const auditLogs = await get(baseUrl, "/api/admin/audit-logs", adminSession);
     for (const action of [
@@ -902,6 +953,20 @@ test("api and worker complete generation and enforce admin safety rules", async 
         `Missing audit reason for ${action}: ${reason}`
       );
     }
+    const imageAuditLogs = await get(
+      baseUrl,
+      `/api/admin/audit-logs?action=image.visibility.update&targetType=IMAGE&targetId=${generatedImageId}&limit=20`,
+      adminSession
+    );
+    assert.ok(imageAuditLogs.data.logs.length >= 1);
+    assert.ok(
+      imageAuditLogs.data.logs.every(
+        (entry) =>
+          entry.action === "image.visibility.update" &&
+          entry.targetType === "IMAGE" &&
+          entry.targetId === generatedImageId
+      )
+    );
 
     const metrics = await get(baseUrl, "/api/admin/metrics", adminSession);
     assert.ok(metrics.data.http.requestsTotal > 0);

@@ -143,3 +143,35 @@ test("web core pages expose recoverable empty states and confirm destructive act
   assert.match(adminPage, /confirmDisabled=\{confirmReason\.trim\(\)\.length < 3\}/);
   assert.match(adminPage, /审计日志/);
 });
+
+test("admin console exposes enterprise filters, detail drawers, and audit queries", async () => {
+  const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
+  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+
+  assert.match(adminPage, /selectedDetail/);
+  assert.match(adminPage, /openTaskDetail/);
+  assert.match(adminPage, /openImageDetail/);
+  assert.match(adminPage, /openOrderDetail/);
+  assert.match(adminPage, /function detailDialogLabel\(/);
+  assert.match(adminPage, /aria-label=\{\`.*详情\`\}/);
+  assert.match(adminPage, /\/api\/admin\/generation\/tasks\/\$\{taskId\}/);
+  assert.match(adminPage, /\/api\/admin\/images\/\$\{imageId\}/);
+  assert.match(adminPage, /\/api\/admin\/orders\/\$\{orderId\}/);
+
+  assert.match(adminPage, /时间范围/);
+  assert.match(adminPage, /createdFrom/);
+  assert.match(adminPage, /createdTo/);
+  assert.match(adminPage, /userIdFilter/);
+  assert.match(adminPage, /orderNoFilter/);
+  assert.match(adminPage, /订单号筛选/);
+  assert.match(adminPage, /adminUserId/);
+  assert.match(adminPage, /auditActionFilter/);
+  assert.match(adminPage, /auditTargetTypeFilter/);
+  assert.match(adminPage, /auditTargetIdFilter/);
+
+  assert.match(apiClient, /export type AuditLog/);
+  assert.match(apiClient, /adminUserId: string/);
+  assert.match(apiClient, /reason: string \| null/);
+  assert.match(apiClient, /userId: string/);
+  assert.match(apiClient, /paymentIntentId/);
+});

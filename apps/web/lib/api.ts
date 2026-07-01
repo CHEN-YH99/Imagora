@@ -7,9 +7,12 @@ export type User = {
   id: string;
   email: string;
   nickname: string;
+  avatarUrl: string | null;
   role: "USER" | "ADMIN";
   status: "ACTIVE" | "SUSPENDED" | "DELETED";
   emailVerifiedAt: string | null;
+  createdAt: string;
+  lastLoginAt: string | null;
 };
 
 export type CaptchaChallenge = {
@@ -50,17 +53,27 @@ export type CreditLedgerEntry = {
 
 export type Task = {
   id: string;
+  userId: string;
+  clientRequestId: string;
   referenceImageId?: string | null;
   prompt: string;
+  negativePrompt: string | null;
   style: string;
   aspectRatio: string;
+  width: number;
+  height: number;
   quantity: number;
   quality: string;
+  modelProvider: string;
   modelName: string;
   status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "BLOCKED";
   creditCost: number;
+  failureCode: string | null;
   failureMessage: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
   createdAt: string;
+  updatedAt: string;
 };
 
 export type ReferenceImage = {
@@ -78,6 +91,7 @@ export type ReferenceImage = {
 export type GeneratedImage = {
   id: string;
   taskId: string;
+  userId: string;
   storageKey?: string;
   thumbnailUrl: string;
   publicUrl: string;
@@ -89,6 +103,7 @@ export type GeneratedImage = {
   safetyStatus?: "PASSED" | "BLOCKED" | "REVIEW_REQUIRED";
   visibility: "PRIVATE" | "PUBLIC" | "HIDDEN";
   favorite?: boolean;
+  deletedAt: string | null;
   createdAt: string;
 };
 
@@ -106,15 +121,42 @@ export type Plan = {
 
 export type Order = {
   id: string;
+  userId: string;
   orderNo: string;
   planId: string;
   amountCents: number;
   currency: string;
   paymentProvider: string;
+  paymentIntentId: string | null;
   status: "PENDING" | "PAID" | "CANCELED" | "REFUNDED" | "CLOSED";
   paidAt?: string | null;
   createdAt: string;
   updatedAt?: string;
+};
+
+export type PaymentEvent = {
+  id: string;
+  provider: string;
+  providerEventId: string;
+  orderId: string;
+  eventType: string;
+  payload: Record<string, unknown>;
+  processedAt: string;
+  createdAt: string;
+};
+
+export type AuditLog = {
+  id: string;
+  adminUserId: string;
+  action: string;
+  targetType: string;
+  targetId: string;
+  reason: string | null;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  ipAddress: string;
+  userAgent: string;
+  createdAt: string;
 };
 
 export type AdminMetrics = {
@@ -482,6 +524,7 @@ const apiErrorCodeMap: Record<string, string> = {
 
 const apiErrorMessageMap: Record<string, string> = {
   "Admin cannot change own status here": "不能在此处修改当前管理员账号状态。",
+  "Cannot remove the last active administrator": "不能移除最后一个启用中的管理员账号。",
   "Credit balance is not enough": "积分余额不足，请充值后再提交生成。",
   "Email is already registered": "该邮箱已注册，请直接登录或更换邮箱。",
   "Unable to create account with these credentials": "账号信息无法完成注册，请检查邮箱或直接登录。",
