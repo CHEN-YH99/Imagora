@@ -971,10 +971,49 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const metrics = await get(baseUrl, "/api/admin/metrics", adminSession);
     assert.ok(metrics.data.http.requestsTotal > 0);
     assert.ok(metrics.data.domain.tasksByStatus.SUCCEEDED >= 1);
+    assert.ok(metrics.data.domain.generationFailureRate > 0);
+    assert.ok(metrics.data.domain.averageQueueWaitMs >= 0);
     assert.ok(metrics.data.domain.referenceImagesTotal >= 1);
     assert.ok(metrics.data.domain.paymentEventsTotal >= 2);
+    assert.ok(metrics.data.domain.paymentFailuresTotal >= 3);
+    assert.ok(metrics.data.domain.refundFailuresTotal >= 0);
     assert.ok(metrics.data.alerts.some((alert) => alert.id === "generation.failure-rate"));
     assert.ok(metrics.data.alerts.some((alert) => alert.id === "payments.amount-mismatch"));
+    assert.ok(
+      metrics.data.alertNotifications.some(
+        (notification) =>
+          notification.alertId === "generation.failure-rate" &&
+          notification.channel === "local" &&
+          notification.status === "SENT"
+      )
+    );
+    assert.ok(
+      metrics.data.alertNotifications.some(
+        (notification) =>
+          notification.alertId === "payments.amount-mismatch" &&
+          notification.channel === "local" &&
+          notification.status === "SENT"
+      )
+    );
+    const generationIncident = metrics.data.recentIncidents.find(
+      (incident) => incident.taskId === failedCreated.data.task.id && incident.errorCode === "PROVIDER_FAILED"
+    );
+    assert.ok(generationIncident);
+    assert.equal(generationIncident.area, "generation");
+    assert.equal(generationIncident.status, "OPEN");
+    assert.equal(generationIncident.errorCode, "PROVIDER_FAILED");
+    assert.equal(generationIncident.userId, demo.data.user.id);
+    const paymentIncident = metrics.data.recentIncidents.find(
+      (incident) => incident.orderId === mismatchOrder.data.order.id
+    );
+    assert.ok(paymentIncident);
+    assert.equal(paymentIncident.area, "payments");
+    assert.equal(paymentIncident.status, "OPEN");
+    assert.equal(paymentIncident.errorCode, "AMOUNT_MISMATCH");
+    assert.equal(paymentIncident.requestId, mismatchWebhook.requestId);
+    assert.equal(JSON.stringify(metrics.data.recentIncidents).includes("Demo123!"), false);
+    assert.equal(JSON.stringify(metrics.data.recentIncidents).includes("Admin123!"), false);
+    assert.equal(JSON.stringify(selfSuspendPayload).includes("stack"), false);
 
     await post(
       baseUrl,

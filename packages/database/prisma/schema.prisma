@@ -165,9 +165,11 @@ model CreditLedgerEntry {
   sourceId        String           @map("source_id")
   idempotencyKey  String           @unique @map("idempotency_key")
   remark          String
+  expiresAt       DateTime?        @map("expires_at")
   createdAt       DateTime         @default(now()) @map("created_at")
 
   @@index([userId, createdAt(sort: Desc)])
+  @@index([type, expiresAt])
   @@map("credit_ledger_entries")
 }
 
@@ -190,6 +192,7 @@ model GenerationTask {
   modelName       String          @map("model_name")
   status          TaskStatus      @default(PENDING)
   creditCost      Int             @map("credit_cost")
+  providerCostCents Int           @default(0) @map("provider_cost_cents")
   failureCode     String?         @map("failure_code")
   failureMessage  String?         @map("failure_message")
   startedAt       DateTime?       @map("started_at")
@@ -365,4 +368,42 @@ model AdminAuditLog {
   @@index([adminUserId, createdAt(sort: Desc)])
   @@index([targetType, targetId])
   @@map("admin_audit_logs")
+}
+
+model OperationalIncident {
+  id         String   @id @default(uuid())
+  severity   String
+  area       String
+  status     String   @default("OPEN")
+  message    String
+  errorCode  String?  @map("error_code")
+  requestId  String?  @map("request_id")
+  userId     String?  @map("user_id")
+  taskId     String?  @map("task_id")
+  orderId    String?  @map("order_id")
+  route      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  resolvedAt DateTime? @map("resolved_at")
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([requestId])
+  @@index([taskId])
+  @@index([orderId])
+  @@map("operational_incidents")
+}
+
+model AlertNotification {
+  id        String   @id @default(uuid())
+  alertId   String   @map("alert_id")
+  channel   String
+  status    String
+  severity  String
+  dedupeKey String   @unique @map("dedupe_key")
+  message   String
+  createdAt DateTime @default(now()) @map("created_at")
+  sentAt    DateTime @map("sent_at")
+
+  @@index([alertId, createdAt(sort: Desc)])
+  @@map("alert_notifications")
 }

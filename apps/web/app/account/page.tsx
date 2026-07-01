@@ -108,6 +108,20 @@ export default function AccountPage() {
   }
 
   const latestGrantEntry = entries.find((entry) => entry.type === "GRANT" && entry.amount > 0);
+  const now = Date.now();
+  const soonThreshold = now + 7 * 24 * 60 * 60 * 1000;
+  const expiringSoonEntries = entries.filter(
+    (entry) =>
+      entry.type === "GRANT" &&
+      entry.amount > 0 &&
+      typeof entry.expiresAt === "string" &&
+      new Date(entry.expiresAt).getTime() > now &&
+      new Date(entry.expiresAt).getTime() <= soonThreshold
+  );
+  const expiringSoonTotal = expiringSoonEntries.reduce((sum, entry) => sum + entry.amount, 0);
+  const soonestExpiry = expiringSoonEntries
+    .map((entry) => entry.expiresAt as string)
+    .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
   const exceptionalOrders = recentOrders.filter((order) =>
     ["PENDING", "CLOSED", "CANCELED", "REFUNDED"].includes(order.status)
   );
@@ -227,6 +241,11 @@ export default function AccountPage() {
                 累计获得 {account ? formatCredits(account.totalEarned) : "0 积分"} · 累计消耗{" "}
                 {account ? formatCredits(account.totalSpent) : "0 积分"}
               </p>
+              {expiringSoonTotal > 0 ? (
+                <p className="mt-3 rounded-xl border border-ember/30 bg-ember/10 px-3 py-2 text-xs text-ember">
+                  有最多 {formatCredits(expiringSoonTotal)} 将在 {soonestExpiry} 前过期，建议尽快使用。
+                </p>
+              ) : null}
               <Link
                 className="focus-ring mt-4 inline-flex items-center gap-2 rounded-full bg-mint px-4 py-2 text-sm font-semibold text-ink transition-colors hover:bg-volt"
                 href="/pricing"

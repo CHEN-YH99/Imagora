@@ -153,7 +153,7 @@ test("admin console exposes enterprise filters, detail drawers, and audit querie
   assert.match(adminPage, /openImageDetail/);
   assert.match(adminPage, /openOrderDetail/);
   assert.match(adminPage, /function detailDialogLabel\(/);
-  assert.match(adminPage, /aria-label=\{\`.*详情\`\}/);
+  assert.match(adminPage, /aria-label=\{`.*详情`\}/);
   assert.match(adminPage, /\/api\/admin\/generation\/tasks\/\$\{taskId\}/);
   assert.match(adminPage, /\/api\/admin\/images\/\$\{imageId\}/);
   assert.match(adminPage, /\/api\/admin\/orders\/\$\{orderId\}/);
@@ -174,4 +174,26 @@ test("admin console exposes enterprise filters, detail drawers, and audit querie
   assert.match(apiClient, /reason: string \| null/);
   assert.match(apiClient, /userId: string/);
   assert.match(apiClient, /paymentIntentId/);
+});
+
+test("admin console exposes operational incidents and alert notifications", async () => {
+  const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
+  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+
+  assert.match(adminPage, /最近异常/);
+  assert.match(adminPage, /处理状态/);
+  assert.match(adminPage, /告警通知/);
+  assert.match(adminPage, /recentIncidents/);
+  assert.match(adminPage, /alertNotifications/);
+  assert.match(adminPage, /requestId/);
+  assert.match(adminPage, /taskId/);
+  assert.match(adminPage, /orderId/);
+
+  assert.match(apiClient, /export type OperationalIncident/);
+  assert.match(apiClient, /export type AlertNotification/);
+  assert.match(apiClient, /recentIncidents: OperationalIncident\[\]/);
+  assert.match(apiClient, /alertNotifications: AlertNotification\[\]/);
+  assert.match(apiClient, /averageQueueWaitMs/);
+  assert.match(apiClient, /paymentFailuresTotal/);
+  assert.match(apiClient, /refundFailuresTotal/);
 });

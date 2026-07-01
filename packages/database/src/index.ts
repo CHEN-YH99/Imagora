@@ -165,7 +165,9 @@ export class PrismaStore implements Store {
       paymentEvents,
       safetyEvents,
       safetyRules,
-      adminAuditLogs
+      adminAuditLogs,
+      operationalIncidents,
+      alertNotifications
     ] = await Promise.all([
       this.prisma.user.findMany(),
       this.prisma.session.findMany(),
@@ -182,7 +184,9 @@ export class PrismaStore implements Store {
       this.prisma.paymentEvent.findMany(),
       this.prisma.safetyEvent.findMany(),
       this.prisma.safetyRule.findMany(),
-      this.prisma.adminAuditLog.findMany()
+      this.prisma.adminAuditLog.findMany(),
+      this.prisma.operationalIncident.findMany(),
+      this.prisma.alertNotification.findMany()
     ]);
 
     return {
@@ -238,6 +242,7 @@ export class PrismaStore implements Store {
         sourceId: entry.sourceId,
         idempotencyKey: entry.idempotencyKey,
         remark: entry.remark,
+        expiresAt: entry.expiresAt?.toISOString() ?? null,
         createdAt: entry.createdAt.toISOString()
       })),
       generationTasks: generationTasks.map((task) => ({
@@ -257,6 +262,7 @@ export class PrismaStore implements Store {
         modelName: task.modelName,
         status: task.status,
         creditCost: task.creditCost,
+        providerCostCents: task.providerCostCents,
         failureCode: task.failureCode,
         failureMessage: task.failureMessage,
         startedAt: task.startedAt?.toISOString() ?? null,
@@ -370,12 +376,41 @@ export class PrismaStore implements Store {
         ipAddress: log.ipAddress,
         userAgent: log.userAgent,
         createdAt: log.createdAt.toISOString()
+      })),
+      operationalIncidents: operationalIncidents.map((incident) => ({
+        id: incident.id,
+        severity: incident.severity as StoreData["operationalIncidents"][number]["severity"],
+        area: incident.area as StoreData["operationalIncidents"][number]["area"],
+        status: incident.status as StoreData["operationalIncidents"][number]["status"],
+        message: incident.message,
+        errorCode: incident.errorCode,
+        requestId: incident.requestId,
+        userId: incident.userId,
+        taskId: incident.taskId,
+        orderId: incident.orderId,
+        route: incident.route,
+        createdAt: incident.createdAt.toISOString(),
+        updatedAt: incident.updatedAt.toISOString(),
+        resolvedAt: incident.resolvedAt?.toISOString() ?? null
+      })),
+      alertNotifications: alertNotifications.map((notification) => ({
+        id: notification.id,
+        alertId: notification.alertId,
+        channel: notification.channel as StoreData["alertNotifications"][number]["channel"],
+        status: notification.status as StoreData["alertNotifications"][number]["status"],
+        severity: notification.severity as StoreData["alertNotifications"][number]["severity"],
+        dedupeKey: notification.dedupeKey,
+        message: notification.message,
+        createdAt: notification.createdAt.toISOString(),
+        sentAt: notification.sentAt.toISOString()
       }))
     };
   }
 
   async write(data: StoreData): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
+      await tx.alertNotification.deleteMany();
+      await tx.operationalIncident.deleteMany();
       await tx.adminAuditLog.deleteMany();
       await tx.safetyRule.deleteMany();
       await tx.safetyEvent.deleteMany();
@@ -484,7 +519,8 @@ export class PrismaStore implements Store {
             sourceId: entry.sourceId,
             idempotencyKey: entry.idempotencyKey,
             remark: entry.remark,
-            createdAt: toDate(entry.createdAt)
+            createdAt: toDate(entry.createdAt),
+            expiresAt: entry.expiresAt ? toDate(entry.expiresAt) : null
           }))
         });
       }
@@ -527,6 +563,7 @@ export class PrismaStore implements Store {
             modelName: task.modelName,
             status: task.status,
             creditCost: task.creditCost,
+            providerCostCents: task.providerCostCents,
             failureCode: task.failureCode,
             failureMessage: task.failureMessage,
             startedAt: task.startedAt ? toDate(task.startedAt) : null,
@@ -642,6 +679,41 @@ export class PrismaStore implements Store {
           }))
         });
       }
+      if (data.operationalIncidents.length) {
+        await tx.operationalIncident.createMany({
+          data: data.operationalIncidents.map((incident) => ({
+            id: incident.id,
+            severity: incident.severity,
+            area: incident.area,
+            status: incident.status,
+            message: incident.message,
+            errorCode: incident.errorCode,
+            requestId: incident.requestId,
+            userId: incident.userId,
+            taskId: incident.taskId,
+            orderId: incident.orderId,
+            route: incident.route,
+            createdAt: toDate(incident.createdAt),
+            updatedAt: toDate(incident.updatedAt),
+            resolvedAt: incident.resolvedAt ? toDate(incident.resolvedAt) : null
+          }))
+        });
+      }
+      if (data.alertNotifications.length) {
+        await tx.alertNotification.createMany({
+          data: data.alertNotifications.map((notification) => ({
+            id: notification.id,
+            alertId: notification.alertId,
+            channel: notification.channel,
+            status: notification.status,
+            severity: notification.severity,
+            dedupeKey: notification.dedupeKey,
+            message: notification.message,
+            createdAt: toDate(notification.createdAt),
+            sentAt: toDate(notification.sentAt)
+          }))
+        });
+      }
     });
   }
 
@@ -743,7 +815,9 @@ export function createSeedData(): StoreData {
     paymentEvents: [],
     safetyEvents: [],
     safetyRules: seedSafetyRules(now),
-    adminAuditLogs: []
+    adminAuditLogs: [],
+    operationalIncidents: [],
+    alertNotifications: []
   };
 }
 
@@ -780,7 +854,9 @@ function createBootstrapAdminData(email: string, password: string): StoreData {
     paymentEvents: [],
     safetyEvents: [],
     safetyRules: seedSafetyRules(now),
-    adminAuditLogs: []
+    adminAuditLogs: [],
+    operationalIncidents: [],
+    alertNotifications: []
   };
 }
 
@@ -816,6 +892,7 @@ function seedLedger(userId: string, amount: number, remark: string, now: string)
     sourceId: "seed",
     idempotencyKey: `seed:${userId}`,
     remark,
+    expiresAt: null,
     createdAt: now
   };
 }
@@ -901,10 +978,14 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
     passwordResetTokens: data.passwordResetTokens ?? [],
     emailVerificationTokens: data.emailVerificationTokens ?? [],
     creditAccounts: data.creditAccounts ?? [],
-    creditLedgerEntries: data.creditLedgerEntries ?? [],
+    creditLedgerEntries: (data.creditLedgerEntries ?? []).map((entry) => ({
+      ...entry,
+      expiresAt: entry.expiresAt ?? null
+    })),
     generationTasks: (data.generationTasks ?? []).map((task) => ({
       ...task,
-      referenceImageId: task.referenceImageId ?? null
+      referenceImageId: task.referenceImageId ?? null,
+      providerCostCents: task.providerCostCents ?? 0
     })),
     referenceImages: data.referenceImages ?? [],
     generatedImages: (data.generatedImages ?? []).map((image) => ({
@@ -921,7 +1002,19 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
     adminAuditLogs: (data.adminAuditLogs ?? []).map((log) => ({
       ...log,
       reason: log.reason ?? null
-    }))
+    })),
+    operationalIncidents: (data.operationalIncidents ?? []).map((incident) => ({
+      ...incident,
+      status: incident.status ?? "OPEN",
+      errorCode: incident.errorCode ?? null,
+      requestId: incident.requestId ?? null,
+      userId: incident.userId ?? null,
+      taskId: incident.taskId ?? null,
+      orderId: incident.orderId ?? null,
+      route: incident.route ?? null,
+      resolvedAt: incident.resolvedAt ?? null
+    })),
+    alertNotifications: data.alertNotifications ?? []
   };
 }
 

@@ -17,30 +17,10 @@ import {
 import { createInitialData, JsonStore, verifyPassword } from "../packages/database/dist/index.js";
 import { SmtpMailer } from "../packages/mailer/dist/index.js";
 import { StripePaymentProvider } from "../packages/payments/dist/index.js";
-import { calculateCreditCost, checkPromptSafety } from "../packages/shared/dist/index.js";
+import { checkPromptSafety } from "../packages/shared/dist/index.js";
 
 const onePixelPngBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
-
-test("credit cost increases with quantity and quality", () => {
-  const standardOne = calculateCreditCost({
-    style: "product_photography",
-    quality: "standard",
-    quantity: 1,
-    aspectRatio: "1:1",
-    model: "mock"
-  });
-  const highTwo = calculateCreditCost({
-    style: "product_photography",
-    quality: "high",
-    quantity: 2,
-    aspectRatio: "1:1",
-    model: "mock"
-  });
-
-  assert.equal(standardOne, 7);
-  assert.ok(highTwo > standardOne * 2);
-});
 
 test("provider quote resolves active mock provider model and charges by quality, size, quantity", () => {
   const previous = snapshotEnv(["AI_PROVIDER"]);

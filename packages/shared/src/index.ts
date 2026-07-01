@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 export type UserRole = "USER" | "ADMIN";
 export type UserStatus = "ACTIVE" | "SUSPENDED" | "DELETED";
 export type TaskStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "BLOCKED";
@@ -80,6 +82,8 @@ export interface CreditLedgerEntry {
   sourceId: string;
   idempotencyKey: string;
   remark: string;
+  // GRANT 批次的到期时间（ISO），null 表示永不过期；仅 GRANT 类型有意义
+  expiresAt: string | null;
   createdAt: string;
 }
 
@@ -100,6 +104,8 @@ export interface GenerationTask {
   modelName: string;
   status: TaskStatus;
   creditCost: number;
+  // 供应商侧真实美元成本（分），任务成功后由 worker 落库，用于毛利核算
+  providerCostCents: number;
   failureCode: string | null;
   failureMessage: string | null;
   startedAt: string | null;
@@ -224,6 +230,39 @@ export interface AdminAuditLog {
   createdAt: string;
 }
 
+export type OperationalSeverity = "info" | "warning" | "critical";
+export type OperationalArea = "generation" | "payments" | "http" | "system";
+export type OperationalIncidentStatus = "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
+
+export interface OperationalIncident {
+  id: string;
+  severity: OperationalSeverity;
+  area: OperationalArea;
+  status: OperationalIncidentStatus;
+  message: string;
+  errorCode: string | null;
+  requestId: string | null;
+  userId: string | null;
+  taskId: string | null;
+  orderId: string | null;
+  route: string | null;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+}
+
+export interface AlertNotification {
+  id: string;
+  alertId: string;
+  channel: "local";
+  status: "SENT";
+  severity: OperationalSeverity;
+  dedupeKey: string;
+  message: string;
+  createdAt: string;
+  sentAt: string;
+}
+
 export interface StoreData {
   users: User[];
   sessions: Session[];
@@ -241,6 +280,8 @@ export interface StoreData {
   safetyEvents: SafetyEvent[];
   safetyRules: SafetyRule[];
   adminAuditLogs: AdminAuditLog[];
+  operationalIncidents: OperationalIncident[];
+  alertNotifications: AlertNotification[];
 }
 
 export interface ApiEnvelope<T> {
@@ -300,44 +341,10 @@ export const aspectRatioDimensions: Record<AspectRatio, { width: number; height:
   "16:9": { width: 1600, height: 900 }
 };
 
-export const styleCost: Record<StyleId, number> = {
-  realistic: 8,
-  illustration: 6,
-  anime: 6,
-  product_photography: 7,
-  poster: 9
-};
-
-export const qualityMultiplier: Record<Quality, number> = {
-  draft: 0.7,
-  standard: 1,
-  high: 1.65
-};
-
-// 各模型相对 gpt-image-1 的积分成本倍率
-export const modelCostMultiplier: Record<ModelId, number> = {
-  mock: 1,
-  "gpt-image-2": 1.5
-};
-
 export const maxPromptLength = 1200;
 export const maxQuantity = 4;
-
-export function calculateCreditCost(input: {
-  style: StyleId;
-  quality: Quality;
-  quantity: number;
-  aspectRatio: AspectRatio;
-  model?: ModelId;
-}): number {
-  const dimension = aspectRatioDimensions[input.aspectRatio];
-  const megapixels = (dimension.width * dimension.height) / 1_000_000;
-  const sizeMultiplier = megapixels > 1.4 ? 1.25 : 1;
-  const modelMultiplier = modelCostMultiplier[input.model ?? "gpt-image-2"];
-  return Math.ceil(
-    styleCost[input.style] * qualityMultiplier[input.quality] * sizeMultiplier * modelMultiplier * input.quantity
-  );
-}
+// 生成任务积分成本的唯一真源为 @imagora/ai-providers 的 quoteImageGeneration，
+// 此处不再维护独立公式，避免两套计费口径漂移。
 
 export function publicUser(user: User): PublicUser {
   return {
@@ -370,4 +377,115 @@ export function checkPromptSafety(prompt: string): { status: SafetyStatus; reaso
 
 export function requireNever(value: never): never {
   throw new Error(`Unexpected value: ${String(value)}`);
+}
+
+// ---- 积分批次过期精算（API / worker / 对账脚本共享的唯一实现）----
+//
+// 批次级 FIFO 精算：从完整流水重建每个「正向来源」（GRANT/REFUND/正向 ADJUST）的当前剩余额。
+// 不变量：sum(所有来源剩余) === account.balance。
+// 消耗归属规则：
+//   1. EXPIRE 负向流水按 sourceId 钉死归属到目标批次（不进入通用池，避免误扣其他批次）；
+//   2. 其余消耗（SPEND / 负向 ADJUST）按「最早到期优先」归属，让快过期的积分先被花掉。
+export function creditSourceRemainders(entries: CreditLedgerEntry[]): Map<string, number> {
+  const sources = entries
+    .filter((entry) => entry.amount > 0)
+    .map((entry) => ({
+      id: entry.id,
+      expiresAtMs: entry.expiresAt ? new Date(entry.expiresAt).getTime() : Number.POSITIVE_INFINITY,
+      createdAtMs: new Date(entry.createdAt).getTime()
+    }));
+  const remainder = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.amount > 0) {
+      remainder.set(entry.id, entry.amount);
+    }
+  }
+  // 阶段一：EXPIRE 钉死扣减自身目标批次
+  for (const entry of entries) {
+    if (entry.type === "EXPIRE" && entry.amount < 0) {
+      const current = remainder.get(entry.sourceId);
+      if (current !== undefined) {
+        remainder.set(entry.sourceId, current - Math.abs(entry.amount));
+      }
+    }
+  }
+  // 阶段二：通用消耗按最早到期优先归属
+  let generic = 0;
+  for (const entry of entries) {
+    if (entry.amount < 0 && entry.type !== "EXPIRE") {
+      generic += Math.abs(entry.amount);
+    }
+  }
+  const ordered = [...sources].sort((a, b) =>
+    a.expiresAtMs !== b.expiresAtMs ? a.expiresAtMs - b.expiresAtMs : a.createdAtMs - b.createdAtMs
+  );
+  for (const source of ordered) {
+    if (generic <= 0) {
+      break;
+    }
+    const available = remainder.get(source.id) ?? 0;
+    const take = Math.min(available, generic);
+    remainder.set(source.id, available - take);
+    generic -= take;
+  }
+  return remainder;
+}
+
+export function groupLedgerByUser(entries: CreditLedgerEntry[]): Map<string, CreditLedgerEntry[]> {
+  const byUser = new Map<string, CreditLedgerEntry[]>();
+  for (const entry of entries) {
+    const list = byUser.get(entry.userId) ?? [];
+    list.push(entry);
+    byUser.set(entry.userId, list);
+  }
+  return byUser;
+}
+
+// 扫描并回收已过期批次的剩余积分。幂等键 `credit-expire:{batchId}` + 剩余重算双保险。
+// 返回本次回收的批次数量。直接原地修改 data，调用方需自行处于存储写锁内。
+export function expireCredits(data: StoreData, nowInput?: string): number {
+  const now = nowInput ?? new Date().toISOString();
+  const nowMs = new Date(now).getTime();
+  let expired = 0;
+  for (const [userId, entries] of groupLedgerByUser(data.creditLedgerEntries)) {
+    const remainders = creditSourceRemainders(entries);
+    for (const entry of entries) {
+      if (entry.type !== "GRANT" || !entry.expiresAt) {
+        continue;
+      }
+      if (new Date(entry.expiresAt).getTime() > nowMs) {
+        continue;
+      }
+      const idempotencyKey = `credit-expire:${entry.id}`;
+      if (data.creditLedgerEntries.some((existing) => existing.idempotencyKey === idempotencyKey)) {
+        continue;
+      }
+      const remainder = remainders.get(entry.id) ?? 0;
+      if (remainder <= 0) {
+        continue;
+      }
+      const account = data.creditAccounts.find((item) => item.userId === userId);
+      if (!account) {
+        continue;
+      }
+      account.balance -= remainder;
+      account.totalSpent += remainder;
+      account.updatedAt = now;
+      data.creditLedgerEntries.push({
+        id: randomUUID(),
+        userId,
+        type: "EXPIRE",
+        amount: -remainder,
+        balanceAfter: account.balance,
+        sourceType: "SYSTEM",
+        sourceId: entry.id,
+        idempotencyKey,
+        remark: `积分批次过期回收（批次 ${entry.id.slice(0, 8)}）`,
+        createdAt: now,
+        expiresAt: null
+      });
+      expired += 1;
+    }
+  }
+  return expired;
 }

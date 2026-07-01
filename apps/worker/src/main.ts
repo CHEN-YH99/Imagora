@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { createImageGenerationProvider, isProviderError } from "@imagora/ai-providers";
+import { createImageGenerationProvider, isProviderError, quoteImageGeneration } from "@imagora/ai-providers";
 import { createStore } from "@imagora/database";
 import { startGenerationWorker, type GenerationQueueJob } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
 import { createObjectStorage } from "@imagora/storage";
-import type { GeneratedImage, GenerationTask, ModelId, StoreData } from "@imagora/shared";
+import { expireCredits, type GeneratedImage, type GenerationTask, type ModelId, type StoreData } from "@imagora/shared";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -35,6 +35,7 @@ if (queueProvider === "bullmq") {
 async function tick(): Promise<void> {
   await store.update(async (data) => {
     refundStaleRunningTasks(data);
+    expireCredits(data);
     const task = data.generationTasks.find((item) => item.status === "PENDING");
     if (!task) {
       return;
@@ -94,6 +95,15 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
 
     const createdImages = await createImages(task, result.images);
     data.generatedImages.push(...createdImages);
+    // 按实际交付张数记录供应商真实成本（分），用于后台毛利核算
+    const deliveredQuote = quoteImageGeneration({
+      style: task.style,
+      quality: task.quality,
+      quantity: createdImages.length,
+      aspectRatio: task.aspectRatio,
+      model: task.modelName as ModelId | undefined
+    });
+    task.providerCostCents = deliveredQuote.providerCostCents;
   } catch (error) {
     if (isProviderError(error) && error.code === "PROVIDER_CONTENT_BLOCKED") {
       recordSafetyEvent(data, task, 0, error.code, error.message, error.provider);
@@ -198,7 +208,58 @@ function failTask(
   task.completedAt = now;
   task.updatedAt = now;
   refundTask(data, task, "Task failed before image delivery");
+  recordOperationalIncident(data, task, code, message, status === "BLOCKED" ? "warning" : "critical");
   console.log(`[imagora-worker] task ${task.id} ${status.toLowerCase()} and refunded`);
+}
+
+function recordOperationalIncident(
+  data: StoreData,
+  task: GenerationTask,
+  errorCode: string,
+  message: string,
+  severity: "warning" | "critical"
+): void {
+  data.operationalIncidents ??= [];
+  const now = new Date().toISOString();
+  const existing = data.operationalIncidents.find(
+    (incident) => incident.status === "OPEN" && incident.taskId === task.id && incident.errorCode === errorCode
+  );
+  if (existing) {
+    existing.message = sanitizeOperationalMessage(message);
+    existing.severity = severity;
+    existing.updatedAt = now;
+    return;
+  }
+  data.operationalIncidents.push({
+    id: randomUUID(),
+    severity,
+    area: "generation",
+    status: "OPEN",
+    message: sanitizeOperationalMessage(message),
+    errorCode,
+    requestId: null,
+    userId: task.userId,
+    taskId: task.id,
+    orderId: null,
+    route: "worker:generation",
+    createdAt: now,
+    updatedAt: now,
+    resolvedAt: null
+  });
+  data.operationalIncidents = data.operationalIncidents
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, incidentRetentionMax());
+}
+
+function sanitizeOperationalMessage(message: string): string {
+  return message
+    .replace(/(password|passwd|token|captcha|secret|api[_-]?key|authorization)\s*[:=]\s*[^,\s}]+/gi, "$1=[redacted]")
+    .slice(0, 280);
+}
+
+function incidentRetentionMax(): number {
+  const value = Number(process.env.INCIDENT_RETENTION_MAX ?? 100);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 100;
 }
 
 function refundStaleRunningTasks(data: StoreData): void {
@@ -236,7 +297,8 @@ function refundTask(data: StoreData, task: GenerationTask, remark: string): void
     sourceId: task.id,
     idempotencyKey,
     remark,
-    createdAt: now
+    createdAt: now,
+    expiresAt: null
   });
 }
 

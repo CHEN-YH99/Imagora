@@ -15,12 +15,16 @@ import {
   type ApiEnvelope,
   type AspectRatio,
   aspectRatioDimensions,
+  creditSourceRemainders,
+  expireCredits,
+  groupLedgerByUser,
   type GeneratedImage,
   type GenerationTask,
   maxPromptLength,
   maxQuantity,
   type ModelId,
   type Order,
+  type PaymentEvent,
   type Plan,
   publicUser,
   type Quality,
@@ -150,6 +154,7 @@ app.addHook("onRequest", async (request, reply) => {
     timestamp: new Date().toISOString()
   });
 
+  request.userId = userId;
   request.log = childLogger;
   reply.header("x-request-id", request.requestId);
   applySecurityHeaders(reply);
@@ -175,11 +180,20 @@ app.addHook("onResponse", async (request, reply) => {
   recordRequestMetric(request, statusCode);
 });
 
-app.setErrorHandler((error, request, reply) => {
+app.setErrorHandler(async (error, request, reply) => {
   const requestId = request.requestId ?? randomUUID();
   const duration = Date.now() - (request.startedAt ?? Date.now());
 
   if (error instanceof AppError) {
+    if (error.statusCode >= 500) {
+      await recordHttpIncident(request, {
+        severity: "critical",
+        errorCode: error.code,
+        message: error.message,
+        taskId: stringDetail(error.details, "taskId"),
+        orderId: stringDetail(error.details, "orderId")
+      });
+    }
     request.log.warn(
       {
         errorCode: error.code,
@@ -206,6 +220,13 @@ app.setErrorHandler((error, request, reply) => {
   if (typeof error === "object" && error !== null && "statusCode" in error) {
     const statusCode = typeof error.statusCode === "number" ? error.statusCode : 500;
     const message = error instanceof Error ? error.message : "Request failed";
+    if (statusCode >= 500) {
+      await recordHttpIncident(request, {
+        severity: "critical",
+        errorCode: "HTTP_ERROR",
+        message
+      });
+    }
     request.log.warn({ statusCode, duration }, message);
     return reply.status(statusCode).send({
       error: { code: statusCode === 401 ? "UNAUTHORIZED" : "VALIDATION_ERROR", message },
@@ -217,11 +238,16 @@ app.setErrorHandler((error, request, reply) => {
   request.log.error(
     {
       errorType: error instanceof Error ? error.constructor.name : typeof error,
-      stack: error instanceof Error ? error.stack : undefined,
+      errorCode: "UNHANDLED_ERROR",
       duration
     },
     "Unhandled error"
   );
+  await recordHttpIncident(request, {
+    severity: "critical",
+    errorCode: "UNHANDLED_ERROR",
+    message: error instanceof Error ? error.message : "Unhandled server error"
+  });
 
   return reply.status(500).send({
     error: { code: "INTERNAL_ERROR", message: "Unexpected server error" },
@@ -322,7 +348,8 @@ app.post("/api/auth/register", async (request, reply) => {
       sourceId: "welcome",
       idempotencyKey: `welcome:${user.id}`,
       remark: "Welcome credits",
-      createdAt: now
+      createdAt: now,
+      expiresAt: null
     });
     setSessionCookie(reply, sessionToken, addDays(now, 14));
     reply.status(201);
@@ -640,6 +667,7 @@ app.post("/api/generation/tasks", async (request, reply) => {
       modelName: resolvedModel,
       status: "PENDING",
       creditCost: cost,
+      providerCostCents: 0,
       failureCode: null,
       failureMessage: null,
       startedAt: null,
@@ -981,6 +1009,8 @@ app.post("/api/orders/:orderId/pay", async (request) => {
       amountCents: order.amountCents,
       currency: order.currency,
       paymentIntentId: order.paymentIntentId,
+      requestId: request.requestId ?? null,
+      route: routeLabel(request),
       payload: {
         mock: true,
         orderId: order.id,
@@ -1023,6 +1053,8 @@ app.post("/api/payments/webhooks/:provider", async (request) => {
       amountCents: event.amountCents,
       currency: event.currency,
       paymentIntentId: event.paymentIntentId,
+      requestId: request.requestId ?? null,
+      route: routeLabel(request),
       payload: payloadRecord(request.body)
     });
     return envelope(request, result);
@@ -1036,6 +1068,10 @@ app.get("/api/admin/dashboard", async (request) => {
     const paidRevenueCents = data.orders
       .filter((order) => order.status === "PAID")
       .reduce((sum, order) => sum + order.amountCents, 0);
+    // AI 成本仅统计已成功产出的任务，避免把失败退款任务的名义成本算进毛利
+    const aiCostCents = data.generationTasks
+      .filter((task) => task.status === "SUCCEEDED")
+      .reduce((sum, task) => sum + (task.providerCostCents ?? 0), 0);
     return envelope(request, {
       metrics: {
         users: data.users.length,
@@ -1043,6 +1079,8 @@ app.get("/api/admin/dashboard", async (request) => {
         images: data.generatedImages.length,
         paidOrders: data.orders.filter((order) => order.status === "PAID").length,
         paidRevenueCents,
+        aiCostCents,
+        grossProfitCents: paidRevenueCents - aiCostCents,
         blockedSafetyEvents: data.safetyEvents.filter((event) => event.status === "BLOCKED").length
       }
     });
@@ -1055,6 +1093,8 @@ app.get("/api/admin/metrics", async (request) => {
     const maintenance = runOrderMaintenance(data);
     const http = httpMetricsSnapshot();
     const domain = domainMetricsSnapshot(data);
+    const alerts = operationalAlertsSnapshot(data, http);
+    recordAlertNotifications(data, alerts);
     return envelope(request, {
       service: {
         uptimeSeconds: Math.floor((Date.now() - serviceStartedAt) / 1000),
@@ -1064,7 +1104,9 @@ app.get("/api/admin/metrics", async (request) => {
       http,
       domain,
       maintenance,
-      alerts: operationalAlertsSnapshot(data, http)
+      alerts,
+      recentIncidents: data.operationalIncidents.sort(descUpdated).slice(0, 12),
+      alertNotifications: data.alertNotifications.sort(descCreated).slice(0, 12)
     });
   });
 });
@@ -1168,6 +1210,15 @@ app.post("/api/admin/users/:userId/credits/adjust", async (request) => {
   const { user: admin } = await requireAdmin(request);
   const { userId } = userParamSchema.parse(request.params);
   const input = adjustCreditSchema.parse(request.body);
+  // 大额人工调整必须显式二次确认，防止误触多敲一个零就发出去
+  const largeAdjustThreshold = envNumber("ADMIN_CREDIT_ADJUST_THRESHOLD", 1000);
+  if (Math.abs(input.amount) >= largeAdjustThreshold && !input.confirm) {
+    throw new AppError("VALIDATION_ERROR", "大额积分调整需要二次确认", 400, {
+      requiresConfirmation: true,
+      threshold: largeAdjustThreshold,
+      amount: input.amount
+    });
+  }
   return store.update((data) => {
     mustFindUser(data, userId);
     const account = mustFindCreditAccount(data, userId);
@@ -1399,6 +1450,7 @@ declare module "fastify" {
   interface FastifyRequest {
     requestId?: string;
     startedAt?: number;
+    userId?: string;
   }
 }
 
@@ -1474,9 +1526,12 @@ interface OrderMaintenanceResult {
   closedExpiredOrders: number;
   reconciledPaidOrders: number;
   reconciledPaymentEvents: number;
+  expiredCredits: number;
 }
 
 type OperationalAlertSeverity = "warning" | "critical";
+type OperationalIncidentSeverity = "info" | "warning" | "critical";
+type OperationalArea = "generation" | "payments" | "http" | "system";
 
 interface OperationalAlert {
   id: string;
@@ -1487,6 +1542,18 @@ interface OperationalAlert {
   threshold: number;
   message: string;
   runbook: string;
+}
+
+interface OperationalIncidentInput {
+  severity: OperationalIncidentSeverity;
+  area: OperationalArea;
+  message: string;
+  errorCode?: string | null;
+  requestId?: string | null;
+  userId?: string | null;
+  taskId?: string | null;
+  orderId?: string | null;
+  route?: string | null;
 }
 
 const commonPasswordBlocklist = new Set([
@@ -1671,8 +1738,10 @@ const adjustCreditSchema = z.object({
   amount: z
     .number()
     .int()
-    .refine((value) => value !== 0),
-  reason: z.string().min(3).max(240)
+    .refine((value) => value !== 0, { message: "amount 不能为 0" })
+    .refine((value) => Math.abs(value) <= 100000, { message: "单次调整不能超过 100000 积分" }),
+  reason: z.string().min(3).max(240),
+  confirm: z.boolean().optional()
 });
 const planSchema = z.object({
   name: z.string().min(1).max(80),
@@ -2024,10 +2093,11 @@ function findCheckoutUrl(data: StoreData, order: Order): string | null {
 
 function runOrderMaintenance(data: StoreData): OrderMaintenanceResult {
   const now = new Date().toISOString();
+  const expiredCredits = expireCredits(data);
   const closedExpiredOrders = closeExpiredPendingOrders(data, now);
   const reconciledPaymentEvents = reconcileSucceededPaymentEvents(data, now);
   const reconciledPaidOrders = reconcilePaidOrderCredits(data);
-  return { closedExpiredOrders, reconciledPaidOrders, reconciledPaymentEvents };
+  return { closedExpiredOrders, reconciledPaidOrders, reconciledPaymentEvents, expiredCredits };
 }
 
 function closeExpiredPendingOrders(data: StoreData, now: string): number {
@@ -2091,7 +2161,16 @@ function reconcilePaidOrderCredits(data: StoreData): number {
     if (!plan) {
       continue;
     }
-    grantCredits(data, order.userId, plan.credits, "ORDER", order.id, idempotencyKey, `Purchased ${plan.name}`);
+    grantCredits(
+      data,
+      order.userId,
+      plan.credits,
+      "ORDER",
+      order.id,
+      idempotencyKey,
+      `Purchased ${plan.name}`,
+      plan.validDays
+    );
     reconciled += 1;
   }
   return reconciled;
@@ -2100,6 +2179,41 @@ function reconcilePaidOrderCredits(data: StoreData): number {
 function paymentEventAmount(payload: Record<string, unknown>): number | null {
   const amount = payload.amountCents;
   return typeof amount === "number" && Number.isInteger(amount) ? amount : null;
+}
+
+function paymentFailureEvents(data: StoreData): PaymentEvent[] {
+  return data.paymentEvents.filter((event) => {
+    if (event.eventType !== "payment.succeeded") {
+      return false;
+    }
+    const order = data.orders.find((item) => item.id === event.orderId);
+    return Boolean(
+      order &&
+      (paymentEventAmount(event.payload) !== order.amountCents ||
+        paymentEventOrderNo(event.payload) !== order.orderNo ||
+        paymentEventCurrency(event.payload) !== normalizeCurrency(order.currency))
+    );
+  });
+}
+
+function refundFailureCount(data: StoreData): number {
+  const refundedTaskIds = new Set(
+    data.creditLedgerEntries
+      .filter((entry) => entry.type === "REFUND" && entry.sourceType === "TASK")
+      .map((entry) => entry.sourceId)
+  );
+  const spentTaskIds = new Set(
+    data.creditLedgerEntries
+      .filter((entry) => entry.type === "SPEND" && entry.sourceType === "TASK")
+      .map((entry) => entry.sourceId)
+  );
+  return data.generationTasks.filter(
+    (task) =>
+      ["FAILED", "BLOCKED"].includes(task.status) &&
+      task.creditCost > 0 &&
+      spentTaskIds.has(task.id) &&
+      !refundedTaskIds.has(task.id)
+  ).length;
 }
 
 function paymentEventOrderNo(payload: Record<string, unknown>): string | null {
@@ -2152,6 +2266,8 @@ function applyPaymentSucceeded(
     amountCents: number;
     currency: string;
     paymentIntentId: string | null;
+    requestId?: string | null;
+    route?: string | null;
     payload: Record<string, unknown>;
   }
 ): { order: Order; balanceAfter: number; credited: boolean; duplicateEvent: boolean; reason: string | null } {
@@ -2192,6 +2308,16 @@ function applyPaymentSucceeded(
   });
 
   if (input.orderNo !== order.orderNo) {
+    recordOperationalIncident(data, {
+      severity: "critical",
+      area: "payments",
+      message: "Payment succeeded event order number did not match the order snapshot.",
+      errorCode: "ORDER_NO_MISMATCH",
+      requestId: input.requestId ?? null,
+      userId: order.userId,
+      orderId: order.id,
+      route: input.route ?? null
+    });
     return {
       order,
       balanceAfter: mustFindCreditAccount(data, order.userId).balance,
@@ -2202,6 +2328,16 @@ function applyPaymentSucceeded(
   }
 
   if (normalizeCurrency(input.currency) !== normalizeCurrency(order.currency)) {
+    recordOperationalIncident(data, {
+      severity: "critical",
+      area: "payments",
+      message: "Payment succeeded event currency did not match the order snapshot.",
+      errorCode: "CURRENCY_MISMATCH",
+      requestId: input.requestId ?? null,
+      userId: order.userId,
+      orderId: order.id,
+      route: input.route ?? null
+    });
     return {
       order,
       balanceAfter: mustFindCreditAccount(data, order.userId).balance,
@@ -2212,6 +2348,16 @@ function applyPaymentSucceeded(
   }
 
   if (input.amountCents !== order.amountCents) {
+    recordOperationalIncident(data, {
+      severity: "critical",
+      area: "payments",
+      message: "Payment succeeded event amount did not match the order snapshot.",
+      errorCode: "AMOUNT_MISMATCH",
+      requestId: input.requestId ?? null,
+      userId: order.userId,
+      orderId: order.id,
+      route: input.route ?? null
+    });
     return {
       order,
       balanceAfter: mustFindCreditAccount(data, order.userId).balance,
@@ -2252,7 +2398,8 @@ function applyPaymentSucceeded(
     "ORDER",
     order.id,
     `order-grant:${order.id}`,
-    `Purchased ${plan.name}`
+    `Purchased ${plan.name}`,
+    plan.validDays
   );
 
   return {
@@ -2294,7 +2441,8 @@ function spendCredits(
     sourceId,
     idempotencyKey,
     remark,
-    createdAt: now
+    createdAt: now,
+    expiresAt: null
   });
 }
 
@@ -2311,6 +2459,14 @@ async function markTaskFailedAndRefund(taskId: string, code: string, message: st
     task.completedAt = now;
     task.updatedAt = now;
     refundTaskCredits(data, task, "Generation task could not be queued");
+    recordOperationalIncident(data, {
+      severity: "critical",
+      area: "generation",
+      message,
+      errorCode: code,
+      userId: task.userId,
+      taskId: task.id
+    });
   });
 }
 
@@ -2334,7 +2490,8 @@ function refundTaskCredits(data: StoreData, task: GenerationTask, remark: string
     sourceId: task.id,
     idempotencyKey,
     remark,
-    createdAt: now
+    createdAt: now,
+    expiresAt: null
   });
 }
 
@@ -2345,7 +2502,8 @@ function grantCredits(
   sourceType: SourceType,
   sourceId: string,
   idempotencyKey: string,
-  remark: string
+  remark: string,
+  validDays?: number | null
 ): void {
   if (data.creditLedgerEntries.some((entry) => entry.idempotencyKey === idempotencyKey)) {
     return;
@@ -2355,6 +2513,11 @@ function grantCredits(
   account.balance += amount;
   account.totalEarned += amount;
   account.updatedAt = now;
+  // 有效期为正数才形成过期批次，否则视为永久积分
+  const expiresAt =
+    typeof validDays === "number" && validDays > 0
+      ? new Date(new Date(now).getTime() + validDays * 24 * 60 * 60 * 1000).toISOString()
+      : null;
   data.creditLedgerEntries.push({
     id: randomUUID(),
     userId,
@@ -2365,7 +2528,8 @@ function grantCredits(
     sourceId,
     idempotencyKey,
     remark,
-    createdAt: now
+    createdAt: now,
+    expiresAt
   });
 }
 
@@ -2402,7 +2566,8 @@ function adjustCredits(
     sourceId: adminUserId,
     idempotencyKey,
     remark,
-    createdAt: now
+    createdAt: now,
+    expiresAt: null
   });
 }
 
@@ -3180,6 +3345,116 @@ function recordRequestMetric(request: FastifyRequest, statusCode: number): void 
   routeMetrics.set(route, metric);
 }
 
+async function recordHttpIncident(
+  request: FastifyRequest,
+  input: Pick<OperationalIncidentInput, "severity" | "message" | "errorCode" | "taskId" | "orderId">
+): Promise<void> {
+  try {
+    await store.update((data) => {
+      recordOperationalIncident(data, {
+        severity: input.severity,
+        area: "http",
+        message: input.message,
+        errorCode: input.errorCode,
+        requestId: request.requestId ?? null,
+        userId: request.userId ?? null,
+        taskId: input.taskId ?? null,
+        orderId: input.orderId ?? null,
+        route: routeLabel(request)
+      });
+    });
+  } catch {
+    request.log.warn({ errorCode: "INCIDENT_RECORD_FAILED" }, "Operational incident record failed");
+  }
+}
+
+function recordOperationalIncident(data: StoreData, input: OperationalIncidentInput): void {
+  data.operationalIncidents ??= [];
+  const now = new Date().toISOString();
+  const existing = data.operationalIncidents.find((incident) => {
+    if (incident.status !== "OPEN" || incident.errorCode !== (input.errorCode ?? null)) {
+      return false;
+    }
+    if (input.taskId) {
+      return incident.taskId === input.taskId;
+    }
+    if (input.orderId) {
+      return incident.orderId === input.orderId;
+    }
+    return input.requestId ? incident.requestId === input.requestId : false;
+  });
+
+  if (existing) {
+    existing.severity = input.severity;
+    existing.message = sanitizeOperationalMessage(input.message);
+    existing.requestId = input.requestId ?? existing.requestId;
+    existing.userId = input.userId ?? existing.userId;
+    existing.route = input.route ?? existing.route;
+    existing.updatedAt = now;
+    return;
+  }
+
+  data.operationalIncidents.push({
+    id: randomUUID(),
+    severity: input.severity,
+    area: input.area,
+    status: "OPEN",
+    message: sanitizeOperationalMessage(input.message),
+    errorCode: input.errorCode ?? null,
+    requestId: input.requestId ?? null,
+    userId: input.userId ?? null,
+    taskId: input.taskId ?? null,
+    orderId: input.orderId ?? null,
+    route: input.route ?? null,
+    createdAt: now,
+    updatedAt: now,
+    resolvedAt: null
+  });
+  data.operationalIncidents = data.operationalIncidents
+    .sort(descUpdated)
+    .slice(0, envNumber("INCIDENT_RETENTION_MAX", 100));
+}
+
+function recordAlertNotifications(data: StoreData, alerts: OperationalAlert[]): void {
+  data.alertNotifications ??= [];
+  const now = new Date().toISOString();
+  for (const alert of alerts) {
+    const dedupeKey = `local:${alert.id}`;
+    if (data.alertNotifications.some((notification) => notification.dedupeKey === dedupeKey)) {
+      continue;
+    }
+    data.alertNotifications.push({
+      id: randomUUID(),
+      alertId: alert.id,
+      channel: "local",
+      status: "SENT",
+      severity: alert.severity,
+      dedupeKey,
+      message: alert.message,
+      createdAt: now,
+      sentAt: now
+    });
+  }
+  data.alertNotifications = data.alertNotifications
+    .sort(descCreated)
+    .slice(0, envNumber("ALERT_NOTIFICATION_RETENTION_MAX", 100));
+}
+
+function routeLabel(request: FastifyRequest): string {
+  return `${request.method} ${request.routeOptions.url ?? pathOnly(request.url)}`;
+}
+
+function stringDetail(details: Record<string, unknown> | undefined, key: string): string | null {
+  const value = details?.[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function sanitizeOperationalMessage(message: string): string {
+  return message
+    .replace(/(password|passwd|token|captcha|secret|api[_-]?key|authorization)\s*[:=]\s*[^,\s}]+/gi, "$1=[redacted]")
+    .slice(0, 280);
+}
+
 function httpMetricsSnapshot() {
   const routes = [...routeMetrics.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
@@ -3270,18 +3545,7 @@ function operationalAlertsSnapshot(data: StoreData, http: ReturnType<typeof http
     });
   }
 
-  const amountMismatchEvents = data.paymentEvents.filter((event) => {
-    if (event.eventType !== "payment.succeeded") {
-      return false;
-    }
-    const order = data.orders.find((item) => item.id === event.orderId);
-    return Boolean(
-      order &&
-      (paymentEventAmount(event.payload) !== order.amountCents ||
-        paymentEventOrderNo(event.payload) !== order.orderNo ||
-        paymentEventCurrency(event.payload) !== normalizeCurrency(order.currency))
-    );
-  }).length;
+  const amountMismatchEvents = paymentFailureEvents(data).length;
   const amountMismatchThreshold = envNumber("ALERT_PAYMENT_AMOUNT_MISMATCH_MAX", 0);
   if (amountMismatchEvents > amountMismatchThreshold) {
     alerts.push({
@@ -3293,6 +3557,21 @@ function operationalAlertsSnapshot(data: StoreData, http: ReturnType<typeof http
       threshold: amountMismatchThreshold,
       message: "Payment succeeded events with amount mismatch were detected.",
       runbook: "Do not manually grant credits until the provider event and order snapshot are verified."
+    });
+  }
+
+  const refundFailures = refundFailureCount(data);
+  const refundFailureThreshold = envNumber("ALERT_REFUND_FAILURES_MAX", 0);
+  if (refundFailures > refundFailureThreshold) {
+    alerts.push({
+      id: "generation.refund-failures",
+      severity: "critical",
+      area: "generation",
+      metric: "refundFailuresTotal",
+      value: refundFailures,
+      threshold: refundFailureThreshold,
+      message: "Generation refund failures were detected.",
+      runbook: "Pause generation, inspect credit ledger entries by taskId, and reconcile refunds before retrying."
     });
   }
 
@@ -3319,23 +3598,62 @@ function domainMetricsSnapshot(data: StoreData) {
     ["SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"].includes(task.status)
   );
   const succeededTasks = data.generationTasks.filter((task) => task.status === "SUCCEEDED");
+  const failedTasks = terminalTasks.filter((task) => task.status === "FAILED");
   const completedDurations = data.generationTasks
     .filter((task) => task.startedAt && task.completedAt)
     .map((task) => new Date(task.completedAt as string).getTime() - new Date(task.startedAt as string).getTime())
     .filter((duration) => Number.isFinite(duration) && duration >= 0);
+  const queueWaitDurations = data.generationTasks
+    .filter((task) => task.startedAt)
+    .map((task) => new Date(task.startedAt as string).getTime() - new Date(task.createdAt).getTime())
+    .filter((duration) => Number.isFinite(duration) && duration >= 0);
+
+  // 权益周期与成本核算
+  const soonMs = Date.now() + envNumber("CREDIT_EXPIRING_SOON_DAYS", 7) * 24 * 60 * 60 * 1000;
+  let creditsExpiringSoon = 0;
+  for (const [, entries] of groupLedgerByUser(data.creditLedgerEntries)) {
+    const remainders = creditSourceRemainders(entries);
+    for (const entry of entries) {
+      if (entry.type !== "GRANT" || !entry.expiresAt) {
+        continue;
+      }
+      const expiresMs = new Date(entry.expiresAt).getTime();
+      if (expiresMs > Date.now() && expiresMs <= soonMs) {
+        creditsExpiringSoon += remainders.get(entry.id) ?? 0;
+      }
+    }
+  }
+  const creditsExpiredTotal = data.creditLedgerEntries
+    .filter((entry) => entry.type === "EXPIRE")
+    .reduce((sum, entry) => sum + Math.abs(entry.amount), 0);
+  const paidRevenueCents = data.orders
+    .filter((order) => order.status === "PAID")
+    .reduce((sum, order) => sum + order.amountCents, 0);
+  const aiCostCents = succeededTasks.reduce((sum, task) => sum + task.providerCostCents, 0);
 
   return {
     usersTotal: data.users.length,
     creditsOutstanding: data.creditAccounts.reduce((sum, account) => sum + account.balance, 0),
+    creditsExpiringSoon,
+    creditsExpiredTotal,
     tasksByStatus: countBy(data.generationTasks, (task) => task.status),
     generationSuccessRate: terminalTasks.length ? round(succeededTasks.length / terminalTasks.length) : null,
+    generationFailureRate: terminalTasks.length ? round(failedTasks.length / terminalTasks.length) : null,
     averageGenerationDurationMs: completedDurations.length
       ? round(completedDurations.reduce((sum, duration) => sum + duration, 0) / completedDurations.length)
+      : null,
+    averageQueueWaitMs: queueWaitDurations.length
+      ? round(queueWaitDurations.reduce((sum, duration) => sum + duration, 0) / queueWaitDurations.length)
       : null,
     referenceImagesTotal: data.referenceImages.filter((image) => !image.deletedAt).length,
     imagesTotal: data.generatedImages.length,
     ordersByStatus: countBy(data.orders, (order) => order.status),
     paymentEventsTotal: data.paymentEvents.length,
+    paymentFailuresTotal: paymentFailureEvents(data).length,
+    refundFailuresTotal: refundFailureCount(data),
+    paidRevenueCents,
+    aiCostCents,
+    grossProfitCents: paidRevenueCents - aiCostCents,
     blockedSafetyEventsTotal: data.safetyEvents.filter((event) => event.status === "BLOCKED").length
   };
 }
@@ -3411,4 +3729,8 @@ function addDays(iso: string, days: number): string {
 
 function descCreated<T extends { createdAt: string }>(a: T, b: T): number {
   return b.createdAt.localeCompare(a.createdAt);
+}
+
+function descUpdated<T extends { updatedAt: string }>(a: T, b: T): number {
+  return b.updatedAt.localeCompare(a.updatedAt);
 }

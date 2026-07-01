@@ -49,6 +49,7 @@ export type CreditLedgerEntry = {
   balanceAfter: number;
   remark: string;
   createdAt: string;
+  expiresAt?: string | null;
 };
 
 export type Task = {
@@ -165,6 +166,8 @@ export type AdminMetrics = {
   images: number;
   paidOrders: number;
   paidRevenueCents: number;
+  aiCostCents: number;
+  grossProfitCents: number;
   blockedSafetyEvents: number;
 };
 
@@ -172,6 +175,7 @@ export type OrderMaintenance = {
   closedExpiredOrders: number;
   reconciledPaidOrders: number;
   reconciledPaymentEvents: number;
+  expiredCredits: number;
 };
 
 export type OperationalAlert = {
@@ -183,6 +187,35 @@ export type OperationalAlert = {
   threshold: number;
   message: string;
   runbook: string;
+};
+
+export type OperationalIncident = {
+  id: string;
+  severity: "info" | "warning" | "critical";
+  area: "generation" | "payments" | "http" | "system";
+  status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
+  message: string;
+  errorCode: string | null;
+  requestId: string | null;
+  userId: string | null;
+  taskId: string | null;
+  orderId: string | null;
+  route: string | null;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+};
+
+export type AlertNotification = {
+  id: string;
+  alertId: string;
+  channel: "local";
+  status: "SENT";
+  severity: "info" | "warning" | "critical";
+  dedupeKey: string;
+  message: string;
+  createdAt: string;
+  sentAt: string;
 };
 
 export type AdminOperationalMetrics = {
@@ -202,13 +235,25 @@ export type AdminOperationalMetrics = {
   };
   domain: {
     generationSuccessRate: number | null;
+    generationFailureRate: number | null;
     averageGenerationDurationMs: number | null;
+    averageQueueWaitMs: number | null;
     referenceImagesTotal: number;
     paymentEventsTotal: number;
+    paymentFailuresTotal: number;
+    refundFailuresTotal: number;
     blockedSafetyEventsTotal: number;
+    creditsOutstanding: number;
+    creditsExpiringSoon: number;
+    creditsExpiredTotal: number;
+    paidRevenueCents: number;
+    aiCostCents: number;
+    grossProfitCents: number;
   };
   maintenance: OrderMaintenance;
   alerts: OperationalAlert[];
+  recentIncidents: OperationalIncident[];
+  alertNotifications: AlertNotification[];
 };
 
 export type SafetyRule = {
@@ -375,6 +420,7 @@ const labelMap: Record<string, string> = {
   ACTIVE: "启用",
   ADMIN: "管理员",
   ADJUST: "人工调整",
+  ACKNOWLEDGED: "已确认",
   BLOCK: "拦截",
   BLOCKED: "已拦截",
   CANCELED: "已取消",
@@ -387,14 +433,18 @@ const labelMap: Record<string, string> = {
   HIDDEN: "已隐藏",
   IDLE: "待提交",
   INACTIVE: "停用",
+  info: "提示",
+  OPEN: "待处理",
   PAID: "已支付",
   PENDING: "待处理",
   PRIVATE: "私有",
   PUBLIC: "公开",
   REFUND: "退回",
   REFUNDED: "已退款",
+  RESOLVED: "已解决",
   REVIEW: "复核",
   RUNNING: "处理中",
+  SENT: "已发送",
   SPEND: "消耗",
   SUCCEEDED: "已完成",
   SUSPENDED: "已停用",
@@ -463,11 +513,15 @@ const targetTypeMap: Record<string, string> = {
 };
 
 const metricLabelMap: Record<string, string> = {
+  generation: "生成",
   generationBacklog: "生成任务积压",
   generationFailureRate: "生成失败率",
+  http: "接口",
   httpFailureRate: "接口失败率",
   paymentAmountMismatchEvents: "支付金额不一致事件",
+  payments: "支付",
   pendingOrders: "待支付订单",
+  refundFailuresTotal: "积分退回失败",
   staleRunningTasks: "长时间运行任务"
 };
 
@@ -475,6 +529,7 @@ const alertMessageMap: Record<string, string> = {
   "Generation failure rate is above threshold.": "生成失败率超过阈值。",
   "Generation task backlog is above threshold.": "生成任务积压超过阈值。",
   "Generation tasks have been running longer than the stale threshold.": "存在运行时间超过阈值的生成任务。",
+  "Generation refund failures were detected.": "检测到生成失败后的积分退回异常。",
   "HTTP 5xx failure rate is above threshold.": "服务接口 5xx 失败率超过阈值。",
   "Payment succeeded events with amount mismatch were detected.": "检测到支付成功事件与订单金额不一致。",
   "Pending payment orders are above threshold.": "待支付订单数量超过阈值。"
@@ -489,6 +544,8 @@ const alertRunbookMap: Record<string, string> = {
     "在核对支付事件和订单快照前，不要手动发放积分。",
   "Inspect route metrics, recent deploys, and provider logs by requestId.":
     "按请求编号检查路由指标、近期发布记录和外部服务日志。",
+  "Pause generation, inspect credit ledger entries by taskId, and reconcile refunds before retrying.":
+    "暂停生成入口，按任务编号核对积分流水，完成退回对账后再恢复重试。",
   "Run worker recovery, verify refunds, and check provider timeout logs by taskId.":
     "执行生成处理服务恢复流程，核对积分退回，并按任务编号检查超时日志。",
   "Scale workers or temporarily disable generation submissions until backlog drains.":

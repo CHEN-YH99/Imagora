@@ -104,6 +104,10 @@ type Notice = {
   text: string;
 };
 
+// 与后端 ADMIN_CREDIT_ADJUST_THRESHOLD 默认值保持一致：
+// 单次调整绝对值达到该阈值即视为大额，必须走强制二次确认（confirm=true）。
+const LARGE_CREDIT_ADJUST_THRESHOLD = 1000;
+
 type ConfirmState =
   | { kind: "reconcile" }
   | { kind: "user-status"; userId: string; userEmail: string; nextStatus: User["status"] }
@@ -171,6 +175,16 @@ function detailDialogLabel(kind: SelectedDetail["kind"]): string {
     default:
       return "详情";
   }
+}
+
+function formatMilliseconds(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(1)} 秒`;
+  }
+  return `${value} ms`;
 }
 
 export default function AdminPage() {
@@ -677,13 +691,17 @@ export default function AdminPage() {
           confirmLabel: confirmState.nextStatus === "SUSPENDED" ? "确认停用" : "确认启用",
           tone: confirmState.nextStatus === "SUSPENDED" ? ("danger" as const) : ("default" as const)
         };
-      case "credit-adjust":
+      case "credit-adjust": {
+        const isLarge = Math.abs(confirmState.amount) >= LARGE_CREDIT_ADJUST_THRESHOLD;
         return {
-          title: "确认调整用户积分？",
-          description: `${confirmState.userEmail} 将被调整 ${confirmState.amount > 0 ? `+${confirmState.amount}` : confirmState.amount} 积分，账本会保留原因。`,
-          confirmLabel: "确认调整",
+          title: isLarge ? "确认大额积分调整？" : "确认调整用户积分？",
+          description: isLarge
+            ? `⚠️ 本次将调整 ${confirmState.amount > 0 ? `+${confirmState.amount}` : confirmState.amount} 积分，已达到大额阈值（${LARGE_CREDIT_ADJUST_THRESHOLD}）。请再次核对金额与 ${confirmState.userEmail}，确认无误后提交，账本会保留原因。`
+            : `${confirmState.userEmail} 将被调整 ${confirmState.amount > 0 ? `+${confirmState.amount}` : confirmState.amount} 积分，账本会保留原因。`,
+          confirmLabel: isLarge ? "确认大额调整" : "确认调整",
           tone: "danger" as const
         };
+      }
       case "image-visibility":
         return {
           title: `确认${confirmState.nextVisibility === "HIDDEN" ? "隐藏" : "恢复"}图片？`,
@@ -778,7 +796,22 @@ export default function AdminPage() {
               : `${Math.round(operationalMetrics.domain.generationSuccessRate * 100)}%`
           }
         />
-        <Metric label="平均生成耗时" value={operationalMetrics?.domain.averageGenerationDurationMs ?? "-"} />
+        <Metric
+          label="生成失败率"
+          value={
+            operationalMetrics?.domain.generationFailureRate === null ||
+            operationalMetrics?.domain.generationFailureRate === undefined
+              ? "-"
+              : `${Math.round(operationalMetrics.domain.generationFailureRate * 100)}%`
+          }
+        />
+        <Metric
+          label="平均生成耗时"
+          value={formatMilliseconds(operationalMetrics?.domain.averageGenerationDurationMs)}
+        />
+        <Metric label="平均排队等待" value={formatMilliseconds(operationalMetrics?.domain.averageQueueWaitMs)} />
+        <Metric label="支付失败" value={operationalMetrics?.domain.paymentFailuresTotal ?? 0} />
+        <Metric label="退回异常" value={operationalMetrics?.domain.refundFailuresTotal ?? 0} />
         <Metric label="参考图" value={operationalMetrics?.domain.referenceImagesTotal ?? 0} />
         <Metric label="支付事件" value={operationalMetrics?.domain.paymentEventsTotal ?? 0} />
       </div>
@@ -787,6 +820,14 @@ export default function AdminPage() {
         <Metric label="关闭过期订单" value={operationalMetrics?.maintenance.closedExpiredOrders ?? 0} />
         <Metric label="补发积分订单" value={operationalMetrics?.maintenance.reconciledPaidOrders ?? 0} />
         <Metric label="补处理事件" value={operationalMetrics?.maintenance.reconciledPaymentEvents ?? 0} />
+      </div>
+
+      <div className="mt-4 grid gap-4 md:grid-cols-3 xl:grid-cols-5">
+        <Metric label="在途积分" value={operationalMetrics?.domain.creditsOutstanding ?? 0} />
+        <Metric label="7天内到期积分" value={operationalMetrics?.domain.creditsExpiringSoon ?? 0} />
+        <Metric label="累计已过期积分" value={operationalMetrics?.domain.creditsExpiredTotal ?? 0} />
+        <Metric label="AI成本" value={formatMoney(operationalMetrics?.domain.aiCostCents ?? 0, "USD")} />
+        <Metric label="毛利" value={formatMoney(operationalMetrics?.domain.grossProfitCents ?? 0, "USD")} />
       </div>
 
       <Panel className="mt-5">
@@ -820,6 +861,78 @@ export default function AdminPage() {
           />
         )}
       </Panel>
+
+      <div className="mt-5 grid gap-5 xl:grid-cols-2">
+        <Panel>
+          <h2 className="mb-4 flex items-center gap-2 text-xl font-semibold">
+            <AlertTriangle className="size-5 text-volt" aria-hidden="true" />
+            最近异常
+          </h2>
+          {operationalMetrics?.recentIncidents.length ? (
+            <div className="space-y-3">
+              {operationalMetrics.recentIncidents.map((incident) => (
+                <article key={incident.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium">{incident.message}</p>
+                      <p className="mt-1 text-sm text-white/50">
+                        {formatMetricLabel(incident.area)} · {incident.errorCode ?? "UNKNOWN"} ·{" "}
+                        {new Date(incident.createdAt).toLocaleString("zh-CN")}
+                      </p>
+                    </div>
+                    <StatusPill>{incident.severity}</StatusPill>
+                  </div>
+                  <div className="mt-3 grid gap-2 text-xs text-white/50 sm:grid-cols-2">
+                    <p>处理状态：{formatStatusLabel(incident.status)}</p>
+                    <p className="break-all">requestId：{incident.requestId ?? "-"}</p>
+                    <p className="break-all">taskId：{incident.taskId ?? "-"}</p>
+                    <p className="break-all">orderId：{incident.orderId ?? "-"}</p>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              title="暂无最近异常"
+              description="生成、支付和接口错误会在这里保留最近记录，便于按 requestId、taskId 或 orderId 追踪。"
+              actionLabel="刷新异常"
+              onAction={() => void load()}
+            />
+          )}
+        </Panel>
+
+        <Panel>
+          <h2 className="mb-4 flex items-center gap-2 text-xl font-semibold">
+            <AlertTriangle className="size-5 text-mint" aria-hidden="true" />
+            告警通知
+          </h2>
+          {operationalMetrics?.alertNotifications.length ? (
+            <div className="space-y-3">
+              {operationalMetrics.alertNotifications.map((notification) => (
+                <article key={notification.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium">{formatOperationalAlertMessage(notification.message)}</p>
+                      <p className="mt-1 text-sm text-white/50">
+                        本地通道 · {notification.alertId} · {new Date(notification.sentAt).toLocaleString("zh-CN")}
+                      </p>
+                    </div>
+                    <StatusPill>{notification.status}</StatusPill>
+                  </div>
+                  <p className="mt-3 break-all text-xs text-white/42">dedupeKey：{notification.dedupeKey}</p>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              title="暂无告警通知"
+              description="当运营告警触发时，本地通知通道会记录发送状态和去重键。"
+              actionLabel="刷新通知"
+              onAction={() => void load()}
+            />
+          )}
+        </Panel>
+      </div>
 
       <Panel className="mt-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -1355,6 +1468,36 @@ export default function AdminPage() {
 
         <Panel>
           <h2 className="mb-4 text-xl font-semibold">审计日志</h2>
+          <div className="mb-4 grid gap-3 md:grid-cols-4">
+            <Field label="管理员 ID">
+              <input
+                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                value={adminUserIdFilter}
+                onChange={(event) => setAdminUserIdFilter(event.target.value)}
+              />
+            </Field>
+            <Field label="操作">
+              <input
+                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                value={auditActionFilter}
+                onChange={(event) => setAuditActionFilter(event.target.value)}
+              />
+            </Field>
+            <Field label="目标类型">
+              <input
+                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                value={auditTargetTypeFilter}
+                onChange={(event) => setAuditTargetTypeFilter(event.target.value)}
+              />
+            </Field>
+            <Field label="目标 ID">
+              <input
+                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                value={auditTargetIdFilter}
+                onChange={(event) => setAuditTargetIdFilter(event.target.value)}
+              />
+            </Field>
+          </div>
           <div className="space-y-3">
             {logs.map((log) => (
               <article key={log.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
@@ -1505,16 +1648,35 @@ export default function AdminPage() {
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <MiniStat label="尺寸" value={`${selectedDetail.data.task.width}×${selectedDetail.data.task.height}`} />
+                  <MiniStat
+                    label="尺寸"
+                    value={`${selectedDetail.data.task.width}×${selectedDetail.data.task.height}`}
+                  />
                   <MiniStat label="数量" value={selectedDetail.data.task.quantity} />
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-white/70">
                   <p>客户端请求：{selectedDetail.data.task.clientRequestId}</p>
-                  <p className="mt-1">模型：{selectedDetail.data.task.modelProvider} / {selectedDetail.data.task.modelName}</p>
-                  <p className="mt-1">创建时间：{new Date(selectedDetail.data.task.createdAt).toLocaleString("zh-CN")}</p>
-                  <p className="mt-1">更新时间：{new Date(selectedDetail.data.task.updatedAt).toLocaleString("zh-CN")}</p>
-                  <p className="mt-1">开始时间：{selectedDetail.data.task.startedAt ? new Date(selectedDetail.data.task.startedAt).toLocaleString("zh-CN") : "-"}</p>
-                  <p className="mt-1">完成时间：{selectedDetail.data.task.completedAt ? new Date(selectedDetail.data.task.completedAt).toLocaleString("zh-CN") : "-"}</p>
+                  <p className="mt-1">
+                    模型：{selectedDetail.data.task.modelProvider} / {selectedDetail.data.task.modelName}
+                  </p>
+                  <p className="mt-1">
+                    创建时间：{new Date(selectedDetail.data.task.createdAt).toLocaleString("zh-CN")}
+                  </p>
+                  <p className="mt-1">
+                    更新时间：{new Date(selectedDetail.data.task.updatedAt).toLocaleString("zh-CN")}
+                  </p>
+                  <p className="mt-1">
+                    开始时间：
+                    {selectedDetail.data.task.startedAt
+                      ? new Date(selectedDetail.data.task.startedAt).toLocaleString("zh-CN")
+                      : "-"}
+                  </p>
+                  <p className="mt-1">
+                    完成时间：
+                    {selectedDetail.data.task.completedAt
+                      ? new Date(selectedDetail.data.task.completedAt).toLocaleString("zh-CN")
+                      : "-"}
+                  </p>
                   <p className="mt-1">失败码：{selectedDetail.data.task.failureCode ?? "-"}</p>
                   <p className="mt-1">失败原因：{selectedDetail.data.task.failureMessage ?? "-"}</p>
                 </div>
@@ -1523,11 +1685,16 @@ export default function AdminPage() {
                     <p className="mb-2 text-white/50">关联图片</p>
                     <div className="grid grid-cols-2 gap-3">
                       {selectedDetail.data.images.map((image) => (
-                        <article key={image.id} className="overflow-hidden rounded-xl border border-white/10 bg-white/5">
+                        <article
+                          key={image.id}
+                          className="overflow-hidden rounded-xl border border-white/10 bg-white/5"
+                        >
                           <img src={image.thumbnailUrl} alt="任务图片" className="aspect-square w-full object-cover" />
                           <div className="space-y-1 p-3 text-xs text-white/60">
                             <p>{image.visibility}</p>
-                            <p>{image.width}×{image.height}</p>
+                            <p>
+                              {image.width}×{image.height}
+                            </p>
                           </div>
                         </article>
                       ))}
@@ -1538,7 +1705,11 @@ export default function AdminPage() {
             ) : selectedDetail.kind === "image" ? (
               <div className="space-y-4 text-sm">
                 <div className="overflow-hidden rounded-2xl border border-white/10 bg-white/5">
-                  <img src={selectedDetail.data.image.thumbnailUrl} alt="图片详情预览" className="w-full object-cover" />
+                  <img
+                    src={selectedDetail.data.image.thumbnailUrl}
+                    alt="图片详情预览"
+                    className="w-full object-cover"
+                  />
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                   <p className="font-medium">{selectedDetail.data.user.email}</p>
@@ -1552,8 +1723,12 @@ export default function AdminPage() {
                   <p>图片编号：{selectedDetail.data.image.id}</p>
                   <p className="mt-1">任务编号：{selectedDetail.data.image.taskId}</p>
                   <p className="mt-1">用户编号：{selectedDetail.data.image.userId}</p>
-                  <p className="mt-1">尺寸：{selectedDetail.data.image.width}×{selectedDetail.data.image.height}</p>
-                  <p className="mt-1">创建时间：{new Date(selectedDetail.data.image.createdAt).toLocaleString("zh-CN")}</p>
+                  <p className="mt-1">
+                    尺寸：{selectedDetail.data.image.width}×{selectedDetail.data.image.height}
+                  </p>
+                  <p className="mt-1">
+                    创建时间：{new Date(selectedDetail.data.image.createdAt).toLocaleString("zh-CN")}
+                  </p>
                   <p className="mt-1">删除时间：{selectedDetail.data.image.deletedAt ?? "-"}</p>
                   <p className="mt-1">原图：{selectedDetail.data.image.publicUrl}</p>
                 </div>
@@ -1575,9 +1750,21 @@ export default function AdminPage() {
                   <p>用户：{selectedDetail.data.user.email}</p>
                   <p className="mt-1">支付单号：{selectedDetail.data.order.paymentIntentId ?? "-"}</p>
                   <p className="mt-1">套餐：{selectedDetail.data.plan.id}</p>
-                  <p className="mt-1">创建时间：{new Date(selectedDetail.data.order.createdAt).toLocaleString("zh-CN")}</p>
-                  <p className="mt-1">更新时间：{selectedDetail.data.order.updatedAt ? new Date(selectedDetail.data.order.updatedAt).toLocaleString("zh-CN") : "-"}</p>
-                  <p className="mt-1">支付时间：{selectedDetail.data.order.paidAt ? new Date(selectedDetail.data.order.paidAt).toLocaleString("zh-CN") : "-"}</p>
+                  <p className="mt-1">
+                    创建时间：{new Date(selectedDetail.data.order.createdAt).toLocaleString("zh-CN")}
+                  </p>
+                  <p className="mt-1">
+                    更新时间：
+                    {selectedDetail.data.order.updatedAt
+                      ? new Date(selectedDetail.data.order.updatedAt).toLocaleString("zh-CN")
+                      : "-"}
+                  </p>
+                  <p className="mt-1">
+                    支付时间：
+                    {selectedDetail.data.order.paidAt
+                      ? new Date(selectedDetail.data.order.paidAt).toLocaleString("zh-CN")
+                      : "-"}
+                  </p>
                 </div>
                 {selectedDetail.data.paymentEvents.length > 0 ? (
                   <div>
@@ -1604,9 +1791,7 @@ export default function AdminPage() {
 
       {detailLoading ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <p className="rounded-2xl border border-white/12 bg-ink px-6 py-4 text-sm text-white/70">
-            正在加载详情...
-          </p>
+          <p className="rounded-2xl border border-white/12 bg-ink px-6 py-4 text-sm text-white/70">正在加载详情...</p>
         </div>
       ) : null}
     </AppFrame>

@@ -103,6 +103,7 @@ export interface ImageGenerationQuote {
   provider: SupportedProviderName;
   model: SupportedImageModel;
   creditCost: number;
+  providerCostCents: number;
   width: number;
   height: number;
   size: OpenAiImageSize;
@@ -116,6 +117,8 @@ interface ProviderModelConfig {
   qualityMultiplier: Record<Quality, number>;
   sizeMultiplier: Record<OpenAiImageSize, number>;
   quantityMultiplier: number;
+  // 供应商侧每张图的真实美元成本（分），用于毛利核算；mock 为 0
+  costCentsPerImage: number;
 }
 
 interface OpenAiImageResponse {
@@ -149,7 +152,8 @@ const providerModelConfigs: Record<SupportedImageModel, ProviderModelConfig> = {
       "1024x1536": 1.22,
       "1536x1024": 1.22
     },
-    quantityMultiplier: 7
+    quantityMultiplier: 7,
+    costCentsPerImage: 4
   },
   mock: {
     provider: "mock",
@@ -165,7 +169,8 @@ const providerModelConfigs: Record<SupportedImageModel, ProviderModelConfig> = {
       "1024x1536": 1.1,
       "1536x1024": 1.1
     },
-    quantityMultiplier: 4
+    quantityMultiplier: 4,
+    costCentsPerImage: 0
   }
 };
 
@@ -407,10 +412,14 @@ export function quoteImageGeneration(input: QuoteImageGenerationInput): ImageGen
   const quality = openAiQuality(input.quality);
   const modelUnitCost =
     config.quantityMultiplier * config.qualityMultiplier[input.quality] * config.sizeMultiplier[size];
+  // 供应商成本随质量/尺寸缩放，与计费口径一致，便于后续毛利核算
+  const providerCostPerImage =
+    config.costCentsPerImage * config.qualityMultiplier[input.quality] * config.sizeMultiplier[size];
   return {
     provider,
     model,
     creditCost: Math.ceil(modelUnitCost * input.quantity),
+    providerCostCents: Math.round(providerCostPerImage * input.quantity),
     width: dimension.width,
     height: dimension.height,
     size,
