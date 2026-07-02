@@ -28,6 +28,7 @@ import {
   type OrderMaintenance,
   type PaymentEvent,
   type Plan,
+  type SafetyEvent,
   type SafetyRule,
   type Task,
   type User
@@ -111,7 +112,7 @@ const LARGE_CREDIT_ADJUST_THRESHOLD = 1000;
 type ConfirmState =
   | { kind: "reconcile" }
   | { kind: "user-status"; userId: string; userEmail: string; nextStatus: User["status"] }
-  | { kind: "credit-adjust"; userId: string; userEmail: string; amount: number }
+  | { kind: "credit-adjust"; userId: string; userEmail: string; amount: number; clientRequestId: string }
   | {
       kind: "image-visibility";
       imageId: string;
@@ -125,7 +126,8 @@ type ConfirmState =
       planId: string;
       planName: string;
       patch: Pick<PlanPayload, "priceCents" | "credits" | "sortOrder">;
-    };
+    }
+  | { kind: "safety-event"; eventId: string; nextStatus: Exclude<SafetyEvent["status"], "REVIEW_REQUIRED"> };
 
 const emptyPlanForm: PlanFormState = {
   name: "",
@@ -196,8 +198,10 @@ export default function AdminPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [rules, setRules] = useState<SafetyRule[]>([]);
+  const [safetyEvents, setSafetyEvents] = useState<SafetyEvent[]>([]);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [newRule, setNewRule] = useState("");
+  const [newRuleAction, setNewRuleAction] = useState<"BLOCK" | "REVIEW">("BLOCK");
   const [notice, setNotice] = useState<Notice | null>(null);
   const [maintenanceRunning, setMaintenanceRunning] = useState(false);
   const [taskStatusFilter, setTaskStatusFilter] = useState<"ALL" | Task["status"]>("ALL");
@@ -223,6 +227,20 @@ export default function AdminPage() {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [confirmReason, setConfirmReason] = useState("");
   const [confirmLoading, setConfirmLoading] = useState(false);
+
+  // 详情抽屉支持 Escape 关闭：aria-modal 对话框的通用无障碍预期，也避免遮挡后续操作
+  useEffect(() => {
+    if (!selectedDetail) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedDetail(null);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [selectedDetail]);
 
   useEffect(() => {
     void load();
@@ -259,6 +277,8 @@ export default function AdminPage() {
   const visibleImages = useMemo(() => images.slice(0, 8), [images]);
 
   const visibleOrders = useMemo(() => orders.slice(0, 12), [orders]);
+
+  const visibleSafetyEvents = useMemo(() => safetyEvents.slice(0, 8), [safetyEvents]);
 
   async function openUserDetail(userId: string) {
     setDetailLoading(true);
@@ -326,6 +346,7 @@ export default function AdminPage() {
         orderResult,
         planResult,
         ruleResult,
+        safetyEventResult,
         logResult
       ] = await Promise.all([
         apiFetch<{ metrics: AdminMetrics }>("/api/admin/dashboard"),
@@ -361,6 +382,7 @@ export default function AdminPage() {
         ),
         apiFetch<{ plans: Plan[] }>("/api/admin/plans"),
         apiFetch<{ rules: SafetyRule[] }>("/api/admin/safety-rules"),
+        apiFetch<{ events: SafetyEvent[] }>("/api/admin/safety-events?limit=12"),
         apiFetch<{ logs: AuditLog[] }>(
           withQuery("/api/admin/audit-logs", {
             limit: 30,
@@ -391,6 +413,7 @@ export default function AdminPage() {
         )
       );
       setRules(ruleResult.rules.slice(0, 12));
+      setSafetyEvents(safetyEventResult.events.slice(0, 12));
       setLogs(logResult.logs.slice(0, 12));
       if (!preserveNotice) {
         setNotice(null);
@@ -507,7 +530,11 @@ export default function AdminPage() {
       setNotice({ tone: "danger", text: "积分调整必须填写非零整数金额和调整原因。" });
       return;
     }
-    openConfirm({ kind: "credit-adjust", userId: user.id, userEmail: user.email, amount }, draft.reason.trim());
+    // 幂等键在发起时生成一次并绑定到本次确认，重复点击确认不会叠加扣加积分
+    openConfirm(
+      { kind: "credit-adjust", userId: user.id, userEmail: user.email, amount, clientRequestId: crypto.randomUUID() },
+      draft.reason.trim()
+    );
   }
 
   function requestImageVisibilityChange(image: GeneratedImage) {
@@ -545,6 +572,10 @@ export default function AdminPage() {
     openConfirm({ kind: "reconcile" });
   }
 
+  function requestSafetyEventReview(event: SafetyEvent, nextStatus: Exclude<SafetyEvent["status"], "REVIEW_REQUIRED">) {
+    openConfirm({ kind: "safety-event", eventId: event.id, nextStatus });
+  }
+
   async function addRule() {
     if (newRule.trim().length < 2) {
       setNotice({ tone: "danger", text: "安全规则至少填写 2 个字符，别拿空气当规则。" });
@@ -553,11 +584,18 @@ export default function AdminPage() {
     try {
       await apiFetch<{ rule: SafetyRule }>("/api/admin/safety-rules", {
         method: "POST",
-        body: { term: newRule.trim(), action: "BLOCK", status: "ACTIVE" }
+        body: { term: newRule.trim(), action: newRuleAction, status: "ACTIVE" }
       });
       setNewRule("");
+      setNewRuleAction("BLOCK");
       await load(true);
-      setNotice({ tone: "success", text: "安全规则已新增，后续生成会按新规则执行。" });
+      setNotice({
+        tone: "success",
+        text:
+          newRuleAction === "REVIEW"
+            ? "复核规则已新增，命中后生成会转入人工复核队列。"
+            : "安全规则已新增，后续生成会按新规则执行。"
+      });
     } catch (error) {
       setNotice({ tone: "danger", text: error instanceof Error ? error.message : "安全规则添加失败，请稍后重试。" });
     }
@@ -602,9 +640,10 @@ export default function AdminPage() {
           break;
         }
         case "credit-adjust": {
+          // 执行到此处说明 ConfirmDialog 已被确认，将确认结果透传后端，放行大额调整的二次确认闸门
           await apiFetch<{ account: { balance: number } }>(`/api/admin/users/${confirmState.userId}/credits/adjust`, {
             method: "POST",
-            body: { amount: confirmState.amount, reason }
+            body: { amount: confirmState.amount, reason, confirm: true, clientRequestId: confirmState.clientRequestId }
           });
           setCreditAdjustments((current) => ({
             ...current,
@@ -658,6 +697,18 @@ export default function AdminPage() {
           });
           await load(true);
           setNotice({ tone: "success", text: `${confirmState.planName} 的价格、积分和排序已保存。` });
+          break;
+        }
+        case "safety-event": {
+          await apiFetch<{ event: SafetyEvent }>(`/api/admin/safety-events/${confirmState.eventId}`, {
+            method: "PATCH",
+            body: { status: confirmState.nextStatus, reason }
+          });
+          await load(true);
+          setNotice({
+            tone: "success",
+            text: `安全事件已标记为${formatStatusLabel(confirmState.nextStatus)}。`
+          });
           break;
         }
         default:
@@ -730,6 +781,13 @@ export default function AdminPage() {
           confirmLabel: "确认保存",
           tone: "default" as const
         };
+      case "safety-event":
+        return {
+          title: "确认处理安全事件？",
+          description: `该安全事件将被标记为${formatStatusLabel(confirmState.nextStatus)}，请填写人工复核原因。`,
+          confirmLabel: confirmState.nextStatus === "PASSED" ? "复核通过" : "确认拦截",
+          tone: confirmState.nextStatus === "BLOCKED" ? ("danger" as const) : ("default" as const)
+        };
       default:
         return null;
     }
@@ -782,6 +840,7 @@ export default function AdminPage() {
         <Metric label="已支付订单" value={metrics?.paidOrders ?? 0} />
         <Metric label="收入" value={formatMoney(metrics?.paidRevenueCents ?? 0, "USD")} />
         <Metric label="安全拦截" value={metrics?.blockedSafetyEvents ?? 0} />
+        <Metric label="待复核" value={metrics?.reviewRequiredSafetyEvents ?? 0} />
       </div>
 
       <div className="mt-4 grid gap-4 md:grid-cols-3 xl:grid-cols-6">
@@ -1435,6 +1494,16 @@ export default function AdminPage() {
                 onChange={(event) => setNewRule(event.target.value)}
               />
             </Field>
+            <Field label="处理动作">
+              <select
+                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-4 py-3 text-sm text-white sm:w-36"
+                value={newRuleAction}
+                onChange={(event) => setNewRuleAction(event.target.value === "REVIEW" ? "REVIEW" : "BLOCK")}
+              >
+                <option value="BLOCK">直接拦截</option>
+                <option value="REVIEW">人工复核</option>
+              </select>
+            </Field>
             <button
               className="focus-ring rounded-full bg-mint px-5 py-3 text-sm font-semibold text-ink transition-colors hover:bg-volt"
               onClick={() => void addRule()}
@@ -1460,6 +1529,53 @@ export default function AdminPage() {
                 title="暂无安全规则"
                 description="当前没有内容拦截规则，新增规则后后台会参与提示词和参考图安全判断。"
                 actionLabel="刷新规则"
+                onAction={() => void load()}
+              />
+            ) : null}
+          </div>
+        </Panel>
+
+        <Panel>
+          <h2 className="mb-4 text-xl font-semibold">安全事件</h2>
+          <div className="space-y-3">
+            {visibleSafetyEvents.map((event) => (
+              <article key={event.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <p className="font-medium">{formatStatusLabel(event.status)}</p>
+                    <p className="mt-1 text-sm text-white/65">
+                      {formatTargetType(event.targetType)} · {event.reasonMessage}
+                    </p>
+                    <p className="mt-2 font-mono text-xs text-white/45">
+                      {event.provider} / {event.reasonCode} / {event.targetId}
+                    </p>
+                  </div>
+                  {event.status === "REVIEW_REQUIRED" ? (
+                    <div className="flex shrink-0 flex-wrap gap-2">
+                      <button
+                        className="focus-ring rounded-full border border-mint/50 px-3 py-2 text-xs font-semibold text-mint hover:bg-mint/10"
+                        onClick={() => requestSafetyEventReview(event, "PASSED")}
+                        type="button"
+                      >
+                        复核通过
+                      </button>
+                      <button
+                        className="focus-ring rounded-full border border-red-300/40 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-400/10"
+                        onClick={() => requestSafetyEventReview(event, "BLOCKED")}
+                        type="button"
+                      >
+                        确认拦截
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            ))}
+            {visibleSafetyEvents.length === 0 ? (
+              <EmptyState
+                title="暂无安全事件"
+                description="命中拦截或人工复核规则后，事件会进入这里供管理员处理和审计。"
+                actionLabel="刷新事件"
                 onAction={() => void load()}
               />
             ) : null}

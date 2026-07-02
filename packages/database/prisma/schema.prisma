@@ -101,6 +101,7 @@ model User {
   favorites      ImageFavorite[]
   orders         Order[]
   safetyEvents   SafetyEvent[]
+  safetyAppeals  SafetyAppeal[]
   adminAuditLogs AdminAuditLog[]     @relation("AdminAuditActor")
 
   @@map("users")
@@ -321,6 +322,12 @@ model PaymentEvent {
   @@map("payment_events")
 }
 
+enum SafetyAppealStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model SafetyEvent {
   id            String       @id @default(uuid())
   userId        String       @map("user_id")
@@ -336,6 +343,23 @@ model SafetyEvent {
   @@index([userId, createdAt(sort: Desc)])
   @@index([status, createdAt])
   @@map("safety_events")
+}
+
+model SafetyAppeal {
+  id             String              @id @default(uuid())
+  userId         String              @map("user_id")
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  safetyEventId  String              @map("safety_event_id")
+  reason         String
+  status         SafetyAppealStatus  @default(PENDING)
+  adminNote      String?             @map("admin_note")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  resolvedAt     DateTime?           @map("resolved_at")
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@index([safetyEventId])
+  @@map("safety_appeals")
 }
 
 model SafetyRule {

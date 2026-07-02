@@ -1,6 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   poweredByHeader: false,
+  // 本地 E2E / 开发通过 127.0.0.1 访问 dev server 时，允许其加载 dev 资源
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   async headers() {
     return [
       {

@@ -3,6 +3,21 @@ const defaultRequestTimeoutMs = 15_000;
 
 export const apiBaseUrl = resolveApiBaseUrl();
 
+// 会话过期广播：受保护页面订阅后统一跳登录，避免各页只弹红字卡死。
+// 登录/注册/找回/重置/验证码等 auth 接口的 401 属于业务性失败，不应触发全局跳转。
+export const SESSION_EXPIRED_EVENT = "imagora:session-expired";
+
+function isAuthEndpoint(path: string): boolean {
+  return path.startsWith("/api/auth/");
+}
+
+function notifySessionExpired(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
+}
+
 export type User = {
   id: string;
   email: string;
@@ -160,6 +175,29 @@ export type AuditLog = {
   createdAt: string;
 };
 
+export type SafetyEvent = {
+  id: string;
+  userId: string;
+  targetType: "PROMPT" | "UPLOAD_IMAGE" | "GENERATED_IMAGE";
+  targetId: string;
+  status: "PASSED" | "BLOCKED" | "REVIEW_REQUIRED";
+  reasonCode: string;
+  reasonMessage: string;
+  provider: string;
+  createdAt: string;
+};
+
+export type SafetyAppeal = {
+  id: string;
+  userId: string;
+  safetyEventId: string;
+  reason: string;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  adminNote: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+};
+
 export type AdminMetrics = {
   users: number;
   tasks: number;
@@ -169,6 +207,7 @@ export type AdminMetrics = {
   aiCostCents: number;
   grossProfitCents: number;
   blockedSafetyEvents: number;
+  reviewRequiredSafetyEvents: number;
 };
 
 export type OrderMaintenance = {
@@ -264,6 +303,17 @@ export type SafetyRule = {
   createdAt: string;
 };
 
+export class ApiRequestError extends Error {
+  constructor(
+    public readonly code: string | undefined,
+    public readonly apiMessage: string | undefined,
+    public readonly status: number
+  ) {
+    super(formatApiErrorMessage(code, apiMessage, status));
+    this.name = "ApiRequestError";
+  }
+}
+
 export async function apiFetch<T>(
   path: string,
   options: {
@@ -287,7 +337,11 @@ export async function apiFetch<T>(
     });
     const payload = await readApiPayload<T>(response);
     if (!response.ok || !payload.data) {
-      throw new Error(formatApiErrorMessage(payload.error?.code, payload.error?.message, response.status));
+      // 非 auth 接口返回 401 视为会话过期，广播给受保护页统一跳登录
+      if (response.status === 401 && payload.error?.code === "UNAUTHORIZED" && !isAuthEndpoint(path)) {
+        notifySessionExpired();
+      }
+      throw new ApiRequestError(payload.error?.code, payload.error?.message, response.status);
     }
     return payload.data;
   } catch (error) {
@@ -401,6 +455,17 @@ export async function logout(): Promise<void> {
   });
 }
 
+export async function submitSafetyAppeal(safetyEventId: string, reason: string): Promise<{ appeal: SafetyAppeal }> {
+  return apiFetch<{ appeal: SafetyAppeal }>("/api/safety-appeals", {
+    method: "POST",
+    body: { safetyEventId, reason }
+  });
+}
+
+export async function getSafetyAppeals(): Promise<{ appeals: SafetyAppeal[] }> {
+  return apiFetch<{ appeals: SafetyAppeal[] }>("/api/safety-appeals");
+}
+
 export function formatMoney(cents: number, currency: string): string {
   const amount = cents / 100;
   const normalizedCurrency = currency.toUpperCase();
@@ -436,6 +501,7 @@ const labelMap: Record<string, string> = {
   info: "提示",
   OPEN: "待处理",
   PAID: "已支付",
+  PASSED: "已通过",
   PENDING: "待处理",
   PRIVATE: "私有",
   PUBLIC: "公开",
@@ -443,6 +509,7 @@ const labelMap: Record<string, string> = {
   REFUNDED: "已退款",
   RESOLVED: "已解决",
   REVIEW: "复核",
+  REVIEW_REQUIRED: "待复核",
   RUNNING: "处理中",
   SENT: "已发送",
   SPEND: "消耗",
@@ -496,7 +563,9 @@ const auditActionMap: Record<string, string> = {
   "maintenance.reconcile": "订单对账",
   "plan.create": "创建套餐",
   "plan.update": "更新套餐",
-  "safety.rule.create": "新增安全规则",
+  "safety-rule.create": "新增安全规则",
+  "safety-rule.update": "更新安全规则",
+  "safety-event.review": "安全事件复核",
   "user.credits.adjust": "用户积分调整",
   "user.status.update": "用户状态变更"
 };
@@ -507,6 +576,7 @@ const targetTypeMap: Record<string, string> = {
   PLAN: "套餐",
   PROMPT: "提示词",
   SAFETY_RULE: "安全规则",
+  SAFETY_EVENT: "安全事件",
   TASK: "任务",
   UPLOAD_IMAGE: "参考图",
   USER: "用户"
@@ -563,6 +633,7 @@ const apiErrorCodeMap: Record<string, string> = {
   CAPTCHA_INVALID: "图片验证已失效或输入错误，请刷新后重试。",
   CAPTCHA_REQUIRED: "请先完成图片验证。",
   CONTENT_BLOCKED: "内容未通过安全规则，请调整提示词或参考图后重试。",
+  CONTENT_REVIEW_REQUIRED: "内容已提交人工复核，暂时无法生成。如认为是误判，可在下方发起申诉。",
   FEATURE_DISABLED: "该功能当前暂不可用，请稍后再试。",
   FORBIDDEN: "当前账号没有权限执行此操作。",
   INSUFFICIENT_CREDITS: "积分余额不足，请充值后再提交生成。",
@@ -592,6 +663,8 @@ const apiErrorMessageMap: Record<string, string> = {
   "Payment provider does not match order": "支付渠道与订单不匹配，请重新创建订单。",
   "Payment provider is not enabled": "当前支付渠道未启用。",
   "Plan is not available": "该套餐当前不可购买，请选择其他套餐。",
+  "Prompt requires manual safety review": "内容需要人工复核，暂时无法提交生成；如有误判请联系管理员申诉。",
+  "Reference image requires manual safety review": "参考图需要人工复核，暂时无法使用；如有误判请联系管理员申诉。",
   "Prompt was blocked by safety rules": "提示词未通过安全规则，请调整后重试。",
   "Reference image content is empty": "参考图内容为空，请重新上传。",
   "Reference image content is not valid base64": "参考图内容无法识别，请重新上传。",

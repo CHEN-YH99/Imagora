@@ -5,12 +5,17 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Coins, ImagePlus, X, Wand2 } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import {
+  ApiRequestError,
   apiFetch,
   formatCredits,
+  getSafetyAppeals,
+  submitSafetyAppeal,
   waitForTask,
   type CreditAccount,
   type GeneratedImage,
   type ReferenceImage,
+  type SafetyAppeal,
+  type SafetyEvent,
   type Task
 } from "../../lib/api";
 
@@ -62,6 +67,11 @@ function GenerateExperience() {
   const [messageTone, setMessageTone] = useState<"success" | "danger">("danger");
   const [loading, setLoading] = useState(false);
   const [uploadingReference, setUploadingReference] = useState(false);
+  const [appealEventId, setAppealEventId] = useState<string | null>(null);
+  const [showAppealForm, setShowAppealForm] = useState(false);
+  const [appealReason, setAppealReason] = useState("");
+  const [appealStatus, setAppealStatus] = useState<SafetyAppeal | null>(null);
+  const [appealLoading, setAppealLoading] = useState(false);
 
   useEffect(() => {
     loadAccount();
@@ -123,6 +133,25 @@ function GenerateExperience() {
     }
   }
 
+  async function loadLatestSafetyAppeal() {
+    try {
+      const eventsResult = await apiFetch<{ events: SafetyEvent[] }>("/api/users/me/safety-events?limit=5");
+      const latestBlocked = eventsResult.events.find(
+        (event) => event.status === "BLOCKED" || event.status === "REVIEW_REQUIRED"
+      );
+      if (!latestBlocked) {
+        return;
+      }
+      setAppealEventId(latestBlocked.id);
+      setShowAppealForm(false);
+      const appealsResult = await getSafetyAppeals();
+      const existing = appealsResult.appeals.find((appeal) => appeal.safetyEventId === latestBlocked.id);
+      setAppealStatus(existing ?? null);
+    } catch {
+      // 安全事件只用于恢复入口，查询失败不应覆盖主错误提示。
+    }
+  }
+
   async function uploadReference(file: File) {
     setUploadingReference(true);
     setMessage("");
@@ -162,6 +191,21 @@ function GenerateExperience() {
     return null;
   }
 
+  async function handleAppeal() {
+    if (!appealEventId || appealReason.trim().length < 10) return;
+    setAppealLoading(true);
+    try {
+      const result = await submitSafetyAppeal(appealEventId, appealReason.trim());
+      setAppealStatus(result.appeal);
+      setShowAppealForm(false);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "申诉提交失败，请稍后重试。");
+      setMessageTone("danger");
+    } finally {
+      setAppealLoading(false);
+    }
+  }
+
   async function submit() {
     const validationError = validateForm();
     if (validationError) {
@@ -173,6 +217,10 @@ function GenerateExperience() {
     setMessage("");
     setMessageTone("danger");
     setImages([]);
+    setAppealEventId(null);
+    setAppealStatus(null);
+    setShowAppealForm(false);
+    setAppealReason("");
     try {
       await ensureLoggedIn();
       const created = await apiFetch<{ task: Task; balanceAfter: number }>("/api/generation/tasks", {
@@ -204,9 +252,18 @@ function GenerateExperience() {
       ) {
         setMessage(result.task.failureMessage ?? "生成未成功，请调整提示词或稍后重试。");
         setMessageTone("danger");
+        if (result.task.status === "BLOCKED") {
+          await loadLatestSafetyAppeal();
+        }
       }
       await loadAccount();
     } catch (error) {
+      if (
+        error instanceof ApiRequestError &&
+        (error.code === "CONTENT_BLOCKED" || error.code === "CONTENT_REVIEW_REQUIRED")
+      ) {
+        await loadLatestSafetyAppeal();
+      }
       setMessage(error instanceof Error ? error.message : "生成失败，请稍后重试。");
       setMessageTone("danger");
     } finally {
@@ -401,6 +458,70 @@ function GenerateExperience() {
                   </>
                 ) : null}
               </InlineNotice>
+            ) : null}
+
+            {/* 申诉入口：仅在任务被内容拦截且存在对应安全事件时显示 */}
+            {appealEventId && !appealStatus ? (
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/8 p-4">
+                <p className="mb-3 text-sm text-amber-300">如认为是误判，可提交申诉，管理员将在审核后回复。</p>
+                {showAppealForm ? (
+                  <div className="space-y-3">
+                    <label className="block text-sm text-white/70">
+                      申诉理由（至少 10 字）
+                      <textarea
+                        className="focus-ring mt-2 min-h-24 w-full resize-none rounded-xl border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                        value={appealReason}
+                        onChange={(event) => setAppealReason(event.target.value)}
+                        placeholder="请说明为什么认为此次拦截是误判，或提供更多背景信息..."
+                        maxLength={1000}
+                      />
+                    </label>
+                    <div className="flex gap-2">
+                      <button
+                        className="focus-ring rounded-full bg-amber-500/80 px-4 py-2 text-sm font-semibold text-ink transition-colors hover:bg-amber-400 disabled:opacity-50"
+                        type="button"
+                        disabled={appealLoading || appealReason.trim().length < 10}
+                        onClick={() => void handleAppeal()}
+                      >
+                        {appealLoading ? "提交中..." : "提交申诉"}
+                      </button>
+                      <button
+                        className="focus-ring rounded-full border border-white/20 px-4 py-2 text-sm text-white/60 hover:text-white"
+                        type="button"
+                        onClick={() => setShowAppealForm(false)}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    className="focus-ring rounded-full bg-amber-500/20 px-4 py-2 text-sm text-amber-300 transition-colors hover:bg-amber-500/30"
+                    type="button"
+                    onClick={() => setShowAppealForm(true)}
+                  >
+                    发起申诉
+                  </button>
+                )}
+              </div>
+            ) : null}
+
+            {appealStatus ? (
+              <div className="rounded-2xl border border-white/12 bg-white/4 p-4">
+                <p className="text-sm text-white/70">
+                  申诉状态：
+                  <span
+                    className={`font-medium ${appealStatus.status === "APPROVED" ? "text-mint" : appealStatus.status === "REJECTED" ? "text-ember" : "text-amber-300"}`}
+                  >
+                    {appealStatus.status === "PENDING"
+                      ? "待审核"
+                      : appealStatus.status === "APPROVED"
+                        ? "已通过"
+                        : "已驳回"}
+                  </span>
+                  {appealStatus.adminNote ? `，备注：${appealStatus.adminNote}` : ""}
+                </p>
+              </div>
             ) : null}
 
             <button

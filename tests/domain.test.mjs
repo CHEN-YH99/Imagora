@@ -17,6 +17,7 @@ import {
 import { createInitialData, JsonStore, verifyPassword } from "../packages/database/dist/index.js";
 import { SmtpMailer } from "../packages/mailer/dist/index.js";
 import { StripePaymentProvider } from "../packages/payments/dist/index.js";
+import { HttpSafetyProvider, createSafetyProvider } from "../packages/safety/dist/index.js";
 import { checkPromptSafety } from "../packages/shared/dist/index.js";
 
 const onePixelPngBase64 =
@@ -571,6 +572,109 @@ test("stripe webhook rejects signatures outside the timestamp tolerance", async 
   }
 });
 
+test("http safety provider checks third-party text and image endpoints", async () => {
+  const server = createFakeSafetyServer([
+    {
+      status: 200,
+      body: {
+        status: "REVIEW_REQUIRED",
+        reasonCode: "TEXT_REVIEW",
+        reasonMessage: "第三方文本审核要求人工复核",
+        provider: "fake-third-party"
+      }
+    },
+    {
+      status: 200,
+      body: {
+        status: "BLOCKED",
+        reasonCode: "IMAGE_BLOCKED",
+        reasonMessage: "第三方图片审核拦截",
+        provider: "fake-third-party"
+      }
+    }
+  ]);
+  await server.listen();
+  try {
+    const provider = new HttpSafetyProvider({
+      textEndpoint: `http://127.0.0.1:${server.port}/text`,
+      imageEndpoint: `http://127.0.0.1:${server.port}/image`,
+      token: "secret-token",
+      timeoutMs: 1000
+    });
+
+    const textResult = await provider.checkText({
+      text: "needs review",
+      blockedTerms: ["blocked"],
+      reviewTerms: ["review"]
+    });
+    const imageResult = await provider.checkImage({
+      mimeType: "image/png",
+      bytes: onePixelPngBase64
+    });
+
+    assert.equal(textResult.status, "REVIEW_REQUIRED");
+    assert.equal(textResult.reasonCode, "TEXT_REVIEW");
+    assert.equal(imageResult.status, "BLOCKED");
+    assert.equal(imageResult.reasonCode, "IMAGE_BLOCKED");
+    assert.equal(server.requests[0].authorization, "Bearer secret-token");
+    assert.equal(server.requests[0].path, "/text");
+    assert.equal(server.requests[1].path, "/image");
+    assert.deepEqual(JSON.parse(server.requests[0].body), {
+      type: "text",
+      text: "needs review",
+      blockedTerms: ["blocked"],
+      reviewTerms: ["review"]
+    });
+    assert.deepEqual(JSON.parse(server.requests[1].body), {
+      type: "image",
+      mimeType: "image/png",
+      bytes: onePixelPngBase64
+    });
+  } finally {
+    await server.close();
+  }
+});
+
+test("http safety provider sends uncertain provider failures to manual review", async () => {
+  const server = createFakeSafetyServer([
+    {
+      status: 503,
+      body: { error: "provider unavailable" }
+    }
+  ]);
+  await server.listen();
+  try {
+    const provider = new HttpSafetyProvider({
+      textEndpoint: `http://127.0.0.1:${server.port}/text`,
+      imageEndpoint: `http://127.0.0.1:${server.port}/image`,
+      timeoutMs: 1000
+    });
+
+    const result = await provider.checkText({ text: "ordinary prompt" });
+
+    assert.equal(result.status, "REVIEW_REQUIRED");
+    assert.equal(result.reasonCode, "HTTP_PROVIDER_UNAVAILABLE");
+    assert.equal(result.provider, "http-safety");
+  } finally {
+    await server.close();
+  }
+});
+
+test("createSafetyProvider resolves configured http third-party provider", () => {
+  const previous = snapshotEnv(["SAFETY_TEXT_ENDPOINT", "SAFETY_IMAGE_ENDPOINT", "SAFETY_PROVIDER_TOKEN"]);
+  try {
+    process.env.SAFETY_TEXT_ENDPOINT = "https://safety.example/text";
+    process.env.SAFETY_IMAGE_ENDPOINT = "https://safety.example/image";
+    process.env.SAFETY_PROVIDER_TOKEN = "runtime-secret";
+
+    const provider = createSafetyProvider("http");
+
+    assert.equal(provider.name, "http-safety");
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
 function snapshotEnv(names) {
   return Object.fromEntries(names.map((name) => [name, process.env[name]]));
 }
@@ -712,6 +816,60 @@ function createFakeOpenAiServer(responses) {
       if (next.delayMs) {
         await sleep(next.delayMs);
       }
+      response.statusCode = next.status;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(next.body));
+    });
+  });
+
+  return {
+    requests,
+    get port() {
+      return port;
+    },
+    listen() {
+      return new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          const address = server.address();
+          assert.ok(address && typeof address === "object");
+          port = address.port;
+          resolve();
+        });
+      });
+    },
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  };
+}
+
+function createFakeSafetyServer(responses) {
+  const requests = [];
+  let port = 0;
+  const server = createServer((request, response) => {
+    const next = responses.shift();
+    assert.ok(next, "Unexpected safety provider request");
+    const chunks = [];
+    request.on("data", (chunk) => {
+      chunks.push(chunk);
+    });
+    request.on("end", () => {
+      requests.push({
+        method: request.method,
+        path: request.url,
+        authorization: request.headers.authorization,
+        body: Buffer.concat(chunks).toString("utf8")
+      });
       response.statusCode = next.status;
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify(next.body));

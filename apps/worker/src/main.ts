@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import pino from "pino";
 import sharp from "sharp";
 import { createImageGenerationProvider, isProviderError, quoteImageGeneration } from "@imagora/ai-providers";
 import { createStore } from "@imagora/database";
@@ -9,6 +10,20 @@ import { expireCredits, type GeneratedImage, type GenerationTask, type ModelId, 
 
 const isProduction = process.env.NODE_ENV === "production";
 
+// 与 API 对齐的结构化日志：生产输出 JSON，开发用 pino-pretty
+const logger = pino({
+  level: process.env.LOG_LEVEL ?? (isProduction ? "info" : "debug"),
+  base: { service: "imagora-worker" },
+  ...(isProduction
+    ? {}
+    : {
+        transport: {
+          target: "pino-pretty",
+          options: { colorize: true, translateTime: "SYS:standard", ignore: "pid,hostname" }
+        }
+      })
+});
+
 validateProductionConfig();
 
 const store = createStore();
@@ -18,16 +33,16 @@ const safety = createSafetyProvider();
 const queueProvider = process.env.QUEUE_PROVIDER ?? "inline";
 const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 2500);
 
-console.log(`[imagora-worker] started with ${queueProvider} queue provider`);
+logger.info({ queueProvider }, "worker started");
 
 if (queueProvider === "bullmq") {
   startGenerationWorker(processQueuedJob);
 } else {
-  console.log(`[imagora-worker] polling every ${pollIntervalMs}ms`);
+  logger.info({ pollIntervalMs }, "worker polling enabled");
   await tick();
   setInterval(() => {
     tick().catch((error) => {
-      console.error("[imagora-worker] tick failed", error);
+      logger.error({ err: error }, "worker tick failed");
     });
   }, pollIntervalMs);
 }
@@ -77,19 +92,20 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
         ? data.referenceImages.find((image) => image.id === task.referenceImageId && !image.deletedAt)?.publicUrl
         : null
     });
-    console.log(`[imagora-worker] task ${task.id} provider request ${result.providerRequestId}`);
+    logger.info({ taskId: task.id, providerRequestId: result.providerRequestId }, "provider request completed");
 
-    const blockedImage = await firstBlockedGeneratedImage(result.images);
-    if (blockedImage) {
+    const blockedOrReviewImage = await firstBlockedOrReviewImage(result.images);
+    if (blockedOrReviewImage) {
       recordSafetyEvent(
         data,
         task,
-        blockedImage.index,
-        blockedImage.reasonCode,
-        blockedImage.reasonMessage,
-        blockedImage.provider
+        blockedOrReviewImage.index,
+        blockedOrReviewImage.status,
+        blockedOrReviewImage.reasonCode,
+        blockedOrReviewImage.reasonMessage,
+        blockedOrReviewImage.provider
       );
-      failTask(data, task, blockedImage.reasonCode, blockedImage.reasonMessage, "BLOCKED");
+      failTask(data, task, blockedOrReviewImage.reasonCode, blockedOrReviewImage.reasonMessage, "BLOCKED");
       return;
     }
 
@@ -106,7 +122,7 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
     task.providerCostCents = deliveredQuote.providerCostCents;
   } catch (error) {
     if (isProviderError(error) && error.code === "PROVIDER_CONTENT_BLOCKED") {
-      recordSafetyEvent(data, task, 0, error.code, error.message, error.provider);
+      recordSafetyEvent(data, task, 0, "BLOCKED", error.code, error.message, error.provider);
       failTask(data, task, error.code, error.message, "BLOCKED");
       return;
     }
@@ -118,17 +134,22 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
   task.status = "SUCCEEDED";
   task.completedAt = new Date().toISOString();
   task.updatedAt = task.completedAt;
-  console.log(`[imagora-worker] task ${task.id} completed with ${task.quantity} image(s)`);
+  logger.info({ taskId: task.id, quantity: task.quantity }, "task completed");
 }
 
-async function firstBlockedGeneratedImage(
-  images: Array<{ index: number; bytes: string; mimeType: string }>
-): Promise<{ index: number; reasonCode: string; reasonMessage: string; provider: string } | null> {
+async function firstBlockedOrReviewImage(images: Array<{ index: number; bytes: string; mimeType: string }>): Promise<{
+  index: number;
+  status: "BLOCKED" | "REVIEW_REQUIRED";
+  reasonCode: string;
+  reasonMessage: string;
+  provider: string;
+} | null> {
   for (const image of images) {
     const safetyResult = await safety.checkImage({ mimeType: image.mimeType, bytes: image.bytes });
-    if (safetyResult.status === "BLOCKED") {
+    if (safetyResult.status === "BLOCKED" || safetyResult.status === "REVIEW_REQUIRED") {
       return {
         index: image.index,
+        status: safetyResult.status,
         reasonCode: safetyResult.reasonCode,
         reasonMessage: safetyResult.reasonMessage,
         provider: safetyResult.provider
@@ -164,6 +185,7 @@ function recordSafetyEvent(
   data: StoreData,
   task: GenerationTask,
   imageIndex: number,
+  status: "BLOCKED" | "REVIEW_REQUIRED",
   reasonCode: string,
   reasonMessage: string,
   providerName: string
@@ -173,7 +195,7 @@ function recordSafetyEvent(
     userId: task.userId,
     targetType: "GENERATED_IMAGE",
     targetId: `${task.id}:${imageIndex}`,
-    status: "BLOCKED",
+    status,
     reasonCode,
     reasonMessage,
     provider: providerName,
@@ -209,7 +231,7 @@ function failTask(
   task.updatedAt = now;
   refundTask(data, task, "Task failed before image delivery");
   recordOperationalIncident(data, task, code, message, status === "BLOCKED" ? "warning" : "critical");
-  console.log(`[imagora-worker] task ${task.id} ${status.toLowerCase()} and refunded`);
+  logger.warn({ taskId: task.id, status, code }, "task failed and refunded");
 }
 
 function recordOperationalIncident(
@@ -394,7 +416,7 @@ async function thumbnailObject(task: GenerationTask, body: string, mimeType: str
         extension: "jpg"
       };
     } catch (error) {
-      console.error("Failed to generate thumbnail, using original image:", error);
+      logger.error({ err: error, taskId: task.id }, "thumbnail generation failed, using original image");
     }
   }
 

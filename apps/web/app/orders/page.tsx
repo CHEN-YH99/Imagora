@@ -82,8 +82,11 @@ function OrdersView() {
         return;
       }
       setOrders((current) => current.map((item) => (item.id === order.id ? { ...item, ...result.order } : item)));
-      setMessage(typeof result.balanceAfter === "number" ? "订单已支付成功，当前余额已同步到账。" : "订单状态已同步。");
+      const successText =
+        typeof result.balanceAfter === "number" ? "订单已支付成功，当前余额已同步到账。" : "订单状态已同步。";
       await loadOrders();
+      // loadOrders 内部会清空 message，成功提示必须在其之后设置，否则一闪而过
+      setMessage(successText);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "订单支付失败，请稍后重试。");
     } finally {

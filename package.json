@@ -15,7 +15,8 @@
     "build": "npm run build:packages && npm --workspace apps/api run build && npm --workspace apps/worker run build && npm --workspace apps/web run build",
     "build:packages": "npm --workspace packages/shared run build && npm --workspace packages/database run build && npm --workspace packages/ai-providers run build && npm --workspace packages/storage run build && npm --workspace packages/mailer run build && npm --workspace packages/payments run build && npm --workspace packages/safety run build && npm --workspace packages/queue run build",
     "typecheck": "npm --workspace packages/shared run typecheck && npm --workspace packages/shared run build && npm --workspace packages/database run typecheck && npm --workspace packages/database run build && npm --workspace packages/ai-providers run typecheck && npm --workspace packages/ai-providers run build && npm --workspace packages/storage run typecheck && npm --workspace packages/storage run build && npm --workspace packages/mailer run typecheck && npm --workspace packages/mailer run build && npm --workspace packages/payments run typecheck && npm --workspace packages/payments run build && npm --workspace packages/safety run typecheck && npm --workspace packages/safety run build && npm --workspace packages/queue run typecheck && npm --workspace packages/queue run build && npm --workspace apps/api run typecheck && npm --workspace apps/worker run typecheck && npm --workspace apps/web run typecheck",
-    "test": "npm run build:packages && npm --workspace apps/api run build && npm --workspace apps/worker run build && node --test tests/*.test.mjs",
+    "test": "npm run build:packages && npm --workspace apps/api run build && npm --workspace apps/worker run build && node --test --test-concurrency=1 tests/*.test.mjs",
+    "test:e2e": "playwright test",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -35,6 +36,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
+    "@playwright/test": "^1.61.1",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^9.1.2",
     "prettier": "^3.8.4",

@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useId, useState } from "react";
 import { LogOut, Sparkles } from "lucide-react";
-import { apiFetch, formatStatusLabel, logout as apiLogout, type User } from "../lib/api";
+import { apiFetch, formatStatusLabel, logout as apiLogout, SESSION_EXPIRED_EVENT, type User } from "../lib/api";
 
 const navItems = [
   { href: "/generate", label: "生成" },
@@ -30,12 +31,25 @@ export function AppFrame({
   const [logoutMessage, setLogoutMessage] = useState("");
   const logoutTitleId = useId();
   const logoutDescriptionId = useId();
+  const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
     apiFetch<{ user: User }>("/api/auth/me")
       .then((result) => setUser(result.user))
       .catch(() => {});
   }, []);
+
+  // 会话过期时统一跳登录并带上回跳地址，避免受保护页只弹红字卡死
+  useEffect(() => {
+    function handleSessionExpired() {
+      setUser(null);
+      const next = pathname && pathname !== "/login" ? `?next=${encodeURIComponent(pathname)}` : "";
+      router.replace(`/login${next}`);
+    }
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+  }, [pathname, router]);
 
   useEffect(() => {
     if (!logoutConfirmOpen) {

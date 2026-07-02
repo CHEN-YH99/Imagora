@@ -20,6 +20,9 @@ __pycache__/
 *.py[cod]
 data/
 apps/*/data/
+test-results/
+playwright-report/
+.local-dev-logs/
 *-dev*.log
 .DS_Store
 Thumbs.db

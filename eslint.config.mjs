@@ -8,6 +8,8 @@ export default tseslint.config(
       "**/dist/**",
       "**/.next/**",
       "**/node_modules/**",
+      "**/playwright-report/**",
+      "**/test-results/**",
       "**/*.tsbuildinfo",
       "**/next-env.d.ts",
       "packages/database/prisma/generated/**",

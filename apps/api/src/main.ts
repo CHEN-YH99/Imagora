@@ -33,6 +33,7 @@ import {
   type StoreData,
   type StyleId,
   type User,
+  type SafetyAppeal,
   type SafetyRule
 } from "@imagora/shared";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
@@ -89,6 +90,24 @@ const rateLimitRules: RateLimitRule[] = [
     method: "POST",
     pattern: /^\/api\/auth\/register$/,
     max: envNumber("RATE_LIMIT_AUTH_MAX", 20)
+  },
+  {
+    id: "auth-password-reset-request",
+    method: "POST",
+    pattern: /^\/api\/auth\/request-password-reset$/,
+    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
+  },
+  {
+    id: "auth-password-reset",
+    method: "POST",
+    pattern: /^\/api\/auth\/reset-password$/,
+    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
+  },
+  {
+    id: "auth-resend-verification",
+    method: "POST",
+    pattern: /^\/api\/auth\/resend-verification$/,
+    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
   },
   {
     id: "generation-create",
@@ -590,6 +609,16 @@ app.get("/api/users/me/credit-ledger", async (request) => {
   return envelope(request, { entries });
 });
 
+app.get("/api/users/me/safety-events", async (request) => {
+  const { user, data } = await requireAuth(request);
+  const query = paginationSchema.parse(request.query);
+  const events = data.safetyEvents
+    .filter((event) => event.userId === user.id)
+    .sort(descCreated)
+    .slice(0, query.limit);
+  return envelope(request, { events });
+});
+
 app.post("/api/generation/quote", async (request) => {
   assertFeatureEnabled("generation");
   await requireAuth(request);
@@ -625,21 +654,26 @@ app.post("/api/generation/tasks", async (request, reply) => {
       text: [input.prompt, input.negativePrompt ?? ""].join("\n"),
       blockedTerms: data.safetyRules
         .filter((rule) => rule.status === "ACTIVE" && rule.action === "BLOCK")
+        .map((rule) => rule.term),
+      reviewTerms: data.safetyRules
+        .filter((rule) => rule.status === "ACTIVE" && rule.action === "REVIEW")
         .map((rule) => rule.term)
     });
-    if (safety.status === "BLOCKED") {
+    if (safety.status === "BLOCKED" || safety.status === "REVIEW_REQUIRED") {
+      // 注意：store.update 在回调抛异常时会回滚，不落库。安全事件必须靠“正常返回”提交，
+      // 再在事务外抛 AppError，否则待复核/拦截记录会随回滚丢失，人工复核队列永远为空。
       data.safetyEvents.push({
         id: randomUUID(),
         userId: user.id,
         targetType: "PROMPT",
         targetId: input.clientRequestId,
-        status: "BLOCKED",
+        status: safety.status,
         reasonCode: safety.reasonCode,
         reasonMessage: safety.reasonMessage,
         provider: safety.provider,
         createdAt: new Date().toISOString()
       });
-      throw new AppError("CONTENT_BLOCKED", "Prompt was blocked by safety rules", 400, { ...safety });
+      return { blocked: true as const, safety };
     }
     const account = mustFindCreditAccount(data, user.id);
     if (account.balance < cost) {
@@ -678,12 +712,24 @@ app.post("/api/generation/tasks", async (request, reply) => {
     data.generationTasks.push(task);
     spendCredits(data, user.id, cost, "TASK", task.id, `task-spend:${task.id}`, "Image generation task");
     return {
+      blocked: false as const,
       task,
       balanceAfter: mustFindCreditAccount(data, user.id).balance,
       enqueue: true,
       requestedAt: now
     };
   });
+  if (result.blocked) {
+    // 安全事件已在上面的事务里落库，这里才安全地抛错拦截请求。
+    // REVIEW_REQUIRED 用独立错误码，前端才能给出“人工复核 + 申诉”文案，而不是笼统的拦截提示。
+    const review = result.safety.status === "REVIEW_REQUIRED";
+    throw new AppError(
+      review ? "CONTENT_REVIEW_REQUIRED" : "CONTENT_BLOCKED",
+      review ? "Prompt requires manual safety review" : "Prompt was blocked by safety rules",
+      400,
+      { ...result.safety }
+    );
+  }
   if (result.enqueue) {
     await enqueueGenerationTaskOrFail(result.task.id, user.id, result.requestedAt);
     reply.status(201);
@@ -698,27 +744,28 @@ app.post("/api/uploads/reference-images", { bodyLimit: uploadBodyLimitBytes() },
   const upload = inspectReferenceUpload(input);
   const safety = await safetyProvider.checkImage({ mimeType: upload.mimeType, bytes: upload.contentBase64 });
 
-  return store.update(async (data) => {
-    if (safety.status === "BLOCKED") {
+  const result = await store.update(async (data) => {
+    if (safety.status === "BLOCKED" || safety.status === "REVIEW_REQUIRED") {
+      // 同 /api/generation/tasks：安全事件必须靠正常返回提交，抛异常会回滚导致记录丢失
       data.safetyEvents.push({
         id: randomUUID(),
         userId: user.id,
         targetType: "UPLOAD_IMAGE",
         targetId: upload.contentHash,
-        status: "BLOCKED",
+        status: safety.status,
         reasonCode: safety.reasonCode,
         reasonMessage: safety.reasonMessage,
         provider: safety.provider,
         createdAt: new Date().toISOString()
       });
-      throw new AppError("CONTENT_BLOCKED", "Reference image was blocked by safety rules", 400, { ...safety });
+      return { blocked: true as const, safety };
     }
 
     const existing = data.referenceImages.find(
       (image) => image.userId === user.id && image.contentHash === upload.contentHash && !image.deletedAt
     );
     if (existing) {
-      return envelope(request, { referenceImage: existing, duplicate: true });
+      return { blocked: false as const, referenceImage: existing, duplicate: true, created: false };
     }
 
     const now = new Date().toISOString();
@@ -746,9 +793,22 @@ app.post("/api/uploads/reference-images", { bodyLimit: uploadBodyLimitBytes() },
       deletedAt: null
     };
     data.referenceImages.push(referenceImage);
-    reply.status(201);
-    return envelope(request, { referenceImage, duplicate: false });
+    return { blocked: false as const, referenceImage, duplicate: false, created: true };
   });
+  if (result.blocked) {
+    // 安全事件已在事务里落库,这里才抛错拦截。参考图 REVIEW 同样拦截,因为花钱的是后续生成而非上传本身。
+    const review = result.safety.status === "REVIEW_REQUIRED";
+    throw new AppError(
+      review ? "CONTENT_REVIEW_REQUIRED" : "CONTENT_BLOCKED",
+      review ? "Reference image requires manual safety review" : "Reference image was blocked by safety rules",
+      400,
+      { ...result.safety }
+    );
+  }
+  if (result.created) {
+    reply.status(201);
+  }
+  return envelope(request, { referenceImage: result.referenceImage, duplicate: result.duplicate });
 });
 
 app.get("/api/generation/tasks", async (request) => {
@@ -1081,7 +1141,8 @@ app.get("/api/admin/dashboard", async (request) => {
         paidRevenueCents,
         aiCostCents,
         grossProfitCents: paidRevenueCents - aiCostCents,
-        blockedSafetyEvents: data.safetyEvents.filter((event) => event.status === "BLOCKED").length
+        blockedSafetyEvents: data.safetyEvents.filter((event) => event.status === "BLOCKED").length,
+        reviewRequiredSafetyEvents: data.safetyEvents.filter((event) => event.status === "REVIEW_REQUIRED").length
       }
     });
   });
@@ -1223,18 +1284,28 @@ app.post("/api/admin/users/:userId/credits/adjust", async (request) => {
     mustFindUser(data, userId);
     const account = mustFindCreditAccount(data, userId);
     const before = { balance: account.balance };
-    adjustCredits(data, userId, input.amount, admin.id, `admin-adjust:${randomUUID()}`, input.reason);
-    audit(
+    // 幂等键随请求传入，重复提交只执行一次，也不重复写审计
+    const applied = adjustCredits(
       data,
-      admin.id,
-      "user.credits.adjust",
-      "USER",
       userId,
-      input.reason,
-      before,
-      { balance: account.balance },
-      request
+      input.amount,
+      admin.id,
+      `admin-adjust:${input.clientRequestId}`,
+      input.reason
     );
+    if (applied) {
+      audit(
+        data,
+        admin.id,
+        "user.credits.adjust",
+        "USER",
+        userId,
+        input.reason,
+        before,
+        { balance: account.balance },
+        request
+      );
+    }
     return envelope(request, { account });
   });
 });
@@ -1439,6 +1510,118 @@ app.patch("/api/admin/safety-rules/:ruleId", async (request) => {
     Object.assign(rule, input, { updatedAt: new Date().toISOString() });
     audit(data, admin.id, "safety-rule.update", "SAFETY_RULE", rule.id, null, before, { ...rule }, request);
     return envelope(request, { rule });
+  });
+});
+
+app.get("/api/admin/safety-events", async (request) => {
+  const query = safetyEventQuerySchema.parse(request.query);
+  const { data } = await requireAdmin(request);
+  const events = data.safetyEvents
+    .filter((event) => !query.status || event.status === query.status)
+    .sort(descCreated)
+    .slice(0, query.limit);
+  return envelope(request, { events });
+});
+
+app.patch("/api/admin/safety-events/:eventId", async (request) => {
+  const { user: admin } = await requireAdmin(request);
+  const { eventId } = safetyEventParamSchema.parse(request.params);
+  const input = safetyEventReviewSchema.parse(request.body);
+  return store.update((data) => {
+    const event = data.safetyEvents.find((item) => item.id === eventId);
+    if (!event) {
+      throw new AppError("NOT_FOUND", "Safety event was not found", 404);
+    }
+    if (event.status !== "REVIEW_REQUIRED") {
+      throw new AppError("VALIDATION_ERROR", "Only pending safety reviews can be handled", 400);
+    }
+    const before = { ...event };
+    event.status = input.status;
+    event.reasonMessage = `${event.reasonMessage}；人工复核：${input.reason}`;
+    audit(data, admin.id, "safety-event.review", "SAFETY_EVENT", event.id, input.reason, before, { ...event }, request);
+    return envelope(request, { event });
+  });
+});
+
+// ---- 用户申诉接口 ----
+
+app.post("/api/safety-appeals", async (request) => {
+  const { user } = await requireAuth(request);
+  const input = safetyAppealCreateSchema.parse(request.body);
+  return store.update((data) => {
+    const event = data.safetyEvents.find((item) => item.id === input.safetyEventId && item.userId === user.id);
+    if (!event) {
+      throw new AppError("NOT_FOUND", "Safety event was not found", 404);
+    }
+    const existing = data.safetyAppeals.find(
+      (appeal) => appeal.safetyEventId === input.safetyEventId && appeal.status === "PENDING"
+    );
+    if (existing) {
+      throw new AppError("CONFLICT", "已有待处理的申诉，请等待结果后再提交", 409);
+    }
+    const now = new Date().toISOString();
+    const appeal: SafetyAppeal = {
+      id: randomUUID(),
+      userId: user.id,
+      safetyEventId: input.safetyEventId,
+      reason: input.reason,
+      status: "PENDING",
+      adminNote: null,
+      createdAt: now,
+      resolvedAt: null
+    };
+    data.safetyAppeals.push(appeal);
+    return envelope(request, { appeal });
+  });
+});
+
+app.get("/api/safety-appeals", async (request) => {
+  const { user } = await requireAuth(request);
+  const data = await store.read();
+  const appeals = data.safetyAppeals.filter((appeal) => appeal.userId === user.id).sort(descCreated);
+  return envelope(request, { appeals });
+});
+
+app.get("/api/admin/safety-appeals", async (request) => {
+  const query = safetyAppealAdminQuerySchema.parse(request.query);
+  await requireAdmin(request);
+  const data = await store.read();
+  const appeals = data.safetyAppeals
+    .filter((appeal) => !query.status || appeal.status === query.status)
+    .sort(descCreated)
+    .slice(0, query.limit);
+  return envelope(request, { appeals });
+});
+
+app.patch("/api/admin/safety-appeals/:appealId", async (request) => {
+  const { user: admin } = await requireAdmin(request);
+  const { appealId } = safetyAppealParamSchema.parse(request.params);
+  const input = safetyAppealReviewSchema.parse(request.body);
+  return store.update((data) => {
+    const appeal = data.safetyAppeals.find((item) => item.id === appealId);
+    if (!appeal) {
+      throw new AppError("NOT_FOUND", "Appeal was not found", 404);
+    }
+    if (appeal.status !== "PENDING") {
+      throw new AppError("VALIDATION_ERROR", "Only pending appeals can be reviewed", 400);
+    }
+    const before = { ...appeal };
+    const now = new Date().toISOString();
+    appeal.status = input.status;
+    appeal.adminNote = input.adminNote ?? null;
+    appeal.resolvedAt = now;
+    audit(
+      data,
+      admin.id,
+      "safety-appeal.review",
+      "SAFETY_APPEAL",
+      appeal.id,
+      input.adminNote ?? null,
+      before,
+      { ...appeal },
+      request
+    );
+    return envelope(request, { appeal });
   });
 });
 
@@ -1741,7 +1924,9 @@ const adjustCreditSchema = z.object({
     .refine((value) => value !== 0, { message: "amount 不能为 0" })
     .refine((value) => Math.abs(value) <= 100000, { message: "单次调整不能超过 100000 积分" }),
   reason: z.string().min(3).max(240),
-  confirm: z.boolean().optional()
+  confirm: z.boolean().optional(),
+  // 幂等键由客户端在发起操作时生成一次，防止重复提交/网络重试把同一笔调整叠加执行
+  clientRequestId: z.string().min(8).max(120)
 });
 const planSchema = z.object({
   name: z.string().min(1).max(80),
@@ -1765,6 +1950,25 @@ const safetyRuleSchema = z.object({
   status: z.enum(["ACTIVE", "INACTIVE"])
 });
 const safetyRulePatchSchema = safetyRuleSchema.partial();
+const safetyEventParamSchema = z.object({ eventId: z.string().min(1) });
+const safetyEventQuerySchema = z.object({
+  status: z.enum(["PASSED", "BLOCKED", "REVIEW_REQUIRED"]).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(30)
+});
+const safetyEventReviewSchema = z.object({ status: z.enum(["PASSED", "BLOCKED"]) }).merge(adminReasonSchema);
+const safetyAppealParamSchema = z.object({ appealId: z.string().min(1) });
+const safetyAppealCreateSchema = z.object({
+  safetyEventId: z.string().min(1),
+  reason: z.string().min(10).max(1000)
+});
+const safetyAppealAdminQuerySchema = z.object({
+  status: z.enum(["PENDING", "APPROVED", "REJECTED"]).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(30)
+});
+const safetyAppealReviewSchema = z.object({
+  status: z.enum(["APPROVED", "REJECTED"]),
+  adminNote: z.string().min(1).max(500).optional()
+});
 
 function envelope<T>(request: FastifyRequest, data: T): ApiEnvelope<T> {
   return { data, requestId: request.requestId ?? randomUUID() };
@@ -2540,9 +2744,9 @@ function adjustCredits(
   adminUserId: string,
   idempotencyKey: string,
   remark: string
-): void {
+): boolean {
   if (data.creditLedgerEntries.some((entry) => entry.idempotencyKey === idempotencyKey)) {
-    return;
+    return false;
   }
   const account = mustFindCreditAccount(data, userId);
   if (amount < 0 && account.balance < Math.abs(amount)) {
@@ -2569,6 +2773,7 @@ function adjustCredits(
     createdAt: now,
     expiresAt: null
   });
+  return true;
 }
 
 function withFavorite(data: StoreData, userId: string, image: GeneratedImage): GeneratedImage & { favorite: boolean } {

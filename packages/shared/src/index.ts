@@ -216,6 +216,19 @@ export interface SafetyRule {
   updatedAt: string;
 }
 
+export type SafetyAppealStatus = "PENDING" | "APPROVED" | "REJECTED";
+
+export interface SafetyAppeal {
+  id: string;
+  userId: string;
+  safetyEventId: string;
+  reason: string;
+  status: SafetyAppealStatus;
+  adminNote: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
 export interface AdminAuditLog {
   id: string;
   adminUserId: string;
@@ -279,6 +292,7 @@ export interface StoreData {
   paymentEvents: PaymentEvent[];
   safetyEvents: SafetyEvent[];
   safetyRules: SafetyRule[];
+  safetyAppeals: SafetyAppeal[];
   adminAuditLogs: AdminAuditLog[];
   operationalIncidents: OperationalIncident[];
   alertNotifications: AlertNotification[];
@@ -308,6 +322,7 @@ export type ErrorCode =
   | "CONFLICT"
   | "INSUFFICIENT_CREDITS"
   | "CONTENT_BLOCKED"
+  | "CONTENT_REVIEW_REQUIRED"
   | "TASK_NOT_RETRYABLE"
   | "PLAN_UNAVAILABLE"
   | "ORDER_NOT_PAYABLE"

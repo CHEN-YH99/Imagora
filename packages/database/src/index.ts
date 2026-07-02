@@ -2,7 +2,7 @@ import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promis
 import { dirname, resolve } from "node:path";
 import { randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { Prisma, PrismaClient } from "../generated/client/index.js";
-import type { CreditLedgerEntry, Plan, StoreData, User } from "@imagora/shared";
+import type { CreditLedgerEntry, Plan, SafetyAppeal, StoreData, User } from "@imagora/shared";
 
 const defaultPath = resolve(process.cwd(), "data", "imagora-store.json");
 
@@ -165,6 +165,7 @@ export class PrismaStore implements Store {
       paymentEvents,
       safetyEvents,
       safetyRules,
+      safetyAppeals,
       adminAuditLogs,
       operationalIncidents,
       alertNotifications
@@ -184,6 +185,7 @@ export class PrismaStore implements Store {
       this.prisma.paymentEvent.findMany(),
       this.prisma.safetyEvent.findMany(),
       this.prisma.safetyRule.findMany(),
+      this.prisma.safetyAppeal.findMany(),
       this.prisma.adminAuditLog.findMany(),
       this.prisma.operationalIncident.findMany(),
       this.prisma.alertNotification.findMany()
@@ -364,6 +366,16 @@ export class PrismaStore implements Store {
         createdAt: rule.createdAt.toISOString(),
         updatedAt: rule.updatedAt.toISOString()
       })),
+      safetyAppeals: safetyAppeals.map((appeal) => ({
+        id: appeal.id,
+        userId: appeal.userId,
+        safetyEventId: appeal.safetyEventId,
+        reason: appeal.reason,
+        status: appeal.status as SafetyAppeal["status"],
+        adminNote: appeal.adminNote ?? null,
+        createdAt: appeal.createdAt.toISOString(),
+        resolvedAt: appeal.resolvedAt?.toISOString() ?? null
+      })),
       adminAuditLogs: adminAuditLogs.map((log) => ({
         id: log.id,
         adminUserId: log.adminUserId,
@@ -412,6 +424,7 @@ export class PrismaStore implements Store {
       await tx.alertNotification.deleteMany();
       await tx.operationalIncident.deleteMany();
       await tx.adminAuditLog.deleteMany();
+      await tx.safetyAppeal.deleteMany();
       await tx.safetyRule.deleteMany();
       await tx.safetyEvent.deleteMany();
       await tx.paymentEvent.deleteMany();
@@ -662,6 +675,20 @@ export class PrismaStore implements Store {
           }))
         });
       }
+      if (data.safetyAppeals.length) {
+        await tx.safetyAppeal.createMany({
+          data: data.safetyAppeals.map((appeal) => ({
+            id: appeal.id,
+            userId: appeal.userId,
+            safetyEventId: appeal.safetyEventId,
+            reason: appeal.reason,
+            status: appeal.status,
+            adminNote: appeal.adminNote ?? null,
+            createdAt: toDate(appeal.createdAt),
+            resolvedAt: appeal.resolvedAt ? toDate(appeal.resolvedAt) : null
+          }))
+        });
+      }
       if (data.adminAuditLogs.length) {
         await tx.adminAuditLog.createMany({
           data: data.adminAuditLogs.map((log) => ({
@@ -815,6 +842,7 @@ export function createSeedData(): StoreData {
     paymentEvents: [],
     safetyEvents: [],
     safetyRules: seedSafetyRules(now),
+    safetyAppeals: [],
     adminAuditLogs: [],
     operationalIncidents: [],
     alertNotifications: []
@@ -854,6 +882,7 @@ function createBootstrapAdminData(email: string, password: string): StoreData {
     paymentEvents: [],
     safetyEvents: [],
     safetyRules: seedSafetyRules(now),
+    safetyAppeals: [],
     adminAuditLogs: [],
     operationalIncidents: [],
     alertNotifications: []
@@ -966,6 +995,14 @@ function seedSafetyRules(now: string) {
       status: "ACTIVE" as const,
       createdAt: now,
       updatedAt: now
+    },
+    {
+      id: randomUUID(),
+      term: "政治敏感词汇",
+      action: "REVIEW" as const,
+      status: "ACTIVE" as const,
+      createdAt: now,
+      updatedAt: now
     }
   ];
 }
@@ -999,6 +1036,7 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
     paymentEvents: data.paymentEvents ?? [],
     safetyEvents: data.safetyEvents ?? [],
     safetyRules: data.safetyRules ?? seedSafetyRules(now),
+    safetyAppeals: data.safetyAppeals ?? [],
     adminAuditLogs: (data.adminAuditLogs ?? []).map((log) => ({
       ...log,
       reason: log.reason ?? null

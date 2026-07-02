@@ -81,6 +81,29 @@ test("web auth pages validate inputs and registration does not ask for nickname"
   assert.match(nextConfig, /Permissions-Policy/);
 });
 
+test("web falls back to login globally when a protected request returns 401", async () => {
+  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const appFrame = await readFile(join(root, "apps/web/components/AppFrame.tsx"), "utf8");
+  const loginPage = await readFile(join(root, "apps/web/app/login/page.tsx"), "utf8");
+
+  // apiFetch 只对非 auth 接口的 401 广播会话过期，避免登录失败被误判为会话过期
+  assert.match(apiClient, /SESSION_EXPIRED_EVENT/);
+  assert.match(apiClient, /isAuthEndpoint/);
+  assert.match(apiClient, /startsWith\("\/api\/auth\/"\)/);
+  assert.match(
+    apiClient,
+    /response\.status === 401 && payload\.error\?\.code === "UNAUTHORIZED" && !isAuthEndpoint\(path\)/
+  );
+  // AppFrame 订阅事件后清用户态并带 next 跳登录
+  assert.match(appFrame, /SESSION_EXPIRED_EVENT/);
+  assert.match(appFrame, /addEventListener\(SESSION_EXPIRED_EVENT/);
+  assert.match(appFrame, /router\.replace\(`\/login/);
+  assert.match(appFrame, /next=\$\{encodeURIComponent\(pathname\)\}/);
+  // 登录页读取 next 并防开放重定向后回跳
+  assert.match(loginPage, /safeNextPath\(searchParams\.get\("next"\)\)/);
+  assert.match(loginPage, /startsWith\("\/\/"\)/);
+});
+
 test("web core pages expose recoverable empty states and confirm destructive actions", async () => {
   const accountPage = await readFile(join(root, "apps/web/app/account/page.tsx"), "utf8");
   const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
@@ -196,4 +219,31 @@ test("admin console exposes operational incidents and alert notifications", asyn
   assert.match(apiClient, /averageQueueWaitMs/);
   assert.match(apiClient, /paymentFailuresTotal/);
   assert.match(apiClient, /refundFailuresTotal/);
+});
+
+test("admin console exposes safety review queue and manual handling actions", async () => {
+  const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
+  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+
+  assert.match(adminPage, /安全事件/);
+  assert.match(adminPage, /safetyEvents/);
+  assert.match(adminPage, /\/api\/admin\/safety-events/);
+  assert.match(adminPage, /safety-event/);
+  assert.match(adminPage, /人工复核/);
+  assert.match(adminPage, /复核通过/);
+  assert.match(adminPage, /确认拦截/);
+
+  assert.match(apiClient, /export type SafetyEvent/);
+  assert.match(apiClient, /REVIEW_REQUIRED/);
+  assert.match(apiClient, /reviewRequiredSafetyEvents/);
+});
+
+test("generate page exposes safety appeal entry after direct content blocking", async () => {
+  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+
+  assert.match(generatePage, /async function loadLatestSafetyAppeal\(\)/);
+  assert.match(generatePage, /await loadLatestSafetyAppeal\(\);/);
+  assert.match(generatePage, /CONTENT_REVIEW_REQUIRED/);
+  assert.match(apiClient, /body: \{ safetyEventId, reason \}/);
 });

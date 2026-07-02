@@ -799,10 +799,11 @@ test("api and worker complete generation and enforce admin safety rules", async 
     );
 
     const beforeAdminAdjustment = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const adjustRequestId = "qa-adjust-idem-0001";
     const adjustedCredits = await post(
       baseUrl,
       `/api/admin/users/${demo.data.user.id}/credits/adjust`,
-      { amount: 17, reason: "QA manual adjustment" },
+      { amount: 17, reason: "QA manual adjustment", clientRequestId: adjustRequestId },
       adminSession
     );
     assert.equal(adjustedCredits.data.account.balance, beforeAdminAdjustment.data.account.balance + 17);
@@ -816,6 +817,26 @@ test("api and worker complete generation and enforce admin safety rules", async 
           entry.remark === "QA manual adjustment"
       )
     );
+
+    // 重复提交同一 clientRequestId 不得叠加扣加积分，也不得重复写审计
+    const replayedAdjustment = await post(
+      baseUrl,
+      `/api/admin/users/${demo.data.user.id}/credits/adjust`,
+      { amount: 17, reason: "QA manual adjustment", clientRequestId: adjustRequestId },
+      adminSession
+    );
+    assert.equal(replayedAdjustment.data.account.balance, adjustedCredits.data.account.balance);
+    const ledgerAfterReplay = await get(baseUrl, "/api/users/me/credit-ledger?limit=100", demoSession);
+    const adjustEntriesForKey = ledgerAfterReplay.data.entries.filter(
+      (entry) => entry.type === "ADJUST" && entry.amount === 17 && entry.remark === "QA manual adjustment"
+    );
+    assert.equal(adjustEntriesForKey.length, 1);
+    const adjustAuditLogs = await get(
+      baseUrl,
+      `/api/admin/audit-logs?action=user.credits.adjust&targetId=${demo.data.user.id}&limit=100`,
+      adminSession
+    );
+    assert.equal(adjustAuditLogs.data.logs.filter((log) => log.reason === "QA manual adjustment").length, 1);
 
     const createdPlan = await post(
       baseUrl,
@@ -1039,6 +1060,98 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const blockedPayload = await blocked.json();
     assert.equal(blocked.status, 400);
     assert.equal(blockedPayload.error.code, "CONTENT_BLOCKED");
+
+    await post(
+      baseUrl,
+      "/api/admin/safety-rules",
+      { term: "reviewtest", action: "REVIEW", status: "ACTIVE" },
+      adminSession
+    );
+    const reviewRequired = await fetch(`${baseUrl}/api/generation/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: demoSession
+      },
+      body: JSON.stringify({
+        clientRequestId: crypto.randomUUID(),
+        prompt: "reviewtest creative brief",
+        style: "poster",
+        aspectRatio: "1:1",
+        quantity: 1,
+        quality: "draft"
+      })
+    });
+    const reviewRequiredPayload = await reviewRequired.json();
+    assert.equal(reviewRequired.status, 400);
+    assert.equal(reviewRequiredPayload.error.code, "CONTENT_REVIEW_REQUIRED");
+    assert.equal(reviewRequiredPayload.error.details.status, "REVIEW_REQUIRED");
+
+    const reviewQueue = await get(baseUrl, "/api/admin/safety-events?status=REVIEW_REQUIRED&limit=10", adminSession);
+    const reviewEvent = reviewQueue.data.events.find((event) => event.reasonCode === "LOCAL_REVIEW_HIT");
+    assert.ok(reviewEvent, `Missing review event in ${JSON.stringify(reviewQueue.data.events)}`);
+    assert.equal(reviewEvent.status, "REVIEW_REQUIRED");
+    assert.equal(reviewEvent.provider, "local-rules");
+
+    const submittedAppeal = await post(
+      baseUrl,
+      "/api/safety-appeals",
+      { safetyEventId: reviewEvent.id, reason: "这是合规产品海报测试内容，请人工复核误判。" },
+      demoSession
+    );
+    assert.equal(submittedAppeal.data.appeal.status, "PENDING");
+    assert.equal(submittedAppeal.data.appeal.safetyEventId, reviewEvent.id);
+
+    const duplicateAppeal = await fetch(`${baseUrl}/api/safety-appeals`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: demoSession
+      },
+      body: JSON.stringify({
+        safetyEventId: reviewEvent.id,
+        reason: "重复提交同一个待处理申诉应该被拒绝。"
+      })
+    });
+    const duplicateAppealPayload = await duplicateAppeal.json();
+    assert.equal(duplicateAppeal.status, 409);
+    assert.equal(duplicateAppealPayload.error.code, "CONFLICT");
+
+    const ownAppeals = await get(baseUrl, "/api/safety-appeals", demoSession);
+    assert.ok(ownAppeals.data.appeals.some((appeal) => appeal.id === submittedAppeal.data.appeal.id));
+
+    const pendingAppeals = await get(baseUrl, "/api/admin/safety-appeals?status=PENDING&limit=10", adminSession);
+    assert.ok(pendingAppeals.data.appeals.some((appeal) => appeal.id === submittedAppeal.data.appeal.id));
+
+    const reviewedAppeal = await patch(
+      baseUrl,
+      `/api/admin/safety-appeals/${submittedAppeal.data.appeal.id}`,
+      { status: "APPROVED", adminNote: "确认是误判，允许后续调整提示词重试。" },
+      adminSession
+    );
+    assert.equal(reviewedAppeal.data.appeal.status, "APPROVED");
+    assert.ok(reviewedAppeal.data.appeal.resolvedAt);
+
+    const appealAuditLogs = await get(
+      baseUrl,
+      `/api/admin/audit-logs?action=safety-appeal.review&targetType=SAFETY_APPEAL&targetId=${submittedAppeal.data.appeal.id}&limit=5`,
+      adminSession
+    );
+    assert.ok(appealAuditLogs.data.logs.some((entry) => entry.reason === "确认是误判，允许后续调整提示词重试。"));
+
+    const reviewedEvent = await patch(
+      baseUrl,
+      `/api/admin/safety-events/${reviewEvent.id}`,
+      { status: "PASSED", reason: "人工复核通过" },
+      adminSession
+    );
+    assert.equal(reviewedEvent.data.event.status, "PASSED");
+    const reviewAuditLogs = await get(
+      baseUrl,
+      `/api/admin/audit-logs?action=safety-event.review&targetType=SAFETY_EVENT&targetId=${reviewEvent.id}&limit=5`,
+      adminSession
+    );
+    assert.ok(reviewAuditLogs.data.logs.some((entry) => entry.reason === "人工复核通过"));
   } finally {
     api.kill();
     worker.kill();
