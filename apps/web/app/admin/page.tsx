@@ -1234,6 +1234,8 @@ export default function AdminPage() {
                   alt="后台图片预览"
                   loading="lazy"
                   decoding="async"
+                  width={image.width}
+                  height={image.height}
                 />
                 <div className="space-y-2 p-3">
                   <StatusPill>{image.visibility}</StatusPill>
@@ -1805,7 +1807,15 @@ export default function AdminPage() {
                           key={image.id}
                           className="overflow-hidden rounded-xl border border-white/10 bg-white/5"
                         >
-                          <img src={image.thumbnailUrl} alt="任务图片" className="aspect-square w-full object-cover" />
+                          <img
+                            src={image.thumbnailUrl}
+                            alt="任务图片"
+                            className="aspect-square w-full object-cover"
+                            loading="lazy"
+                            decoding="async"
+                            width={image.width}
+                            height={image.height}
+                          />
                           <div className="space-y-1 p-3 text-xs text-white/60">
                             <p>{image.visibility}</p>
                             <p>
@@ -1825,6 +1835,10 @@ export default function AdminPage() {
                     src={selectedDetail.data.image.thumbnailUrl}
                     alt="图片详情预览"
                     className="w-full object-cover"
+                    loading="lazy"
+                    decoding="async"
+                    width={selectedDetail.data.image.width}
+                    height={selectedDetail.data.image.height}
                   />
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4">

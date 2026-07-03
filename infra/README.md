@@ -73,6 +73,7 @@ Before a gray release, run the local quality gate:
 npm run typecheck
 npm test
 npm run build
+npm run release:drill
 npm audit --omit=dev
 git diff --check
 ```
@@ -84,7 +85,15 @@ npm run smoke
 npm run load:smoke
 ```
 
-Use `API_BASE_URL`, `WEB_BASE_URL`, `LOAD_REQUESTS`, and `LOAD_CONCURRENCY` to target another environment.
+By default, `npm run load:smoke` starts a local built API on `API_BASE_URL` when `API_BASE_URL` is not set. Use `API_BASE_URL`, `WEB_BASE_URL`, `LOAD_MANAGE_API=0`, `LOAD_REQUESTS`, `LOAD_CONCURRENCY`, `LOAD_TARGETS`, `LOAD_AVG_MS`, `LOAD_P95_MS`, and `LOAD_FAILURE_RATE_MAX` to target another environment and set release thresholds.
+
+`npm run load:smoke` checks `/health` and `/api/features` by default. `LOAD_TARGETS` accepts a comma-separated list, for example:
+
+```bash
+LOAD_TARGETS=/health,/api/features LOAD_P95_MS=1000 LOAD_FAILURE_RATE_MAX=0 npm run load:smoke
+```
+
+`npm run release:drill` performs a local gray-release rehearsal without deploying: it verifies the production configuration checklist, build artifacts, JSON backup/restore hashing, and rollback checklist. Missing real provider credentials are warnings by default because local development cannot invent external accounts; set `RELEASE_DRILL_STRICT=1` before an actual gray release to fail on those gaps.
 
 The API health probe is:
 
@@ -127,7 +136,8 @@ The MVP exposes operational alerts in `GET /api/admin/metrics`. The defaults are
 9. Upload one valid reference image and one disguised invalid file.
 10. Watch generation success rate, payment event count, HTTP failures, and order maintenance counters for 24 to 48 hours before full rollout.
 11. Run `npm run smoke` against the gray environment.
-12. Run `npm run load:smoke` against the API health endpoint and keep p95 below the release target.
+12. Run `npm run load:smoke` against the API health and feature endpoints and keep p95 below the release target.
+13. Run `npm run release:drill`; for real gray release rehearsal, use `RELEASE_DRILL_STRICT=1`.
 
 ## API Contracts
 
@@ -234,6 +244,8 @@ npm run restore:json -- backups/imagora-store-YYYY-MM-DDTHH-MM-SS-000Z.json
 ```
 
 `IMAGORA_STORE_PATH` controls the source/target store path. `BACKUP_DIR` controls the backup directory.
+
+Backups now validate JSON before copying, write a sibling `.manifest.json` with `sha256`, and verify the copied file hash. Restore validates JSON and checks the manifest hash when it is present before copying back to the target store.
 
 ## Object Storage Lifecycle
 

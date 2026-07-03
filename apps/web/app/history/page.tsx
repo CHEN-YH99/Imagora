@@ -235,6 +235,8 @@ export default function HistoryPage() {
                       alt="历史生成图片"
                       loading="lazy"
                       decoding="async"
+                      width={image.width}
+                      height={image.height}
                     />
                   </Link>
                   <div className="flex flex-wrap gap-2 p-3">

@@ -265,6 +265,7 @@ model ImageFavorite {
   createdAt DateTime       @default(now()) @map("created_at")
 
   @@id([userId, imageId])
+  @@index([imageId])
   @@map("image_favorites")
 }
 
@@ -304,6 +305,7 @@ model Order {
   paymentEvents   PaymentEvent[]
 
   @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
   @@map("orders")
 }
 
@@ -319,6 +321,7 @@ model PaymentEvent {
   createdAt       DateTime @default(now()) @map("created_at")
 
   @@unique([provider, providerEventId])
+  @@index([orderId, createdAt])
   @@map("payment_events")
 }
 

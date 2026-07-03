@@ -320,6 +320,10 @@ function GenerateExperience() {
                     className="size-20 shrink-0 rounded-xl border border-white/12 object-cover"
                     src={referenceImage.publicUrl}
                     alt="参考图预览"
+                    loading="lazy"
+                    decoding="async"
+                    width={80}
+                    height={80}
                   />
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-white">{referenceImage.originalFileName}</p>
@@ -555,6 +559,8 @@ function GenerateExperience() {
                 alt="生成图片结果"
                 loading="lazy"
                 decoding="async"
+                width={image.width}
+                height={image.height}
               />
             ))}
             {images.length === 0 ? (

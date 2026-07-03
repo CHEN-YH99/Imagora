@@ -32,3 +32,11 @@ test("generated image list previews are lazy-loaded and async decoded", async ()
     assert.match(content, /decoding="async"/);
   }
 });
+
+test("generated image previews declare dimensions to reduce layout shift", async () => {
+  for (const file of generatedImagePreviewFiles) {
+    const content = await readFile(file, "utf8");
+    assert.match(content, /width=\{(?:image|selectedDetail\.data\.image)\.width\}/);
+    assert.match(content, /height=\{(?:image|selectedDetail\.data\.image)\.height\}/);
+  }
+});

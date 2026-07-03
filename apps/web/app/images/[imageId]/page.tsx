@@ -167,6 +167,10 @@ export default function ImageDetailPage() {
                 className="max-h-[72vh] w-full rounded-2xl border border-white/12 object-contain"
                 src={image.thumbnailUrl}
                 alt="生成图片详情预览"
+                loading="lazy"
+                decoding="async"
+                width={image.width}
+                height={image.height}
               />
             </div>
           </Panel>
