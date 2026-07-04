@@ -1275,6 +1275,98 @@ test("api and worker complete generation with openai provider flow", async () =>
   }
 });
 
+test("generation task status stays responsive while openai generation is still running", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-api-openai-running-"));
+  const port = await reserveUnusedPort();
+  const storePath = join(dir, "store.json");
+  const openAiServer = createFakeOpenAiServer([
+    {
+      delayMs: 2500,
+      status: 200,
+      body: {
+        id: "openai_req_slow_1",
+        data: [{ b64_json: onePixelPngBase64 }]
+      }
+    }
+  ]);
+  await openAiServer.listen();
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    IMAGORA_STORE_PATH: storePath,
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    ORDER_PENDING_TTL_MINUTES: "30",
+    WORKER_POLL_INTERVAL_MS: "100",
+    QUEUE_PROVIDER: "inline",
+    IMAGE_PROVIDER_DEFAULT: "openai",
+    IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
+    OPENAI_API_KEY: "sk-test",
+    OPENAI_BASE_URL: `http://127.0.0.1:${openAiServer.port}`,
+    OPENAI_TIMEOUT_MS: "10000",
+    OPENAI_MAX_RETRIES: "0",
+    OPENAI_RETRY_BASE_MS: "10"
+  };
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
+  const worker = spawn(process.execPath, ["apps/worker/dist/main.js"], { env, stdio: "ignore" });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl);
+
+    const demo = await login(baseUrl, "demo@imagora.local", "Demo123!");
+    const created = await post(
+      baseUrl,
+      "/api/generation/tasks",
+      {
+        clientRequestId: randomUUID(),
+        prompt: "A realistic portrait photo with natural daylight",
+        style: "realistic",
+        aspectRatio: "1:1",
+        quantity: 1,
+        quality: "standard"
+      },
+      demo.session
+    );
+
+    await waitForCondition(() => openAiServer.requests.length === 1, 3000, 50, "Worker did not reach OpenAI provider");
+
+    const detailStartedAt = Date.now();
+    const detailSnapshot = await fetchJsonWithTimeout(
+      `${baseUrl}/api/generation/tasks/${created.data.task.id}`,
+      { headers: sessionHeaders(demo.session) },
+      1500
+    );
+    const detailElapsedMs = Date.now() - detailStartedAt;
+    assert.equal(detailSnapshot.response.status, 200);
+    assert.ok(detailElapsedMs < 1500, `Task detail request took ${detailElapsedMs}ms`);
+    assert.equal(detailSnapshot.payload.data.task.status, "RUNNING");
+
+    const listStartedAt = Date.now();
+    const listSnapshot = await fetchJsonWithTimeout(
+      `${baseUrl}/api/generation/tasks?limit=5`,
+      { headers: sessionHeaders(demo.session) },
+      1500
+    );
+    const listElapsedMs = Date.now() - listStartedAt;
+    assert.equal(listSnapshot.response.status, 200);
+    assert.ok(listElapsedMs < 1500, `Task list request took ${listElapsedMs}ms`);
+    assert.equal(listSnapshot.payload.data.tasks[0].id, created.data.task.id);
+    assert.equal(listSnapshot.payload.data.tasks[0].status, "RUNNING");
+
+    const completed = await waitForTask(baseUrl, demo.session, created.data.task.id);
+    assert.equal(completed.data.task.status, "SUCCEEDED");
+    assert.equal(completed.data.images.length, 1);
+  } finally {
+    api.kill();
+    worker.kill();
+    await openAiServer.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("api and worker share the same relative json store across different process cwd values", async () => {
   const port = await reserveUnusedPort();
   const relativeStorePath = join(".tmp-test-store", `cwd-split-${randomUUID()}`, "store.json");
@@ -1724,6 +1816,17 @@ async function waitForHealth(baseUrl, timeoutMs = 6000) {
   throw new Error("API health check timed out");
 }
 
+async function waitForCondition(check, timeoutMs = 3000, intervalMs = 50, message = "Condition not met") {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) {
+      return;
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(message);
+}
+
 async function waitForTask(baseUrl, session, taskId) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const response = await get(baseUrl, `/api/generation/tasks/${taskId}`, session);
@@ -1770,6 +1873,23 @@ async function get(baseUrl, path, session) {
   const payload = await response.json();
   assert.equal(response.ok, true, JSON.stringify(payload));
   return payload;
+}
+
+async function fetchJsonWithTimeout(url, init, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return {
+      response,
+      payload: await response.json()
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function sessionHeaders(session) {

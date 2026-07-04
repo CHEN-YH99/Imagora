@@ -225,7 +225,7 @@ async function ensureApiService() {
      IMAGORA_SEED_DEMO_DATA: "false",
      IMAGORA_BOOTSTRAP_ADMIN_EMAIL: adminEmail,
      IMAGORA_BOOTSTRAP_ADMIN_PASSWORD: adminPassword,
-      IMAGE_PROVIDER_DEFAULT: process.env.SMOKE_IMAGE_PROVIDER ?? process.env.SMOKE_AI_PROVIDER ?? "mock",
+      IMAGE_PROVIDER_DEFAULT: process.env.SMOKE_IMAGE_PROVIDER ?? process.env.SMOKE_AI_PROVIDER ?? "",
       IMAGE_MODEL_DEFAULT: process.env.SMOKE_IMAGE_MODEL ?? "",
       PAYMENT_PROVIDER: process.env.SMOKE_PAYMENT_PROVIDER ?? "mock",
       STORAGE_PROVIDER: process.env.SMOKE_STORAGE_PROVIDER ?? "inline",

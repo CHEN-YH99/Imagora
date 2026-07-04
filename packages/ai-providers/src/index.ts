@@ -369,7 +369,11 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
 }
 
 export function resolveDefaultImageProvider(): SupportedProviderName {
-  return normalizeProviderName(firstNonEmptyEnv("IMAGE_PROVIDER_DEFAULT", "AI_PROVIDER") ?? "mock");
+  const configuredProvider = firstNonEmptyEnv("IMAGE_PROVIDER_DEFAULT", "AI_PROVIDER");
+  if (configuredProvider) {
+    return normalizeProviderName(configuredProvider);
+  }
+  return hasConfiguredOpenAiApiKey() ? "openai" : "mock";
 }
 
 export function resolveDefaultImageModel(providerName = resolveDefaultImageProvider()): SupportedImageModel {
@@ -483,6 +487,10 @@ function firstNonEmptyEnv(...names: string[]): string | undefined {
     }
   }
   return undefined;
+}
+
+function hasConfiguredOpenAiApiKey(): boolean {
+  return Boolean(process.env.OPENAI_API_KEY?.trim());
 }
 
 function normalizeModelId(modelId: ModelId): SupportedImageModel {

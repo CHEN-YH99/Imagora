@@ -45,6 +45,33 @@ const storage = createObjectStorage();
 const safety = createSafetyProvider();
 const queueProvider = process.env.QUEUE_PROVIDER ?? "inline";
 const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 2500);
+let inlineTickPromise: Promise<void> | null = null;
+
+interface ClaimedTask {
+  task: GenerationTask;
+  referenceImageUrl: string | null;
+}
+
+type TaskExecutionResult =
+  | {
+      kind: "succeeded";
+      createdImages: GeneratedImage[];
+      providerCostCents: number;
+      creditDifference: number;
+    }
+  | {
+      kind: "blocked";
+      imageIndex: number;
+      status: "BLOCKED" | "REVIEW_REQUIRED";
+      reasonCode: string;
+      reasonMessage: string;
+      providerName: string;
+    }
+  | {
+      kind: "failed";
+      code: string;
+      message: string;
+    };
 
 logger.info({ queueProvider, provider: provider.name, modelName: provider.modelName }, "worker started");
 
@@ -52,42 +79,77 @@ if (queueProvider === "bullmq") {
   startGenerationWorker(processQueuedJob);
 } else {
   logger.info({ pollIntervalMs }, "worker polling enabled");
-  await tick();
+  await runInlineTick();
   setInterval(() => {
-    tick().catch((error) => {
+    runInlineTick().catch((error) => {
       logger.error({ err: error }, "worker tick failed");
     });
   }, pollIntervalMs);
 }
 
-async function tick(): Promise<void> {
-  await store.update(async (data) => {
-    runWorkerMaintenance(data);
-    const task = data.generationTasks.find((item) => item.status === "PENDING");
-    if (!task) {
-      return;
-    }
-    await processTask(data, task);
+function runInlineTick(): Promise<void> {
+  if (inlineTickPromise) {
+    return inlineTickPromise;
+  }
+  inlineTickPromise = tick().finally(() => {
+    inlineTickPromise = null;
   });
+  return inlineTickPromise;
+}
+
+async function tick(): Promise<void> {
+  const claimedTask = await claimNextPendingTask();
+  if (!claimedTask) {
+    return;
+  }
+  await processClaimedTask(claimedTask);
 }
 
 async function processQueuedJob(job: GenerationQueueJob): Promise<void> {
-  await store.update(async (data) => {
+  const claimedTask = await claimTaskById(job.taskId);
+  if (!claimedTask) {
+    return;
+  }
+  await processClaimedTask(claimedTask);
+}
+
+async function claimNextPendingTask(): Promise<ClaimedTask | null> {
+  return claimTask((data) => data.generationTasks.find((item) => item.status === "PENDING"));
+}
+
+async function claimTaskById(taskId: string): Promise<ClaimedTask | null> {
+  return claimTask((data) => data.generationTasks.find((item) => item.id === taskId && item.status === "PENDING"));
+}
+
+async function claimTask(selectTask: (data: StoreData) => GenerationTask | undefined): Promise<ClaimedTask | null> {
+  return store.update((data) => {
     runWorkerMaintenance(data);
-    const task = data.generationTasks.find((item) => item.id === job.taskId && item.status === "PENDING");
+    const task = selectTask(data);
     if (!task) {
-      return;
+      return null;
     }
-    await processTask(data, task);
+    const now = new Date().toISOString();
+    task.status = "RUNNING";
+    task.startedAt = now;
+    task.completedAt = null;
+    task.failureCode = null;
+    task.failureMessage = null;
+    task.updatedAt = now;
+    return {
+      task: { ...task },
+      referenceImageUrl: task.referenceImageId
+        ? data.referenceImages.find((image) => image.id === task.referenceImageId && !image.deletedAt)?.publicUrl ?? null
+        : null
+    };
   });
 }
 
-async function processTask(data: StoreData, task: GenerationTask): Promise<void> {
-  const now = new Date().toISOString();
-  task.status = "RUNNING";
-  task.startedAt = now;
-  task.updatedAt = now;
+async function processClaimedTask(claimedTask: ClaimedTask): Promise<void> {
+  const outcome = await executeTask(claimedTask);
+  await persistTaskOutcome(claimedTask.task, outcome);
+}
 
+async function executeTask({ task, referenceImageUrl }: ClaimedTask): Promise<TaskExecutionResult> {
   try {
     const result = await provider.generateImage({
       taskId: task.id,
@@ -100,34 +162,30 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
       quantity: task.quantity,
       quality: task.quality,
       model: task.modelName || undefined,
-      referenceImageUrl: task.referenceImageId
-        ? data.referenceImages.find((image) => image.id === task.referenceImageId && !image.deletedAt)?.publicUrl
-        : null
+      referenceImageUrl
     });
     logger.info({ taskId: task.id, providerRequestId: result.providerRequestId }, "provider request completed");
 
     const blockedOrReviewImage = await firstBlockedOrReviewImage(result.images);
     if (blockedOrReviewImage) {
-      recordSafetyEvent(
-        data,
-        task,
-        blockedOrReviewImage.index,
-        blockedOrReviewImage.status,
-        blockedOrReviewImage.reasonCode,
-        blockedOrReviewImage.reasonMessage,
-        blockedOrReviewImage.provider
-      );
-      failTask(data, task, blockedOrReviewImage.reasonCode, blockedOrReviewImage.reasonMessage, "BLOCKED");
-      return;
+      return {
+        kind: "blocked",
+        imageIndex: blockedOrReviewImage.index,
+        status: blockedOrReviewImage.status,
+        reasonCode: blockedOrReviewImage.reasonCode,
+        reasonMessage: blockedOrReviewImage.reasonMessage,
+        providerName: blockedOrReviewImage.provider
+      };
     }
 
     const createdImages = await createImages(task, result.images);
     if (createdImages.length === 0) {
-      failTask(data, task, "NO_IMAGES_DELIVERED", "模型服务未返回可用图片，本次扣除的积分已自动返还。");
-      return;
+      return {
+        kind: "failed",
+        code: "NO_IMAGES_DELIVERED",
+        message: "模型服务未返回可用图片，本次扣除的积分已自动返还。"
+      };
     }
-    data.generatedImages.push(...createdImages);
-    // 按实际交付张数记录供应商真实成本（分），用于后台毛利核算
     const deliveredQuote = quoteImageGeneration({
       style: task.style,
       quality: task.quality,
@@ -135,26 +193,96 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
       aspectRatio: task.aspectRatio,
       model: task.modelName || undefined
     });
-    task.providerCostCents = deliveredQuote.providerCostCents;
-    const creditDifference = task.creditCost - deliveredQuote.creditCost;
-    if (createdImages.length < task.quantity && creditDifference > 0) {
-      refundTaskCredits(data, task, creditDifference, "未交付图片的积分自动返还");
-    }
+    return {
+      kind: "succeeded",
+      createdImages,
+      providerCostCents: deliveredQuote.providerCostCents,
+      creditDifference: task.creditCost - deliveredQuote.creditCost
+    };
   } catch (error) {
     if (isProviderError(error) && error.code === "PROVIDER_CONTENT_BLOCKED") {
-      recordSafetyEvent(data, task, 0, "BLOCKED", error.code, error.message, error.provider);
-      failTask(data, task, error.code, error.message, "BLOCKED");
-      return;
+      return {
+        kind: "blocked",
+        imageIndex: 0,
+        status: "BLOCKED",
+        reasonCode: error.code,
+        reasonMessage: error.message,
+        providerName: error.provider
+      };
     }
     const failure = mapProviderFailure(error);
-    failTask(data, task, failure.code, failure.message);
+    return {
+      kind: "failed",
+      code: failure.code,
+      message: failure.message
+    };
+  }
+}
+
+async function persistTaskOutcome(taskSnapshot: GenerationTask, outcome: TaskExecutionResult): Promise<void> {
+  const createdImages = outcome.kind === "succeeded" ? outcome.createdImages : [];
+  let persistResult: { finalized: boolean; status: GenerationTask["status"] | null } = {
+    finalized: false,
+    status: null
+  };
+
+  try {
+    persistResult = await store.update((data) => {
+      const task = data.generationTasks.find((item) => item.id === taskSnapshot.id);
+      if (!task || task.status !== "RUNNING") {
+        return { finalized: false as const, status: task?.status ?? null };
+      }
+
+      if (outcome.kind === "succeeded") {
+        data.generatedImages.push(...outcome.createdImages);
+        task.providerCostCents = outcome.providerCostCents;
+        if (outcome.createdImages.length < task.quantity && outcome.creditDifference > 0) {
+          refundTaskCredits(data, task, outcome.creditDifference, "未交付图片的积分自动返还");
+        }
+        task.status = "SUCCEEDED";
+        task.completedAt = new Date().toISOString();
+        task.updatedAt = task.completedAt;
+        return { finalized: true as const, status: task.status };
+      }
+
+      if (outcome.kind === "blocked") {
+        recordSafetyEvent(
+          data,
+          task,
+          outcome.imageIndex,
+          outcome.status,
+          outcome.reasonCode,
+          outcome.reasonMessage,
+          outcome.providerName
+        );
+        failTask(data, task, outcome.reasonCode, outcome.reasonMessage, "BLOCKED");
+        return { finalized: true as const, status: task.status };
+      }
+
+      failTask(data, task, outcome.code, outcome.message);
+      return { finalized: true as const, status: task.status };
+    });
+  } catch (error) {
+    if (createdImages.length > 0) {
+      await cleanupCreatedImages(createdImages);
+    }
+    throw error;
+  }
+
+  if (!persistResult.finalized) {
+    if (createdImages.length > 0) {
+      await cleanupCreatedImages(createdImages);
+    }
+    logger.warn(
+      { taskId: taskSnapshot.id, status: persistResult.status },
+      "task finalize skipped because task state changed"
+    );
     return;
   }
 
-  task.status = "SUCCEEDED";
-  task.completedAt = new Date().toISOString();
-  task.updatedAt = task.completedAt;
-  logger.info({ taskId: task.id, quantity: task.quantity }, "task completed");
+  if (outcome.kind === "succeeded") {
+    logger.info({ taskId: taskSnapshot.id, quantity: outcome.createdImages.length }, "task completed");
+  }
 }
 
 async function firstBlockedOrReviewImage(images: Array<{ index: number; bytes: string; mimeType: string }>): Promise<{

@@ -823,29 +823,23 @@ app.post("/api/uploads/reference-images", { bodyLimit: uploadBodyLimitBytes() },
 });
 
 app.get("/api/generation/tasks", async (request) => {
-  const { user } = await requireAuth(request);
+  const { user, data } = await requireAuth(request);
   const query = taskQuerySchema.parse(request.query);
-  return store.update((data) => {
-    runGenerationMaintenance(data, generationMaintenanceOptions());
-    const tasks = data.generationTasks
-      .filter((task) => task.userId === user.id)
-      .filter((task) => (query.status ? task.status === query.status : true))
-      .sort(descCreated)
-      .slice(0, query.limit)
-      .map((task) => taskWithRefund(data, task));
-    return envelope(request, { tasks });
-  });
+  const tasks = data.generationTasks
+    .filter((task) => task.userId === user.id)
+    .filter((task) => (query.status ? task.status === query.status : true))
+    .sort(descCreated)
+    .slice(0, query.limit)
+    .map((task) => taskWithRefund(data, task));
+  return envelope(request, { tasks });
 });
 
 app.get("/api/generation/tasks/:taskId", async (request) => {
-  const { user } = await requireAuth(request);
+  const { user, data } = await requireAuth(request);
   const { taskId } = idParamSchema.parse(request.params);
-  return store.update((data) => {
-    runGenerationMaintenance(data, generationMaintenanceOptions());
-    const task = mustFindOwnTask(data, user.id, taskId);
-    const images = data.generatedImages.filter((image) => image.taskId === task.id && !image.deletedAt);
-    return envelope(request, { task: taskWithRefund(data, task), images });
-  });
+  const task = mustFindOwnTask(data, user.id, taskId);
+  const images = data.generatedImages.filter((image) => image.taskId === task.id && !image.deletedAt);
+  return envelope(request, { task: taskWithRefund(data, task), images });
 });
 
 app.post("/api/generation/tasks/:taskId/retry", async (request, reply) => {

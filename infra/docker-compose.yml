@@ -33,7 +33,10 @@ services:
       REDIS_URL: redis://redis:6379
       DATA_STORE: json
       QUEUE_PROVIDER: inline
-      IMAGE_PROVIDER_DEFAULT: mock
+      IMAGE_PROVIDER_DEFAULT: ${IMAGE_PROVIDER_DEFAULT:-}
+      IMAGE_MODEL_DEFAULT: ${IMAGE_MODEL_DEFAULT:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       STORAGE_PROVIDER: inline
       PAYMENT_PROVIDER: mock
       SAFETY_PROVIDER: local
@@ -74,7 +77,10 @@ services:
       REDIS_URL: redis://redis:6379
       DATA_STORE: json
       QUEUE_PROVIDER: inline
-      IMAGE_PROVIDER_DEFAULT: mock
+      IMAGE_PROVIDER_DEFAULT: ${IMAGE_PROVIDER_DEFAULT:-}
+      IMAGE_MODEL_DEFAULT: ${IMAGE_MODEL_DEFAULT:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       STORAGE_PROVIDER: inline
       SAFETY_PROVIDER: local
     volumes:

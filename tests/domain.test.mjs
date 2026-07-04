@@ -69,6 +69,29 @@ test("image provider config prefers canonical IMAGE_PROVIDER_DEFAULT and IMAGE_M
   }
 });
 
+test("image provider config auto-selects openai when only OPENAI_API_KEY is configured", () => {
+  const previous = snapshotEnv([
+    "IMAGE_PROVIDER_DEFAULT",
+    "IMAGE_MODEL_DEFAULT",
+    "AI_PROVIDER",
+    "OPENAI_IMAGE_MODEL",
+    "OPENAI_API_KEY"
+  ]);
+  try {
+    delete process.env.IMAGE_PROVIDER_DEFAULT;
+    delete process.env.IMAGE_MODEL_DEFAULT;
+    delete process.env.AI_PROVIDER;
+    delete process.env.OPENAI_IMAGE_MODEL;
+    process.env.OPENAI_API_KEY = "sk-test";
+
+    assert.equal(resolveDefaultImageProvider(), "openai");
+    assert.equal(resolveDefaultImageModel(), "openai:gpt-image-2");
+    assert.equal(getActiveProviderMetadata().modelName, "openai:gpt-image-2");
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
 test("image provider config falls back to legacy AI_PROVIDER and OPENAI_IMAGE_MODEL aliases", () => {
   const previous = snapshotEnv(["IMAGE_PROVIDER_DEFAULT", "IMAGE_MODEL_DEFAULT", "AI_PROVIDER", "OPENAI_IMAGE_MODEL"]);
   try {

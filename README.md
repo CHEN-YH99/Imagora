@@ -109,7 +109,7 @@ docker compose -f infra/docker-compose.yml up -d
 | `WEB_ORIGIN` | 前端地址 | `http://127.0.0.1:3100` |
 | `DATABASE_URL` | PostgreSQL 连接串 | - |
 | `REDIS_URL` | Redis 连接串 | - |
-| `IMAGE_PROVIDER_DEFAULT` | 默认图片 Provider（`mock` / `openai`） | `mock` |
+| `IMAGE_PROVIDER_DEFAULT` | 默认图片 Provider（`mock` / `openai`） | 自动：有 `OPENAI_API_KEY` 则 `openai`，否则 `mock` |
 | `IMAGE_MODEL_DEFAULT` | 默认图片模型（如 `openai:gpt-image-2`） | Provider 内置默认 |
 | `OPENAI_API_KEY` | OpenAI API Key | - |
 | `STORAGE_PROVIDER` | 存储 Provider（`inline` / `s3`） | `inline` |
@@ -118,7 +118,7 @@ docker compose -f infra/docker-compose.yml up -d
 | `QUEUE_PROVIDER` | 队列 Provider（`inline` / `bullmq`） | `inline` |
 | `SAFETY_PROVIDER` | 安全审核 Provider（`local` / 外部） | `local` |
 
-兼容说明：旧字段 `AI_PROVIDER`、`OPENAI_IMAGE_MODEL` 仍可识别，但新配置统一建议使用 `IMAGE_PROVIDER_DEFAULT`、`IMAGE_MODEL_DEFAULT`。
+兼容说明：旧字段 `AI_PROVIDER`、`OPENAI_IMAGE_MODEL` 仍可识别，但新配置统一建议使用 `IMAGE_PROVIDER_DEFAULT`、`IMAGE_MODEL_DEFAULT`。本地开发如果只填写 `OPENAI_API_KEY`，系统会自动切到 `openai`；不填则默认走 `mock`。
 
 ## 架构设计
 
@@ -126,7 +126,7 @@ docker compose -f infra/docker-compose.yml up -d
 
 核心业务模块均采用 Provider 抽象，通过环境变量切换实现：
 
-- **AI Provider**：`mock`（开发用）/ `openai`（生产用），模型通过 `IMAGE_MODEL_DEFAULT` 选择，默认 `openai:gpt-image-2`
+- **AI Provider**：`mock`（开发用）/ `openai`（生产用），模型通过 `IMAGE_MODEL_DEFAULT` 选择；如果未显式指定 Provider，本地会在检测到 `OPENAI_API_KEY` 时自动切到 `openai`
 - **Storage Provider**：`inline`（本地文件）/ `s3`（S3 兼容存储）
 - **Payment Provider**：`mock`（模拟支付）/ `stripe`（Stripe 真实支付）
 - **Queue Provider**：`inline`（内存队列）/ `bullmq`（Redis 队列）
