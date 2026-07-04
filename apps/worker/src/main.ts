@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import pino from "pino";
 import sharp from "sharp";
-import { createImageGenerationProvider, isProviderError, quoteImageGeneration } from "@imagora/ai-providers";
+import {
+  createImageGenerationProvider,
+  isProviderError,
+  quoteImageGeneration,
+  resolveDefaultImageModel,
+  resolveDefaultImageProvider
+} from "@imagora/ai-providers";
 import { createStore } from "@imagora/database";
 import { startGenerationWorker, type GenerationQueueJob } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
@@ -12,7 +18,6 @@ import {
   runGenerationMaintenance,
   type GeneratedImage,
   type GenerationTask,
-  type ModelId,
   type StoreData
 } from "@imagora/shared";
 
@@ -41,7 +46,7 @@ const safety = createSafetyProvider();
 const queueProvider = process.env.QUEUE_PROVIDER ?? "inline";
 const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 2500);
 
-logger.info({ queueProvider }, "worker started");
+logger.info({ queueProvider, provider: provider.name, modelName: provider.modelName }, "worker started");
 
 if (queueProvider === "bullmq") {
   startGenerationWorker(processQueuedJob);
@@ -94,7 +99,7 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
       height: task.height,
       quantity: task.quantity,
       quality: task.quality,
-      model: task.modelName as ModelId | undefined,
+      model: task.modelName || undefined,
       referenceImageUrl: task.referenceImageId
         ? data.referenceImages.find((image) => image.id === task.referenceImageId && !image.deletedAt)?.publicUrl
         : null
@@ -128,7 +133,7 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
       quality: task.quality,
       quantity: createdImages.length,
       aspectRatio: task.aspectRatio,
-      model: task.modelName as ModelId | undefined
+      model: task.modelName || undefined
     });
     task.providerCostCents = deliveredQuote.providerCostCents;
     const creditDifference = task.creditCost - deliveredQuote.creditCost;
@@ -454,7 +459,8 @@ function validateProductionConfig(): void {
   requireProductionValue("S3_PUBLIC_BASE_URL");
   requireProductionSetting("DATA_STORE", "prisma");
   requireProductionSetting("QUEUE_PROVIDER", "bullmq");
-  requireProductionSetting("AI_PROVIDER", "openai");
+  requireProductionImageProvider("openai");
+  requireProductionImageModel();
   requireProductionSetting("STORAGE_PROVIDER", "s3", "r2");
 }
 
@@ -470,5 +476,31 @@ function requireProductionSetting(name: string, ...allowedValues: string[]): voi
   const value = requireProductionValue(name);
   if (!allowedValues.includes(value)) {
     throw new Error(`Unsafe production config: ${name} must be ${allowedValues.join(" or ")}`);
+  }
+}
+
+function requireProductionImageProvider(...allowedValues: string[]): void {
+  let value: string;
+  try {
+    value = resolveDefaultImageProvider();
+  } catch (error) {
+    throw new Error(
+      `Unsafe production config: ${error instanceof Error ? error.message : "image provider is not configured"}`
+    );
+  }
+  if (!allowedValues.includes(value)) {
+    throw new Error(
+      `Unsafe production config: IMAGE_PROVIDER_DEFAULT (or legacy AI_PROVIDER) must be ${allowedValues.join(" or ")}`
+    );
+  }
+}
+
+function requireProductionImageModel(): void {
+  try {
+    resolveDefaultImageModel(resolveDefaultImageProvider());
+  } catch (error) {
+    throw new Error(
+      `Unsafe production config: ${error instanceof Error ? error.message : "image model is not configured"}`
+    );
   }
 }

@@ -31,7 +31,6 @@ async function checkProductionConfig() {
   const required = [
     ["DATA_STORE", ["prisma"]],
     ["QUEUE_PROVIDER", ["bullmq"]],
-    ["AI_PROVIDER", ["openai"]],
     ["STORAGE_PROVIDER", ["s3", "r2"]],
     ["PAYMENT_PROVIDER", ["stripe"]],
     ["RATE_LIMIT_PROVIDER", ["redis"]],
@@ -55,6 +54,10 @@ async function checkProductionConfig() {
     if (!value || !accepted.includes(value)) {
       problems.push(`${name} must be ${accepted.join(" or ")}`);
     }
+  }
+  const imageProvider = readConfiguredImageProvider();
+  if (imageProvider !== "openai") {
+    problems.push("IMAGE_PROVIDER_DEFAULT (or legacy AI_PROVIDER) must be openai");
   }
   for (const name of secrets) {
     if (isMissingOrPlaceholder(process.env[name])) {
@@ -150,6 +153,10 @@ function isMissingOrPlaceholder(value) {
     return true;
   }
   return /^(changeme|todo|example|mock|test|placeholder|\.\.\.)$/i.test(value.trim());
+}
+
+function readConfiguredImageProvider() {
+  return process.env.IMAGE_PROVIDER_DEFAULT?.trim() || process.env.AI_PROVIDER?.trim() || "";
 }
 
 function sha256(content) {

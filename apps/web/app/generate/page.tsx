@@ -2,14 +2,18 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Coins, ImagePlus, X, Wand2 } from "lucide-react";
+import { Coins, ImagePlus, Sparkles, X, Wand2 } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import {
   ApiRequestError,
+  DEFAULT_IMAGE_MODEL_ID,
+  IMAGE_MODEL_OPTIONS,
+  TaskWaitTimeoutError,
   apiFetch,
   formatCredits,
   getSafetyAppeals,
+  resolveSelectableImageModel,
   submitSafetyAppeal,
   waitForTask,
   type CreditAccount,
@@ -25,8 +29,6 @@ const qualityOptions = [
   { value: "standard", label: "2K", desc: "1024px，均衡首选" },
   { value: "high", label: "4K", desc: "最高画质，耗时较长" }
 ];
-
-const modelOptions = [{ value: "gpt-image-2", label: "GPT Image 2" }];
 
 const aspectRatioOptions = [
   { value: "1:1", label: "1:1 — 方形" },
@@ -58,7 +60,7 @@ function GenerateExperience() {
   const [aspectRatio, setAspectRatio] = useState("1:1");
   const [quantity, setQuantity] = useState(2);
   const [quality, setQuality] = useState("standard");
-  const [model, setModel] = useState("gpt-image-2");
+  const [model, setModel] = useState(DEFAULT_IMAGE_MODEL_ID);
   const [quote, setQuote] = useState(0);
   const [account, setAccount] = useState<CreditAccount | null>(null);
   const [task, setTask] = useState<Task | null>(null);
@@ -66,7 +68,7 @@ function GenerateExperience() {
   const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
   const [referenceImage, setReferenceImage] = useState<ReferenceImage | null>(null);
   const [message, setMessage] = useState("");
-  const [messageTone, setMessageTone] = useState<"success" | "danger">("danger");
+  const [messageTone, setMessageTone] = useState<"info" | "success" | "danger">("danger");
   const [loading, setLoading] = useState(false);
   const [uploadingReference, setUploadingReference] = useState(false);
   const [appealEventId, setAppealEventId] = useState<string | null>(null);
@@ -74,6 +76,16 @@ function GenerateExperience() {
   const [appealReason, setAppealReason] = useState("");
   const [appealStatus, setAppealStatus] = useState<SafetyAppeal | null>(null);
   const [appealLoading, setAppealLoading] = useState(false);
+  const isGenerationProcessing =
+    images.length === 0 && (loading || task?.status === "PENDING" || task?.status === "RUNNING");
+  const processingAspectRatio = task ? `${task.width} / ${task.height}` : aspectRatio.replace(":", " / ");
+  const terminalGenerationFailureMessage =
+    images.length === 0 &&
+    task &&
+    (task.status === "FAILED" || task.status === "BLOCKED" || task.status === "CANCELED" || Boolean(task?.failureMessage))
+      ? generationFailureMessage(task)
+      : "";
+  const resultStatus = isGenerationProcessing ? (task?.status ?? "RUNNING") : (task?.status ?? "IDLE");
 
   useEffect(() => {
     loadAccount();
@@ -92,7 +104,9 @@ function GenerateExperience() {
       const n = Number(qty);
       if (Number.isInteger(n) && n >= 1 && n <= 4) setQuantity(n);
     }
-    if (m && modelOptions.some((o) => o.value === m)) setModel(m);
+    if (m) {
+      setModel(resolveSelectableImageModel(m));
+    }
   }, [searchParams]);
 
   useEffect(() => {
@@ -218,12 +232,14 @@ function GenerateExperience() {
     setLoading(true);
     setMessage("");
     setMessageTone("danger");
+    setTask(null);
     setImages([]);
     setSelectedPreviewImage(null);
     setAppealEventId(null);
     setAppealStatus(null);
     setShowAppealForm(false);
     setAppealReason("");
+    let submittedTask: Task | null = null;
     try {
       await ensureLoggedIn();
       const created = await apiFetch<{ task: Task; balanceAfter: number }>("/api/generation/tasks", {
@@ -240,6 +256,7 @@ function GenerateExperience() {
           model
         }
       });
+      submittedTask = created.task;
       setTask(created.task);
       setAccount((value) => (value ? { ...value, balance: created.balanceAfter } : value));
       const result = await waitForTask(created.task.id);
@@ -261,6 +278,18 @@ function GenerateExperience() {
       }
       await loadAccount();
     } catch (error) {
+      if (error instanceof TaskWaitTimeoutError) {
+        if (error.latestResult) {
+          setTask(error.latestResult.task);
+          setImages(error.latestResult.images);
+        } else if (submittedTask) {
+          setTask(submittedTask);
+        }
+        setMessage(generationWaitTimeoutMessage(error.latestResult?.task ?? submittedTask));
+        setMessageTone("info");
+        await loadAccount();
+        return;
+      }
       if (
         error instanceof ApiRequestError &&
         (error.code === "CONTENT_BLOCKED" || error.code === "CONTENT_REVIEW_REQUIRED")
@@ -362,7 +391,7 @@ function GenerateExperience() {
                 value={model}
                 onChange={(event) => setModel(event.target.value)}
               >
-                {modelOptions.map((item) => (
+                {IMAGE_MODEL_OPTIONS.map((item) => (
                   <option key={item.value} value={item.value}>
                     {item.label}
                   </option>
@@ -546,14 +575,24 @@ function GenerateExperience() {
         <Panel>
           <div className="mb-5 flex items-center justify-between gap-3">
             <h2 className="text-xl font-semibold">生成结果</h2>
-            <StatusPill>{task?.status ?? "IDLE"}</StatusPill>
+            <StatusPill>{resultStatus}</StatusPill>
           </div>
-          {task?.failureMessage ? (
-            <p className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">
-              {generationFailureMessage(task)}
-            </p>
+          {terminalGenerationFailureMessage ? (
+            <div className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-4" role="alert">
+              <p className="text-sm font-semibold text-ember">生成失败</p>
+              <p className="mt-1 text-sm leading-6 text-ember/90">{terminalGenerationFailureMessage}</p>
+            </div>
           ) : null}
           <div className="grid gap-3 sm:grid-cols-2">
+            {isGenerationProcessing
+              ? Array.from({ length: Math.max(1, quantity) }).map((_, index) => (
+                  <GenerationProcessingPlaceholder
+                    key={`生成占位-${index}`}
+                    index={index}
+                    processingAspectRatio={processingAspectRatio}
+                  />
+                ))
+              : null}
             {images.map((image, index) => (
               <GeneratedImagePreviewButton
                 key={image.id}
@@ -563,7 +602,7 @@ function GenerateExperience() {
                 onOpen={() => setSelectedPreviewImage(image)}
               />
             ))}
-            {images.length === 0 ? (
+            {!terminalGenerationFailureMessage && !isGenerationProcessing && images.length === 0 ? (
               <div className="sm:col-span-2">
                 <EmptyState
                   title="生成结果会显示在这里"
@@ -578,6 +617,39 @@ function GenerateExperience() {
       </div>
       <GeneratedImageLightbox image={selectedPreviewImage} onClose={() => setSelectedPreviewImage(null)} />
     </AppFrame>
+  );
+}
+
+function GenerationProcessingPlaceholder({
+  index,
+  processingAspectRatio
+}: {
+  index: number;
+  processingAspectRatio: string;
+}) {
+  return (
+    <div
+      aria-label={`第 ${index + 1} 张图片正在生成`}
+      className="relative w-full overflow-hidden rounded-2xl border border-mint/24 bg-black/28 shadow-glow motion-reduce:transition-none"
+      role="status"
+      style={{ aspectRatio: processingAspectRatio }}
+    >
+      <span className="pointer-events-none absolute -inset-16 bg-[conic-gradient(from_130deg,transparent,rgba(88,240,182,0.42),rgba(37,216,255,0.28),transparent)] opacity-70 blur-2xl motion-safe:animate-spin motion-reduce:animate-none" />
+      <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_30%_24%,rgba(217,248,91,0.18),transparent_32%),radial-gradient(circle_at_72%_68%,rgba(37,216,255,0.16),transparent_38%)] motion-safe:animate-pulse motion-reduce:opacity-70" />
+      <span className="pointer-events-none absolute inset-3 rounded-[1.25rem] border border-white/10 bg-ink/72 backdrop-blur-md" />
+      <span className="pointer-events-none absolute inset-x-5 top-5 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent motion-safe:animate-pulse motion-reduce:opacity-60" />
+      <div className="relative flex h-full flex-col items-center justify-center px-5 text-center">
+        <span className="relative inline-flex size-14 items-center justify-center rounded-full border border-mint/36 bg-mint/10 text-mint shadow-glow">
+          <span className="absolute inset-0 rounded-full border border-mint/40 motion-safe:animate-ping motion-reduce:hidden" />
+          <Sparkles className="size-6" aria-hidden="true" />
+        </span>
+        <p className="mt-4 text-sm font-semibold text-white">正在生成</p>
+        <p className="mt-1 max-w-48 text-xs leading-5 text-white/56">AI 正在构图、上色并输出图片</p>
+        <div className="mt-5 h-1.5 w-28 overflow-hidden rounded-full bg-white/10">
+          <span className="block h-full w-1/2 rounded-full bg-gradient-to-r from-mint via-cyanx to-volt motion-safe:animate-pulse" />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -600,6 +672,16 @@ function generationFailureMessage(task: Task): string {
     return `${baseMessage} 已自动返还 ${formatCredits(refundedCredits)}。`;
   }
   return `${baseMessage} 如已扣除积分，系统会自动补偿，请稍后刷新余额。`;
+}
+
+function generationWaitTimeoutMessage(task: Task | null): string {
+  if (task?.status === "PENDING") {
+    return "任务已提交，但当前仍在排队。系统会继续处理，若队列超时会自动返还积分，可稍后到历史记录查看结果。";
+  }
+  if (task?.status === "RUNNING") {
+    return "任务已提交，模型仍在生成中。真实生图可能需要数分钟，完成后会出现在历史记录里。";
+  }
+  return "任务已提交，生成仍在处理中。稍后可到历史记录查看结果，系统失败会自动返还积分。";
 }
 
 function generationSuccessMessage(task: Task): string {

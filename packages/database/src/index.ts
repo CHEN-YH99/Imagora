@@ -1,10 +1,12 @@
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { Prisma, PrismaClient } from "../generated/client/index.js";
 import type { CreditLedgerEntry, Plan, SafetyAppeal, StoreData, User } from "@imagora/shared";
 
-const defaultPath = resolve(process.cwd(), "data", "imagora-store.json");
+const workspaceRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+const defaultPath = resolve(workspaceRoot, "data", "imagora-store.json");
 
 export interface Store {
   read(): Promise<StoreData>;
@@ -29,7 +31,7 @@ export class JsonStore implements Store {
   readonly filePath: string;
   private updateChain: Promise<void> = Promise.resolve();
 
-  constructor(filePath = process.env.IMAGORA_STORE_PATH ? resolve(process.env.IMAGORA_STORE_PATH) : defaultPath) {
+  constructor(filePath = resolveStorePath(process.env.IMAGORA_STORE_PATH)) {
     this.filePath = filePath;
   }
 
@@ -1149,4 +1151,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function resolveStorePath(configuredPath?: string): string {
+  if (!configuredPath) {
+    return defaultPath;
+  }
+  return isAbsolute(configuredPath) ? configuredPath : resolve(workspaceRoot, configuredPath);
 }

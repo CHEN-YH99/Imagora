@@ -15,6 +15,7 @@ import {
   formatCredits,
   formatQualityLabel,
   formatStyleLabel,
+  resolveSelectableImageModel,
   type GeneratedImage,
   type Task
 } from "../../../lib/api";
@@ -44,7 +45,7 @@ export default function ImageDetailPage() {
     if (!task) {
       return "/generate";
     }
-    return `/generate?prompt=${encodeURIComponent(task.prompt)}&aspectRatio=${encodeURIComponent(task.aspectRatio)}&quality=${encodeURIComponent(task.quality)}&quantity=${task.quantity}&model=${encodeURIComponent(task.modelName ?? "gpt-image-2")}`;
+    return `/generate?prompt=${encodeURIComponent(task.prompt)}&aspectRatio=${encodeURIComponent(task.aspectRatio)}&quality=${encodeURIComponent(task.quality)}&quantity=${task.quantity}&model=${encodeURIComponent(resolveSelectableImageModel(task.modelName))}`;
   }, [task]);
 
   async function loadDetail() {

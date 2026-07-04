@@ -2,7 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import cors from "@fastify/cors";
 import pino from "pino";
-import { getActiveProviderMetadata, quoteImageGeneration, resolveProviderModel } from "@imagora/ai-providers";
+import {
+  getActiveProviderMetadata,
+  quoteImageGeneration,
+  resolveDefaultImageModel,
+  resolveDefaultImageProvider,
+  resolveProviderModel
+} from "@imagora/ai-providers";
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
 import { buildVerificationEmail, createMailer } from "@imagora/mailer";
 import { createPaymentProvider, type VerifiedPaymentEvent } from "@imagora/payments";
@@ -81,6 +87,7 @@ const captchaChallenges = new Map<string, CaptchaChallenge>();
 const captchaVerifications = new Map<string, CaptchaVerification>();
 const captchaRequiredRounds = 2;
 const rateLimitWindowMs = envNumber("RATE_LIMIT_WINDOW_MS", 60_000);
+const generationMaintenanceIntervalMs = envNumber("GENERATION_MAINTENANCE_INTERVAL_MS", 60_000);
 const rateLimitRules: RateLimitRule[] = [
   {
     id: "auth-captcha",
@@ -1656,6 +1663,8 @@ app.patch("/api/admin/safety-appeals/:appealId", async (request) => {
   });
 });
 
+startBackgroundGenerationMaintenance();
+
 const port = Number(process.env.API_PORT ?? 4100);
 const host = process.env.API_HOST ?? "127.0.0.1";
 await app.listen({ port, host });
@@ -1876,7 +1885,7 @@ const generationInputSchema = z.object({
   aspectRatio: z.enum(["1:1", "3:4", "4:3", "9:16", "16:9"]),
   quantity: z.number().int().min(1).max(maxQuantity),
   quality: z.enum(["draft", "standard", "high"]),
-  model: z.enum(["gpt-image-2", "mock"]).default("gpt-image-2")
+  model: z.string().trim().min(1).max(80).optional()
 });
 
 const referenceUploadSchema = z.object({
@@ -2170,9 +2179,9 @@ function resolveGenerationProviderSelection(model?: ModelId): {
 } {
   const requestedModel = parseGenerationModel(model);
   const providerMetadata = getActiveProviderMetadata();
-  const fallbackModel: ModelId = providerMetadata.name === "mock" ? "mock" : "gpt-image-2";
+  const fallbackModel = providerMetadata.modelName;
   try {
-    const resolvedModel = resolveProviderModel(requestedModel ?? fallbackModel);
+    const resolvedModel = resolveProviderModel(requestedModel ?? fallbackModel, providerMetadata.name);
     return {
       providerMetadata: {
         ...providerMetadata,
@@ -2182,27 +2191,31 @@ function resolveGenerationProviderSelection(model?: ModelId): {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Provider model is not configured";
-    if (providerMetadata.name === "mock" && requestedModel === "gpt-image-2") {
+    if (providerMetadata.name === "mock" && requestedModel && isCompatibleOpenAiRequestForMockProvider(requestedModel)) {
       return {
         providerMetadata: {
           ...providerMetadata,
-          modelName: "mock"
+          modelName: fallbackModel
         },
-        model: "mock"
+        model: fallbackModel
       };
     }
     throw new AppError("VALIDATION_ERROR", message, 400, { model: requestedModel });
   }
 }
 
-function parseGenerationModel(model?: ModelId): ModelId {
-  if (!model) {
-    return "gpt-image-2";
+function parseGenerationModel(model?: ModelId): ModelId | undefined {
+  const normalized = model?.trim();
+  return normalized ? normalized : undefined;
+}
+
+function isCompatibleOpenAiRequestForMockProvider(model: ModelId): boolean {
+  try {
+    resolveProviderModel(model, "openai");
+    return true;
+  } catch {
+    return false;
   }
-  if (model === "gpt-image-2" || model === "mock") {
-    return model;
-  }
-  throw new AppError("VALIDATION_ERROR", "Image model is not supported", 400, { model });
 }
 
 function mustFindUser(data: StoreData, userId: string): User {
@@ -2354,6 +2367,42 @@ function generationMaintenanceOptions() {
     pendingTimeoutMs: envNumber("GENERATION_PENDING_TIMEOUT_MS", 5 * 60 * 1000),
     runningTimeoutMs: envNumber("GENERATION_RUNNING_TIMEOUT_MS", 10 * 60 * 1000)
   };
+}
+
+function startBackgroundGenerationMaintenance(): void {
+  if (generationMaintenanceIntervalMs <= 0) {
+    return;
+  }
+
+  const timer = setInterval(() => {
+    store
+      .update((data) => {
+        const generationMaintenance = runGenerationMaintenance(data, generationMaintenanceOptions());
+        const expiredCredits = expireCredits(data);
+        if (
+          generationMaintenance.failedPendingTasks ||
+          generationMaintenance.failedRunningTasks ||
+          generationMaintenance.reconciledRefunds ||
+          expiredCredits
+        ) {
+          logger.warn(
+            {
+              failedPendingTasks: generationMaintenance.failedPendingTasks,
+              failedRunningTasks: generationMaintenance.failedRunningTasks,
+              reconciledGenerationRefunds: generationMaintenance.reconciledRefunds,
+              refundedGenerationCredits: generationMaintenance.refundedCredits,
+              expiredCredits
+            },
+            "background generation maintenance reconciled tasks"
+          );
+        }
+      })
+      .catch((error) => {
+        logger.error({ err: error }, "background generation maintenance failed");
+      });
+  }, generationMaintenanceIntervalMs);
+
+  timer.unref();
 }
 
 function taskWithRefund(data: StoreData, task: GenerationTask): GenerationTask & { refundedCredits: number } {
@@ -3297,7 +3346,8 @@ function validateProductionConfig(): void {
   requireProductionValue("STRIPE_CANCEL_URL");
   requireProductionSetting("DATA_STORE", "prisma");
   requireProductionSetting("QUEUE_PROVIDER", "bullmq");
-  requireProductionSetting("AI_PROVIDER", "openai");
+  requireProductionImageProvider("openai");
+  requireProductionImageModel();
   requireProductionSetting("STORAGE_PROVIDER", "s3", "r2");
   requireProductionSetting("PAYMENT_PROVIDER", "stripe");
   requireProductionSetting("RATE_LIMIT_PROVIDER", "redis");
@@ -3321,6 +3371,32 @@ function requireProductionSetting(name: string, ...allowedValues: string[]): voi
   const value = requireProductionValue(name);
   if (!allowedValues.includes(value)) {
     throw new Error(`Unsafe production config: ${name} must be ${allowedValues.join(" or ")}`);
+  }
+}
+
+function requireProductionImageProvider(...allowedValues: string[]): void {
+  let value: string;
+  try {
+    value = resolveDefaultImageProvider();
+  } catch (error) {
+    throw new Error(
+      `Unsafe production config: ${error instanceof Error ? error.message : "image provider is not configured"}`
+    );
+  }
+  if (!allowedValues.includes(value)) {
+    throw new Error(
+      `Unsafe production config: IMAGE_PROVIDER_DEFAULT (or legacy AI_PROVIDER) must be ${allowedValues.join(" or ")}`
+    );
+  }
+}
+
+function requireProductionImageModel(): void {
+  try {
+    resolveDefaultImageModel(resolveDefaultImageProvider());
+  } catch (error) {
+    throw new Error(
+      `Unsafe production config: ${error instanceof Error ? error.message : "image model is not configured"}`
+    );
   }
 }
 

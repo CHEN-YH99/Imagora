@@ -42,7 +42,7 @@ QUEUE_PROVIDER=bullmq
 For a real production environment, replace mock providers before accepting paid traffic:
 
 ```text
-AI_PROVIDER=openai
+IMAGE_PROVIDER_DEFAULT=openai
 PAYMENT_PROVIDER=stripe
 STORAGE_PROVIDER=s3
 ```
@@ -51,7 +51,7 @@ Required provider settings:
 
 ```text
 OPENAI_API_KEY=...
-OPENAI_IMAGE_MODEL=gpt-image-2
+IMAGE_MODEL_DEFAULT=openai:gpt-image-2
 S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
 S3_REGION=auto
 S3_BUCKET=imagora
@@ -62,6 +62,8 @@ STRIPE_WEBHOOK_SECRET=whsec_...
 SESSION_COOKIE_SECURE=true
 NEXT_PUBLIC_PAYMENT_PROVIDER=stripe
 ```
+
+Legacy compatibility remains for `AI_PROVIDER` and `OPENAI_IMAGE_MODEL`, but new deployments should use `IMAGE_PROVIDER_DEFAULT` and `IMAGE_MODEL_DEFAULT`.
 
 `mock`, `inline`, and JSON store are only acceptable for local demos and smoke checks. Do not accept paid traffic until OpenAI or another real AI provider, S3/R2-compatible object storage, Stripe webhook signature verification, Prisma/PostgreSQL, and secure cookies are configured.
 

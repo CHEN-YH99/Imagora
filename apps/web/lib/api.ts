@@ -1,11 +1,35 @@
 const defaultApiBaseUrl = "http://127.0.0.1:4100";
 const defaultRequestTimeoutMs = 15_000;
+const defaultTaskPollIntervalMs = 2_000;
+const defaultTaskWaitTimeoutMs = 5 * 60_000;
 
 export const apiBaseUrl = resolveApiBaseUrl();
+export const DEFAULT_IMAGE_MODEL_ID = "openai:gpt-image-2";
+export const DEFAULT_MOCK_IMAGE_MODEL_ID = "mock:default";
+export const IMAGE_MODEL_OPTIONS = [{ value: DEFAULT_IMAGE_MODEL_ID, label: "GPT Image 2" }] as const;
 
 // 会话过期广播：受保护页面订阅后统一跳登录，避免各页只弹红字卡死。
 // 登录/注册/找回/重置/验证码等 auth 接口的 401 属于业务性失败，不应触发全局跳转。
 export const SESSION_EXPIRED_EVENT = "imagora:session-expired";
+
+export function normalizeImageModel(modelName?: string | null): string {
+  const normalized = modelName?.trim();
+  if (!normalized) {
+    return DEFAULT_IMAGE_MODEL_ID;
+  }
+  if (normalized === "gpt-image-2") {
+    return DEFAULT_IMAGE_MODEL_ID;
+  }
+  if (normalized === "mock") {
+    return DEFAULT_MOCK_IMAGE_MODEL_ID;
+  }
+  return normalized;
+}
+
+export function resolveSelectableImageModel(modelName?: string | null): string {
+  const normalized = normalizeImageModel(modelName);
+  return IMAGE_MODEL_OPTIONS.some((option) => option.value === normalized) ? normalized : DEFAULT_IMAGE_MODEL_ID;
+}
 
 function isAuthEndpoint(path: string): boolean {
   return path.startsWith("/api/auth/");
@@ -319,6 +343,13 @@ export class ApiRequestError extends Error {
   }
 }
 
+export class TaskWaitTimeoutError extends Error {
+  constructor(public readonly latestResult: { task: Task; images: GeneratedImage[] } | null) {
+    super("生成任务仍在处理中，稍后可在历史记录中查看结果。");
+    this.name = "TaskWaitTimeoutError";
+  }
+}
+
 export async function apiFetch<T>(
   path: string,
   options: {
@@ -443,15 +474,24 @@ export async function loginDemo(): Promise<{ user: User }> {
   throw new Error("请先在登录页完成图片验证后再继续。");
 }
 
-export async function waitForTask(taskId: string): Promise<{ task: Task; images: GeneratedImage[] }> {
-  for (let attempt = 0; attempt < 24; attempt += 1) {
-    await sleep(1000);
+export async function waitForTask(
+  taskId: string,
+  options: { timeoutMs?: number; pollIntervalMs?: number } = {}
+): Promise<{ task: Task; images: GeneratedImage[] }> {
+  const timeoutMs = options.timeoutMs ?? defaultTaskWaitTimeoutMs;
+  const pollIntervalMs = options.pollIntervalMs ?? defaultTaskPollIntervalMs;
+  const startedAt = Date.now();
+  let latestResult: { task: Task; images: GeneratedImage[] } | null = null;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    await sleep(pollIntervalMs);
     const result = await apiFetch<{ task: Task; images: GeneratedImage[] }>(`/api/generation/tasks/${taskId}`);
+    latestResult = result;
     if (["SUCCEEDED", "FAILED", "BLOCKED", "CANCELED"].includes(result.task.status)) {
       return result;
     }
   }
-  throw new Error("生成任务等待超时，请稍后在历史记录中查看结果。");
+  throw new TaskWaitTimeoutError(latestResult);
 }
 
 export async function logout(): Promise<void> {

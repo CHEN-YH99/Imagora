@@ -142,7 +142,8 @@ async function ensureApiService() {
         process.env.LOAD_ADMIN_EMAIL ?? process.env.IMAGORA_BOOTSTRAP_ADMIN_EMAIL ?? "admin@imagora.local",
       IMAGORA_BOOTSTRAP_ADMIN_PASSWORD:
         process.env.LOAD_ADMIN_PASSWORD ?? process.env.IMAGORA_BOOTSTRAP_ADMIN_PASSWORD ?? "ChangeMe123!",
-      AI_PROVIDER: process.env.LOAD_AI_PROVIDER ?? "mock",
+      IMAGE_PROVIDER_DEFAULT: process.env.LOAD_IMAGE_PROVIDER ?? process.env.LOAD_AI_PROVIDER ?? "mock",
+      IMAGE_MODEL_DEFAULT: process.env.LOAD_IMAGE_MODEL ?? "",
       PAYMENT_PROVIDER: process.env.LOAD_PAYMENT_PROVIDER ?? "mock",
       STORAGE_PROVIDER: process.env.LOAD_STORAGE_PROVIDER ?? "inline",
       QUEUE_PROVIDER: process.env.LOAD_QUEUE_PROVIDER ?? "inline",

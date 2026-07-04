@@ -255,11 +255,37 @@ test("generation failures reconcile refunds and surface refunded credit copy", a
   const workerMain = await readFile(join(root, "apps/worker/src/main.ts"), "utf8");
 
   assert.match(apiMain, /runGenerationMaintenance/);
+  assert.match(apiMain, /startBackgroundGenerationMaintenance/);
+  assert.match(apiMain, /GENERATION_MAINTENANCE_INTERVAL_MS/);
   assert.match(apiMain, /\/api\/admin\/maintenance\/reconcile-generation/);
   assert.match(apiClient, /refundedCredits\?: number/);
+  assert.match(apiClient, /TaskWaitTimeoutError/);
+  assert.match(apiClient, /defaultTaskWaitTimeoutMs = 5 \* 60_000/);
   assert.match(generatePage, /generationFailureMessage/);
+  assert.match(generatePage, /generationWaitTimeoutMessage/);
+  assert.match(generatePage, /setMessageTone\("info"\)/);
   assert.match(generatePage, /已自动返还/);
   assert.match(workerMain, /refundTaskCredits/);
+  assert.match(workerMain, /provider: provider\.name/);
   assert.match(workerMain, /deliveredQuote\.creditCost/);
   assert.match(workerMain, /NO_IMAGES_DELIVERED/);
+});
+
+test("generate page shows animated processing placeholders before results arrive", async () => {
+  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+
+  assert.match(generatePage, /function GenerationProcessingPlaceholder/);
+  assert.match(generatePage, /isGenerationProcessing/);
+  assert.match(generatePage, /setTask\(null\);/);
+  assert.match(generatePage, /Array\.from\(\{ length: Math\.max\(1, quantity\) \}/);
+  assert.match(generatePage, /生成占位/);
+  assert.match(generatePage, /aria-label=\{`第 \$\{index \+ 1\} 张图片正在生成`\}/);
+  assert.match(generatePage, /style=\{\{ aspectRatio: processingAspectRatio/);
+  assert.match(generatePage, /motion-reduce:/);
+  assert.match(generatePage, /animate-spin/);
+  assert.match(generatePage, /animate-pulse/);
+  assert.match(generatePage, /terminalGenerationFailureMessage/);
+  assert.match(generatePage, /生成失败/);
+  assert.match(generatePage, /!terminalGenerationFailureMessage && !isGenerationProcessing && images\.length === 0/);
+  assert.match(generatePage, /task\?\.failureMessage/);
 });

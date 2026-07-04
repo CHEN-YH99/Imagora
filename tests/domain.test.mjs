@@ -7,11 +7,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  getActiveProviderMetadata,
   MockImageGenerationProvider,
   OpenAiImageGenerationProvider,
   ProviderError,
   isProviderError,
   quoteImageGeneration,
+  resolveDefaultImageModel,
+  resolveDefaultImageProvider,
   resolveProviderModel
 } from "../packages/ai-providers/dist/index.js";
 import { createInitialData, JsonStore, verifyPassword } from "../packages/database/dist/index.js";
@@ -24,9 +27,12 @@ const onePixelPngBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 
 test("provider quote resolves active mock provider model and charges by quality, size, quantity", () => {
-  const previous = snapshotEnv(["AI_PROVIDER"]);
+  const previous = snapshotEnv(["IMAGE_PROVIDER_DEFAULT", "IMAGE_MODEL_DEFAULT", "AI_PROVIDER", "OPENAI_IMAGE_MODEL"]);
   try {
-    process.env.AI_PROVIDER = "mock";
+    process.env.IMAGE_PROVIDER_DEFAULT = "mock";
+    delete process.env.IMAGE_MODEL_DEFAULT;
+    delete process.env.AI_PROVIDER;
+    delete process.env.OPENAI_IMAGE_MODEL;
     const resolvedModel = resolveProviderModel("mock", "mock");
     const quote = quoteImageGeneration({
       style: "illustration",
@@ -36,11 +42,44 @@ test("provider quote resolves active mock provider model and charges by quality,
       model: resolvedModel
     });
 
-    assert.equal(resolvedModel, "mock");
+    assert.equal(resolvedModel, "mock:default");
     assert.equal(quote.provider, "mock");
-    assert.equal(quote.model, "mock");
+    assert.equal(quote.model, "mock:default");
     assert.equal(quote.size, "1536x1024");
     assert.equal(quote.creditCost, 14);
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
+test("image provider config prefers canonical IMAGE_PROVIDER_DEFAULT and IMAGE_MODEL_DEFAULT", () => {
+  const previous = snapshotEnv(["IMAGE_PROVIDER_DEFAULT", "IMAGE_MODEL_DEFAULT", "AI_PROVIDER", "OPENAI_IMAGE_MODEL"]);
+  try {
+    process.env.IMAGE_PROVIDER_DEFAULT = "openai";
+    process.env.IMAGE_MODEL_DEFAULT = "openai:gpt-image-2";
+    process.env.AI_PROVIDER = "mock";
+    process.env.OPENAI_IMAGE_MODEL = "mock";
+
+    assert.equal(resolveDefaultImageProvider(), "openai");
+    assert.equal(resolveDefaultImageModel(), "openai:gpt-image-2");
+    assert.equal(getActiveProviderMetadata().modelName, "openai:gpt-image-2");
+    assert.equal(resolveProviderModel("gpt-image-2", "openai"), "openai:gpt-image-2");
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
+test("image provider config falls back to legacy AI_PROVIDER and OPENAI_IMAGE_MODEL aliases", () => {
+  const previous = snapshotEnv(["IMAGE_PROVIDER_DEFAULT", "IMAGE_MODEL_DEFAULT", "AI_PROVIDER", "OPENAI_IMAGE_MODEL"]);
+  try {
+    delete process.env.IMAGE_PROVIDER_DEFAULT;
+    delete process.env.IMAGE_MODEL_DEFAULT;
+    process.env.AI_PROVIDER = "openai";
+    process.env.OPENAI_IMAGE_MODEL = "gpt-image-2";
+
+    assert.equal(resolveDefaultImageProvider(), "openai");
+    assert.equal(resolveDefaultImageModel(), "openai:gpt-image-2");
+    assert.equal(resolveProviderModel("mock", "mock"), "mock:default");
   } finally {
     restoreEnv(previous);
   }
@@ -107,6 +146,8 @@ test("openai provider retries once on rate limit and returns images", async () =
     }
   ]);
   const previous = snapshotEnv([
+    "IMAGE_PROVIDER_DEFAULT",
+    "IMAGE_MODEL_DEFAULT",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_TIMEOUT_MS",
@@ -122,7 +163,9 @@ test("openai provider retries once on rate limit and returns images", async () =
     process.env.OPENAI_TIMEOUT_MS = "500";
     process.env.OPENAI_MAX_RETRIES = "2";
     process.env.OPENAI_RETRY_BASE_MS = "10";
-    process.env.OPENAI_IMAGE_MODEL = "gpt-image-2";
+    process.env.IMAGE_PROVIDER_DEFAULT = "openai";
+    process.env.IMAGE_MODEL_DEFAULT = "openai:gpt-image-2";
+    delete process.env.OPENAI_IMAGE_MODEL;
 
     const provider = new OpenAiImageGenerationProvider();
     const result = await provider.generateImage({
@@ -148,6 +191,8 @@ test("openai provider retries once on rate limit and returns images", async () =
 
 test("openai provider maps timeout, moderation, auth and empty result errors", async () => {
   const previous = snapshotEnv([
+    "IMAGE_PROVIDER_DEFAULT",
+    "IMAGE_MODEL_DEFAULT",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_TIMEOUT_MS",
@@ -160,7 +205,9 @@ test("openai provider maps timeout, moderation, auth and empty result errors", a
   process.env.OPENAI_TIMEOUT_MS = "50";
   process.env.OPENAI_MAX_RETRIES = "0";
   process.env.OPENAI_RETRY_BASE_MS = "10";
-  process.env.OPENAI_IMAGE_MODEL = "gpt-image-2";
+  process.env.IMAGE_PROVIDER_DEFAULT = "openai";
+  process.env.IMAGE_MODEL_DEFAULT = "openai:gpt-image-2";
+  delete process.env.OPENAI_IMAGE_MODEL;
 
   const timeoutServer = createFakeOpenAiServer([
     {
@@ -269,6 +316,8 @@ test("openai provider rejects url-only image responses", async () => {
     }
   ]);
   const previous = snapshotEnv([
+    "IMAGE_PROVIDER_DEFAULT",
+    "IMAGE_MODEL_DEFAULT",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_TIMEOUT_MS",
@@ -284,7 +333,9 @@ test("openai provider rejects url-only image responses", async () => {
     process.env.OPENAI_TIMEOUT_MS = "200";
     process.env.OPENAI_MAX_RETRIES = "0";
     process.env.OPENAI_RETRY_BASE_MS = "10";
-    process.env.OPENAI_IMAGE_MODEL = "gpt-image-2";
+    process.env.IMAGE_PROVIDER_DEFAULT = "openai";
+    process.env.IMAGE_MODEL_DEFAULT = "openai:gpt-image-2";
+    delete process.env.OPENAI_IMAGE_MODEL;
 
     await assert.rejects(
       () => new OpenAiImageGenerationProvider().generateImage(fakeOpenAiInput("url-only")),

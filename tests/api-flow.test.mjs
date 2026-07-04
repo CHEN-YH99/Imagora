@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHmac } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHmac, randomUUID } from "node:crypto";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { JsonStore } from "../packages/database/dist/index.js";
 
@@ -31,7 +31,8 @@ test("api rejects bearer session auth in production config", async () => {
     STRIPE_CANCEL_URL: "https://imagora.example/payment/cancel",
     DATA_STORE: "prisma",
     QUEUE_PROVIDER: "bullmq",
-    AI_PROVIDER: "openai",
+    IMAGE_PROVIDER_DEFAULT: "openai",
+    IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
     STORAGE_PROVIDER: "s3",
     PAYMENT_PROVIDER: "stripe",
     RATE_LIMIT_PROVIDER: "redis",
@@ -477,19 +478,24 @@ test("api and worker complete generation and enforce admin safety rules", async 
       style: "illustration",
       aspectRatio: "1:1",
       quantity: 1,
-      quality: "draft"
+      quality: "draft",
+      model: "gpt-image-2"
     };
     const created = await post(baseUrl, "/api/generation/tasks", generationPayload, demoSession);
     const duplicateCreated = await post(baseUrl, "/api/generation/tasks", generationPayload, demoSession);
 
     assert.equal(duplicateCreated.data.task.id, created.data.task.id);
     assert.equal(created.data.task.referenceImageId, uploadedReference.data.referenceImage.id);
+    assert.equal(created.data.task.modelProvider, "mock");
+    assert.equal(created.data.task.modelName, "mock:default");
     assert.equal(duplicateCreated.data.balanceAfter, created.data.balanceAfter);
     assert.equal(created.data.balanceAfter, startingCredits.data.account.balance - created.data.task.creditCost);
 
     const taskId = created.data.task.id;
     const completed = await waitForTask(baseUrl, demoSession, taskId);
     assert.equal(completed.data.task.status, "SUCCEEDED");
+    assert.equal(completed.data.task.modelProvider, "mock");
+    assert.equal(completed.data.task.modelName, "mock:default");
     assert.equal(completed.data.images.length, 1);
     const generatedImageId = completed.data.images[0].id;
 
@@ -1191,13 +1197,13 @@ test("api and worker complete generation with openai provider flow", async () =>
     ORDER_PENDING_TTL_MINUTES: "30",
     WORKER_POLL_INTERVAL_MS: "300",
     QUEUE_PROVIDER: "inline",
-    AI_PROVIDER: "openai",
+    IMAGE_PROVIDER_DEFAULT: "openai",
+    IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
     OPENAI_API_KEY: "sk-test",
     OPENAI_BASE_URL: `http://127.0.0.1:${openAiServer.port}`,
     OPENAI_TIMEOUT_MS: "1000",
     OPENAI_MAX_RETRIES: "0",
-    OPENAI_RETRY_BASE_MS: "10",
-    OPENAI_IMAGE_MODEL: "gpt-image-2"
+    OPENAI_RETRY_BASE_MS: "10"
   };
   const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
   const worker = spawn(process.execPath, ["apps/worker/dist/main.js"], { env, stdio: "ignore" });
@@ -1225,14 +1231,14 @@ test("api and worker complete generation with openai provider flow", async () =>
     );
 
     assert.equal(created.data.task.modelProvider, "openai");
-    assert.equal(created.data.task.modelName, "gpt-image-2");
+    assert.equal(created.data.task.modelName, "openai:gpt-image-2");
     assert.equal(created.data.task.quantity, 2);
     assert.equal(created.data.balanceAfter, startingCredits.data.account.balance - created.data.task.creditCost);
 
     const completed = await waitForTask(baseUrl, demoSession, created.data.task.id);
     assert.equal(completed.data.task.status, "SUCCEEDED");
     assert.equal(completed.data.task.modelProvider, "openai");
-    assert.equal(completed.data.task.modelName, "gpt-image-2");
+    assert.equal(completed.data.task.modelName, "openai:gpt-image-2");
     assert.equal(completed.data.images.length, 2);
     for (const image of completed.data.images) {
       assert.equal(image.mimeType, "image/png");
@@ -1266,6 +1272,80 @@ test("api and worker complete generation with openai provider flow", async () =>
     worker.kill();
     await openAiServer.close();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("api and worker share the same relative json store across different process cwd values", async () => {
+  const port = await reserveUnusedPort();
+  const relativeStorePath = join(".tmp-test-store", `cwd-split-${randomUUID()}`, "store.json");
+  const absoluteStorePath = join(process.cwd(), relativeStorePath);
+  const absoluteStoreRoot = dirname(absoluteStorePath);
+  const apiLocalStorePath = join(process.cwd(), "apps", "api", relativeStorePath);
+  const workerLocalStorePath = join(process.cwd(), "apps", "worker", relativeStorePath);
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    DATA_STORE: "json",
+    IMAGORA_STORE_PATH: relativeStorePath,
+    IMAGORA_SEED_DEMO_DATA: "true",
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    ORDER_PENDING_TTL_MINUTES: "30",
+    WORKER_POLL_INTERVAL_MS: "200",
+    QUEUE_PROVIDER: "inline",
+    IMAGE_PROVIDER_DEFAULT: "mock",
+    STORAGE_PROVIDER: "inline",
+    PAYMENT_PROVIDER: "mock",
+    SAFETY_PROVIDER: "local"
+  };
+  const api = spawn(process.execPath, ["dist/main.js"], {
+    cwd: join(process.cwd(), "apps", "api"),
+    env,
+    stdio: "ignore"
+  });
+  const worker = spawn(process.execPath, ["dist/main.js"], {
+    cwd: join(process.cwd(), "apps", "worker"),
+    env,
+    stdio: "ignore"
+  });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl);
+
+    const demo = await login(baseUrl, "demo@imagora.local", "Demo123!");
+    const created = await post(
+      baseUrl,
+      "/api/generation/tasks",
+      {
+        clientRequestId: randomUUID(),
+        prompt: "A realistic studio product photo with clean lighting",
+        style: "product_photography",
+        aspectRatio: "16:9",
+        quantity: 1,
+        quality: "standard"
+      },
+      demo.session
+    );
+
+    const completed = await waitForTask(baseUrl, demo.session, created.data.task.id);
+    assert.equal(completed.data.task.status, "SUCCEEDED");
+    assert.equal(completed.data.images.length, 1);
+
+    const store = await readStore(absoluteStorePath);
+    const storedTask = store.generationTasks.find((task) => task.id === created.data.task.id);
+    assert.ok(storedTask);
+    assert.equal(storedTask.status, "SUCCEEDED");
+    assert.equal(await pathExists(apiLocalStorePath), false);
+    assert.equal(await pathExists(workerLocalStorePath), false);
+  } finally {
+    api.kill();
+    worker.kill();
+    await rm(absoluteStoreRoot, { recursive: true, force: true });
+    await rm(dirname(apiLocalStorePath), { recursive: true, force: true });
+    await rm(dirname(workerLocalStorePath), { recursive: true, force: true });
   }
 });
 
@@ -1694,6 +1774,15 @@ async function get(baseUrl, path, session) {
 
 function sessionHeaders(session) {
   return session ? { Cookie: session } : {};
+}
+
+async function pathExists(filePath) {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function sleep(ms) {

@@ -37,14 +37,18 @@ function needsClientGeneration() {
   const schemaPath = resolve("prisma", "schema.prisma");
   const clientEntryPath = resolve("generated", "client", "index.js");
   const clientTypesPath = resolve("generated", "client", "index.d.ts");
+  const clientSchemaPath = resolve("generated", "client", "schema.prisma");
   const clientEnginePath = resolve("generated", "client", "query_engine-windows.dll.node");
 
-  if (!existsSync(clientEntryPath) || !existsSync(clientTypesPath) || !existsSync(clientEnginePath)) {
+  if (!existsSync(clientEntryPath) || !existsSync(clientTypesPath) || !existsSync(clientSchemaPath) || !existsSync(clientEnginePath)) {
     return true;
   }
 
   const schemaMtimeMs = statSync(schemaPath).mtimeMs;
-  return [clientEntryPath, clientTypesPath, clientEnginePath].some(
+  // Prisma can preserve the engine DLL timestamp from the package cache on Windows,
+  // so use the generated JS/types/schema as the freshness signal and keep the DLL as
+  // an existence check only.
+  return [clientEntryPath, clientTypesPath, clientSchemaPath].some(
     (filePath) => statSync(filePath).mtimeMs < schemaMtimeMs
   );
 }

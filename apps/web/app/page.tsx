@@ -25,7 +25,7 @@ import {
   X,
   Zap
 } from "lucide-react";
-import { apiBaseUrl, formatCredits } from "../lib/api";
+import { apiBaseUrl, DEFAULT_IMAGE_MODEL_ID, formatCredits, IMAGE_MODEL_OPTIONS } from "../lib/api";
 
 type StyleOption = {
   id: string;
@@ -38,8 +38,6 @@ type StyleOption = {
 };
 
 type Quality = "1k" | "2k" | "4k";
-
-const modelOptions = [{ value: "gpt-image-2", label: "GPT Image 2" }];
 
 const aspectRatioOptions = [
   { value: "1:1", label: "1:1  方形" },
@@ -204,7 +202,7 @@ export default function HomePage() {
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [selectedModel, setSelectedModel] = useState("gpt-image-2");
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_IMAGE_MODEL_ID);
   const [aspectRatio, setAspectRatio] = useState("1:1");
   const [quality, setQuality] = useState<Quality>("2k");
   const [quantity, setQuantity] = useState(2);
@@ -431,7 +429,7 @@ export default function HomePage() {
                     aria-label="选择模型"
                     disabled={isRunning || isDone}
                   >
-                    {modelOptions.map((o) => (
+                    {IMAGE_MODEL_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>
                         {o.label}
                       </option>

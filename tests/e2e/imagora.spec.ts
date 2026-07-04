@@ -784,7 +784,7 @@ function createTask(id: string, prompt: string, status: Task["status"]): Task {
     quantity: 1,
     quality: "standard",
     modelProvider: "openai",
-    modelName: "gpt-image-2",
+    modelName: "openai:gpt-image-2",
     status,
     creditCost: 24,
     failureCode: failed ? "PROVIDER_UNAVAILABLE" : null,

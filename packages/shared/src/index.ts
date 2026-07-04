@@ -11,7 +11,7 @@ export type ImageVisibility = "PRIVATE" | "PUBLIC" | "HIDDEN";
 export type Quality = "draft" | "standard" | "high";
 export type StyleId = "realistic" | "illustration" | "anime" | "product_photography" | "poster";
 export type AspectRatio = "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
-export type ModelId = "gpt-image-2" | "mock";
+export type ModelId = string;
 
 export interface User {
   id: string;

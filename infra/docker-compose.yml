@@ -33,7 +33,7 @@ services:
       REDIS_URL: redis://redis:6379
       DATA_STORE: json
       QUEUE_PROVIDER: inline
-      AI_PROVIDER: mock
+      IMAGE_PROVIDER_DEFAULT: mock
       STORAGE_PROVIDER: inline
       PAYMENT_PROVIDER: mock
       SAFETY_PROVIDER: local
@@ -74,7 +74,7 @@ services:
       REDIS_URL: redis://redis:6379
       DATA_STORE: json
       QUEUE_PROVIDER: inline
-      AI_PROVIDER: mock
+      IMAGE_PROVIDER_DEFAULT: mock
       STORAGE_PROVIDER: inline
       SAFETY_PROVIDER: local
     volumes:

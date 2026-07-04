@@ -2,7 +2,9 @@ import { aspectRatioDimensions, type AspectRatio, type ModelId, type Quality, ty
 
 export const DEFAULT_OPENAI_MODEL = "gpt-image-2" as const;
 export const MOCK_MODEL = "mock" as const;
-export const SUPPORTED_IMAGE_MODELS = [DEFAULT_OPENAI_MODEL, MOCK_MODEL] as const;
+export const DEFAULT_OPENAI_MODEL_ID = "openai:gpt-image-2" as const;
+export const MOCK_MODEL_ID = "mock:default" as const;
+export const SUPPORTED_IMAGE_MODELS = [DEFAULT_OPENAI_MODEL_ID, MOCK_MODEL_ID] as const;
 
 type SupportedImageModel = (typeof SUPPORTED_IMAGE_MODELS)[number];
 type SupportedProviderName = "mock" | "openai";
@@ -112,7 +114,8 @@ export interface ImageGenerationQuote {
 
 interface ProviderModelConfig {
   provider: SupportedProviderName;
-  model: SupportedImageModel;
+  modelId: SupportedImageModel;
+  upstreamModel: string;
   label: string;
   qualityMultiplier: Record<Quality, number>;
   sizeMultiplier: Record<OpenAiImageSize, number>;
@@ -138,9 +141,10 @@ interface OpenAiImageItem {
 }
 
 const providerModelConfigs: Record<SupportedImageModel, ProviderModelConfig> = {
-  "gpt-image-2": {
+  [DEFAULT_OPENAI_MODEL_ID]: {
     provider: "openai",
-    model: "gpt-image-2",
+    modelId: DEFAULT_OPENAI_MODEL_ID,
+    upstreamModel: DEFAULT_OPENAI_MODEL,
     label: "GPT Image 2",
     qualityMultiplier: {
       draft: 0.75,
@@ -155,9 +159,10 @@ const providerModelConfigs: Record<SupportedImageModel, ProviderModelConfig> = {
     quantityMultiplier: 7,
     costCentsPerImage: 4
   },
-  mock: {
+  [MOCK_MODEL_ID]: {
     provider: "mock",
-    model: "mock",
+    modelId: MOCK_MODEL_ID,
+    upstreamModel: MOCK_MODEL,
     label: "Imagora Mock",
     qualityMultiplier: {
       draft: 0.4,
@@ -174,9 +179,16 @@ const providerModelConfigs: Record<SupportedImageModel, ProviderModelConfig> = {
   }
 };
 
+const modelAliases: Record<string, SupportedImageModel> = {
+  [DEFAULT_OPENAI_MODEL]: DEFAULT_OPENAI_MODEL_ID,
+  [DEFAULT_OPENAI_MODEL_ID]: DEFAULT_OPENAI_MODEL_ID,
+  [MOCK_MODEL]: MOCK_MODEL_ID,
+  [MOCK_MODEL_ID]: MOCK_MODEL_ID
+};
+
 export class MockImageGenerationProvider implements ImageGenerationProvider {
   readonly name = "mock";
-  readonly modelName = MOCK_MODEL;
+  readonly modelName = MOCK_MODEL_ID;
 
   async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
     if (/\bfail\b/i.test(input.prompt)) {
@@ -216,7 +228,7 @@ export class MockImageGenerationProvider implements ImageGenerationProvider {
 
 export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   readonly name = "openai";
-  readonly modelName = resolveConfiguredOpenAiModel();
+  readonly modelName = resolveDefaultImageModel(this.name);
   private readonly apiKey = requiredEnv("OPENAI_API_KEY");
   private readonly baseUrl = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
   private readonly timeoutMs = envNumber("OPENAI_TIMEOUT_MS", 120_000);
@@ -225,7 +237,8 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
 
   async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
     const model = resolveProviderModel(input.model, this.name);
-    if (model !== DEFAULT_OPENAI_MODEL) {
+    const modelConfig = getImageModelConfig(model);
+    if (modelConfig.provider !== this.name) {
       throw new ProviderError("PROVIDER_BAD_RESPONSE", `OpenAI provider does not support model "${model}"`, {
         retryable: false,
         provider: this.name
@@ -239,7 +252,7 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
 
     for (let index = 0; index < input.quantity; index += 1) {
       const payload = await this.requestGeneration({
-        model,
+        model: modelConfig.upstreamModel,
         prompt: buildPrompt(input),
         size,
         quality,
@@ -277,12 +290,12 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     return {
       providerRequestId: requestIds.size === 1 ? [...requestIds][0] : `openai_${input.taskId}`,
       images,
-      raw: { provider: this.name, model, requestIds: [...requestIds] }
+      raw: { provider: this.name, model, upstreamModel: modelConfig.upstreamModel, requestIds: [...requestIds] }
     };
   }
 
   private async requestGeneration(body: {
-    model: typeof DEFAULT_OPENAI_MODEL;
+    model: string;
     prompt: string;
     size: OpenAiImageSize;
     quality: OpenAiImageQuality;
@@ -305,7 +318,7 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   }
 
   private async performRequest(body: {
-    model: typeof DEFAULT_OPENAI_MODEL;
+    model: string;
     prompt: string;
     size: OpenAiImageSize;
     quality: OpenAiImageQuality;
@@ -355,7 +368,34 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   }
 }
 
-export function createImageGenerationProvider(name = process.env.AI_PROVIDER ?? "mock"): ImageGenerationProvider {
+export function resolveDefaultImageProvider(): SupportedProviderName {
+  return normalizeProviderName(firstNonEmptyEnv("IMAGE_PROVIDER_DEFAULT", "AI_PROVIDER") ?? "mock");
+}
+
+export function resolveDefaultImageModel(providerName = resolveDefaultImageProvider()): SupportedImageModel {
+  const provider = normalizeProviderName(providerName);
+  const configuredModel = process.env.IMAGE_MODEL_DEFAULT?.trim();
+  if (configuredModel) {
+    const resolvedModel = normalizeModelId(configuredModel);
+    const config = providerModelConfigs[resolvedModel];
+    if (config.provider !== provider) {
+      throw new Error(`IMAGE_MODEL_DEFAULT "${configuredModel}" does not match provider "${provider}"`);
+    }
+    return resolvedModel;
+  }
+
+  if (provider === "mock") {
+    return MOCK_MODEL_ID;
+  }
+
+  return resolveConfiguredOpenAiModel();
+}
+
+export function getImageModelConfig(modelId: ModelId): ProviderModelConfig {
+  return providerModelConfigs[normalizeModelId(modelId)];
+}
+
+export function createImageGenerationProvider(name = resolveDefaultImageProvider()): ImageGenerationProvider {
   switch (normalizeProviderName(name)) {
     case "mock":
       return new MockImageGenerationProvider();
@@ -364,11 +404,12 @@ export function createImageGenerationProvider(name = process.env.AI_PROVIDER ?? 
   }
 }
 
-export function getActiveProviderMetadata(name = process.env.AI_PROVIDER ?? "mock"): ProviderMetadata {
+export function getActiveProviderMetadata(name = resolveDefaultImageProvider()): ProviderMetadata {
   const normalized = normalizeProviderName(name);
-  return normalized === "mock"
-    ? { name: "mock", modelName: MOCK_MODEL }
-    : { name: "openai", modelName: resolveConfiguredOpenAiModel() };
+  return {
+    name: normalized,
+    modelName: resolveDefaultImageModel(normalized)
+  };
 }
 
 export function listSupportedModels(name?: string): SupportedImageModel[] {
@@ -378,15 +419,10 @@ export function listSupportedModels(name?: string): SupportedImageModel[] {
 
 export function resolveProviderModel(
   inputModel?: ModelId,
-  providerName = process.env.AI_PROVIDER ?? "mock"
+  providerName = resolveDefaultImageProvider()
 ): SupportedImageModel {
   const provider = normalizeProviderName(providerName);
-  const requestedModel =
-    inputModel && SUPPORTED_IMAGE_MODELS.includes(inputModel as SupportedImageModel)
-      ? (inputModel as SupportedImageModel)
-      : provider === "mock"
-        ? MOCK_MODEL
-        : resolveConfiguredOpenAiModel();
+  const requestedModel = inputModel ? normalizeModelId(inputModel) : resolveDefaultImageModel(provider);
 
   const config = providerModelConfigs[requestedModel];
   if (!config || config.provider !== provider) {
@@ -404,7 +440,7 @@ export function resolveProviderModel(
 }
 
 export function quoteImageGeneration(input: QuoteImageGenerationInput): ImageGenerationQuote {
-  const provider = normalizeProviderName(input.provider ?? process.env.AI_PROVIDER ?? "mock");
+  const provider = normalizeProviderName(input.provider ?? resolveDefaultImageProvider());
   const model = resolveProviderModel(input.model, provider);
   const config = providerModelConfigs[model];
   const dimension = aspectRatioDimensions[input.aspectRatio];
@@ -439,12 +475,35 @@ function normalizeProviderName(name: string): SupportedProviderName {
   throw new Error(`Unsupported AI provider: ${name}`);
 }
 
-function resolveConfiguredOpenAiModel(): typeof DEFAULT_OPENAI_MODEL {
-  const value = process.env.OPENAI_IMAGE_MODEL?.trim();
-  if (!value || value === DEFAULT_OPENAI_MODEL) {
-    return DEFAULT_OPENAI_MODEL;
+function firstNonEmptyEnv(...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) {
+      return value;
+    }
   }
-  throw new Error(`Unsupported OPENAI_IMAGE_MODEL: ${value}`);
+  return undefined;
+}
+
+function normalizeModelId(modelId: ModelId): SupportedImageModel {
+  const normalized = modelId.trim();
+  const resolved = modelAliases[normalized];
+  if (resolved) {
+    return resolved;
+  }
+  throw new Error(`Unsupported image model: ${modelId}`);
+}
+
+function resolveConfiguredOpenAiModel(): SupportedImageModel {
+  const value = process.env.OPENAI_IMAGE_MODEL?.trim();
+  if (!value) {
+    return DEFAULT_OPENAI_MODEL_ID;
+  }
+  const modelId = normalizeModelId(value);
+  if (providerModelConfigs[modelId].provider !== "openai") {
+    throw new Error(`Unsupported OPENAI_IMAGE_MODEL: ${value}`);
+  }
+  return modelId;
 }
 
 function normalizeProviderError(error: unknown, provider: SupportedProviderName): ProviderError {
