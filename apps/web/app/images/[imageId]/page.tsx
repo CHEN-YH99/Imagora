@@ -6,6 +6,11 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../../components/AppFrame";
 import {
+  formatImageAspectRatio,
+  GeneratedImageLightbox,
+  GeneratedImagePreviewButton
+} from "../../../components/GeneratedImagePreview";
+import {
   apiFetch,
   formatCredits,
   formatQualityLabel,
@@ -27,6 +32,7 @@ export default function ImageDetailPage() {
   const [task, setTask] = useState<Task | null>(null);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
+  const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingImage, setDeletingImage] = useState(false);
 
@@ -44,6 +50,7 @@ export default function ImageDetailPage() {
   async function loadDetail() {
     setLoading(true);
     setMessage("");
+    setSelectedPreviewImage(null);
     try {
       const imageResult = await apiFetch<{ image: GeneratedImage }>(`/api/images/${imageId}`);
       setImage(imageResult.image);
@@ -163,14 +170,13 @@ export default function ImageDetailPage() {
               </div>
             </div>
             <div className="bg-black/26 p-4">
-              <img
-                className="max-h-[72vh] w-full rounded-2xl border border-white/12 object-contain"
-                src={image.thumbnailUrl}
+              <GeneratedImagePreviewButton
                 alt="生成图片详情预览"
-                loading="lazy"
-                decoding="async"
-                width={image.width}
-                height={image.height}
+                ariaLabel="预览当前生成图片"
+                className="max-h-[72vh] bg-black/30 hover:translate-y-0"
+                image={image}
+                imageClassName="object-contain bg-black/18"
+                onOpen={() => setSelectedPreviewImage(image)}
               />
             </div>
           </Panel>
@@ -246,6 +252,7 @@ export default function ImageDetailPage() {
               <h2 className="mb-4 text-lg font-semibold">资产信息</h2>
               <dl className="grid gap-3 text-sm text-white/58 sm:grid-cols-2">
                 <DetailItem label="尺寸" value={`${image.width} × ${image.height}`} />
+                <DetailItem label="实际比例" value={formatImageAspectRatio(image.width, image.height)} />
                 <DetailItem label="格式" value={image.mimeType ?? "未知"} />
                 <DetailItem label="文件大小" value={formatFileSize(image.fileSize)} />
                 <DetailItem label="生成时间" value={formatDate(image.createdAt)} />
@@ -274,6 +281,7 @@ export default function ImageDetailPage() {
         onCancel={() => setDeleteConfirmOpen(false)}
         onConfirm={() => void confirmDeleteImage()}
       />
+      <GeneratedImageLightbox image={selectedPreviewImage} onClose={() => setSelectedPreviewImage(null)} />
     </AppFrame>
   );
 }

@@ -259,6 +259,25 @@ test("历史、收藏、下载、删除和再次生成链路可回归", async ({
   expect(state.images).toHaveLength(0);
 });
 
+test("历史页图片支持 hover 预览大图并显示实际比例", async ({ page }) => {
+  await setupApiMocks(page);
+
+  await page.goto("/history");
+  const previewButton = page.getByRole("button", { name: "预览历史第 1 张生成图片" });
+  await previewButton.hover();
+  await expect(page.getByText("查看原图")).toBeVisible();
+
+  await previewButton.click();
+  const dialog = page.getByRole("dialog", { name: "生成图片大图预览" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("1024 × 1024")).toBeVisible();
+  await expect(dialog.getByText("比例 1:1")).toBeVisible();
+  await expect(page.getByRole("link", { name: "详情" })).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+});
+
 test("套餐、订单和支付沙箱链路可回归", async ({ page }) => {
   await setupApiMocks(page);
 

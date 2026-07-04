@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowUpRight, Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
+import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import {
   apiFetch,
   formatCredits,
@@ -24,6 +25,7 @@ export default function HistoryPage() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [message, setMessage] = useState("");
+  const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
   const [pendingDeleteImage, setPendingDeleteImage] = useState<GeneratedImage | null>(null);
   const [deletingImage, setDeletingImage] = useState(false);
 
@@ -105,6 +107,7 @@ export default function HistoryPage() {
       setDetail((value) =>
         value ? { ...value, images: value.images.filter((item) => item.id !== pendingDeleteImage.id) } : value
       );
+      setSelectedPreviewImage((value) => (value?.id === pendingDeleteImage.id ? null : value));
       setPendingDeleteImage(null);
       setMessage("图片已删除。");
     } catch (error) {
@@ -226,20 +229,23 @@ export default function HistoryPage() {
 
           <div className="grid gap-3 sm:grid-cols-2">
             {(detail?.images.length ? detail.images : images.filter((image) => image.taskId === selectedTask?.id)).map(
-              (image) => (
+              (image, index) => (
                 <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/20">
-                  <Link className="focus-ring block" href={`/images/${image.id}`}>
-                    <img
-                      className="aspect-square w-full object-cover"
-                      src={image.thumbnailUrl}
-                      alt="历史生成图片"
-                      loading="lazy"
-                      decoding="async"
-                      width={image.width}
-                      height={image.height}
-                    />
-                  </Link>
+                  <GeneratedImagePreviewButton
+                    alt="历史生成图片"
+                    ariaLabel={`预览历史第 ${index + 1} 张生成图片`}
+                    className="rounded-none border-0 border-b border-white/10 bg-transparent hover:translate-y-0 hover:border-b-mint/60"
+                    image={image}
+                    onOpen={() => setSelectedPreviewImage(image)}
+                  />
                   <div className="flex flex-wrap gap-2 p-3">
+                    <Link
+                      className="focus-ring inline-flex items-center gap-1.5 rounded-full border border-white/12 px-3 py-2 text-xs text-white/68 transition-colors duration-200 hover:bg-white/10 hover:text-white"
+                      href={`/images/${image.id}`}
+                    >
+                      <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                      详情
+                    </Link>
                     <button
                       className="icon-action"
                       type="button"
@@ -283,6 +289,7 @@ export default function HistoryPage() {
         onCancel={() => setPendingDeleteImage(null)}
         onConfirm={() => void confirmDeleteImage()}
       />
+      <GeneratedImageLightbox image={selectedPreviewImage} onClose={() => setSelectedPreviewImage(null)} />
     </AppFrame>
   );
 }

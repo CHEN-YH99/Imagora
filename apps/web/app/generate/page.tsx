@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Coins, ImagePlus, X, Wand2 } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
+import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import {
   ApiRequestError,
   apiFetch,
@@ -62,6 +63,7 @@ function GenerateExperience() {
   const [account, setAccount] = useState<CreditAccount | null>(null);
   const [task, setTask] = useState<Task | null>(null);
   const [images, setImages] = useState<GeneratedImage[]>([]);
+  const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
   const [referenceImage, setReferenceImage] = useState<ReferenceImage | null>(null);
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState<"success" | "danger">("danger");
@@ -217,6 +219,7 @@ function GenerateExperience() {
     setMessage("");
     setMessageTone("danger");
     setImages([]);
+    setSelectedPreviewImage(null);
     setAppealEventId(null);
     setAppealStatus(null);
     setShowAppealForm(false);
@@ -551,16 +554,13 @@ function GenerateExperience() {
             </p>
           ) : null}
           <div className="grid gap-3 sm:grid-cols-2">
-            {images.map((image) => (
-              <img
+            {images.map((image, index) => (
+              <GeneratedImagePreviewButton
                 key={image.id}
-                className="aspect-square w-full rounded-2xl border border-white/12 object-cover"
-                src={image.thumbnailUrl}
                 alt="生成图片结果"
-                loading="lazy"
-                decoding="async"
-                width={image.width}
-                height={image.height}
+                ariaLabel={`预览第 ${index + 1} 张生成图片`}
+                image={image}
+                onOpen={() => setSelectedPreviewImage(image)}
               />
             ))}
             {images.length === 0 ? (
@@ -576,6 +576,7 @@ function GenerateExperience() {
           </div>
         </Panel>
       </div>
+      <GeneratedImageLightbox image={selectedPreviewImage} onClose={() => setSelectedPreviewImage(null)} />
     </AppFrame>
   );
 }

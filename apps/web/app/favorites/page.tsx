@@ -2,13 +2,15 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Heart } from "lucide-react";
+import { ArrowUpRight, Heart } from "lucide-react";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel } from "../../components/AppFrame";
+import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import { apiFetch, type GeneratedImage } from "../../lib/api";
 
 export default function FavoritesPage() {
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [message, setMessage] = useState("");
+  const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
   const [pendingRemove, setPendingRemove] = useState<GeneratedImage | null>(null);
   const [removing, setRemoving] = useState(false);
 
@@ -34,6 +36,7 @@ export default function FavoritesPage() {
         method: "DELETE"
       });
       setImages((current) => current.filter((image) => image.id !== pendingRemove.id));
+      setSelectedPreviewImage((value) => (value?.id === pendingRemove.id ? null : value));
       setMessage("已取消收藏。");
       setPendingRemove(null);
     } catch (error) {
@@ -62,31 +65,36 @@ export default function FavoritesPage() {
           </div>
         ) : null}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {images.map((image) => (
+          {images.map((image, index) => (
             <article key={image.id} className="rounded-2xl border border-white/12 bg-black/20 p-3">
-              <Link className="focus-ring block" href={`/images/${image.id}`}>
-                <img
-                  className="aspect-square w-full rounded-xl object-cover"
-                  src={image.thumbnailUrl}
-                  alt="收藏的生成图片"
-                  loading="lazy"
-                  decoding="async"
-                  width={image.width}
-                  height={image.height}
-                />
-              </Link>
+              <GeneratedImagePreviewButton
+                alt="收藏的生成图片"
+                ariaLabel={`预览收藏第 ${index + 1} 张生成图片`}
+                className="rounded-xl hover:translate-y-0"
+                image={image}
+                onOpen={() => setSelectedPreviewImage(image)}
+              />
               <div className="mt-3 flex items-center justify-between gap-3">
                 <p className="inline-flex items-center gap-2 text-sm text-white/64">
                   <Heart className="size-4 text-plasma" aria-hidden="true" />
                   已收藏
                 </p>
-                <button
-                  className="focus-ring rounded-full border border-white/12 px-3 py-1.5 text-xs text-white/68 transition-colors hover:bg-white/10 hover:text-white"
-                  onClick={() => setPendingRemove(image)}
-                  type="button"
-                >
-                  取消收藏
-                </button>
+                <div className="flex items-center gap-2">
+                  <Link
+                    className="focus-ring inline-flex items-center gap-1.5 rounded-full border border-white/12 px-3 py-1.5 text-xs text-white/68 transition-colors hover:bg-white/10 hover:text-white"
+                    href={`/images/${image.id}`}
+                  >
+                    <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                    详情
+                  </Link>
+                  <button
+                    className="focus-ring rounded-full border border-white/12 px-3 py-1.5 text-xs text-white/68 transition-colors hover:bg-white/10 hover:text-white"
+                    onClick={() => setPendingRemove(image)}
+                    type="button"
+                  >
+                    取消收藏
+                  </button>
+                </div>
               </div>
             </article>
           ))}
@@ -112,6 +120,7 @@ export default function FavoritesPage() {
         onCancel={() => setPendingRemove(null)}
         onConfirm={() => void confirmRemoveFavorite()}
       />
+      <GeneratedImageLightbox image={selectedPreviewImage} onClose={() => setSelectedPreviewImage(null)} />
     </AppFrame>
   );
 }
