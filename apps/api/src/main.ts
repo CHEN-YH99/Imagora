@@ -17,6 +17,8 @@ import {
   aspectRatioDimensions,
   creditSourceRemainders,
   expireCredits,
+  refundFailureCount,
+  refundTaskCredits,
   groupLedgerByUser,
   type GeneratedImage,
   type GenerationTask,
@@ -29,9 +31,11 @@ import {
   publicUser,
   type Quality,
   type ReferenceImage,
+  runGenerationMaintenance,
   type SourceType,
   type StoreData,
   type StyleId,
+  taskRefundedCredits,
   type User,
   type SafetyAppeal,
   type SafetyRule
@@ -641,7 +645,7 @@ app.post("/api/generation/tasks", async (request, reply) => {
     );
     if (duplicate) {
       return {
-        task: duplicate,
+        task: taskWithRefund(data, duplicate),
         balanceAfter: mustFindCreditAccount(data, user.id).balance,
         enqueue: false,
         requestedAt: duplicate.createdAt
@@ -713,7 +717,7 @@ app.post("/api/generation/tasks", async (request, reply) => {
     spendCredits(data, user.id, cost, "TASK", task.id, `task-spend:${task.id}`, "Image generation task");
     return {
       blocked: false as const,
-      task,
+      task: taskWithRefund(data, task),
       balanceAfter: mustFindCreditAccount(data, user.id).balance,
       enqueue: true,
       requestedAt: now
@@ -812,22 +816,29 @@ app.post("/api/uploads/reference-images", { bodyLimit: uploadBodyLimitBytes() },
 });
 
 app.get("/api/generation/tasks", async (request) => {
-  const { user, data } = await requireAuth(request);
+  const { user } = await requireAuth(request);
   const query = taskQuerySchema.parse(request.query);
-  const tasks = data.generationTasks
-    .filter((task) => task.userId === user.id)
-    .filter((task) => (query.status ? task.status === query.status : true))
-    .sort(descCreated)
-    .slice(0, query.limit);
-  return envelope(request, { tasks });
+  return store.update((data) => {
+    runGenerationMaintenance(data, generationMaintenanceOptions());
+    const tasks = data.generationTasks
+      .filter((task) => task.userId === user.id)
+      .filter((task) => (query.status ? task.status === query.status : true))
+      .sort(descCreated)
+      .slice(0, query.limit)
+      .map((task) => taskWithRefund(data, task));
+    return envelope(request, { tasks });
+  });
 });
 
 app.get("/api/generation/tasks/:taskId", async (request) => {
-  const { user, data } = await requireAuth(request);
+  const { user } = await requireAuth(request);
   const { taskId } = idParamSchema.parse(request.params);
-  const task = mustFindOwnTask(data, user.id, taskId);
-  const images = data.generatedImages.filter((image) => image.taskId === task.id && !image.deletedAt);
-  return envelope(request, { task, images });
+  return store.update((data) => {
+    runGenerationMaintenance(data, generationMaintenanceOptions());
+    const task = mustFindOwnTask(data, user.id, taskId);
+    const images = data.generatedImages.filter((image) => image.taskId === task.id && !image.deletedAt);
+    return envelope(request, { task: taskWithRefund(data, task), images });
+  });
 });
 
 app.post("/api/generation/tasks/:taskId/retry", async (request, reply) => {
@@ -1177,7 +1188,27 @@ app.post("/api/admin/maintenance/reconcile", async (request) => {
   const input = adminReasonSchema.parse(request.body ?? {});
   return store.update((data) => {
     const maintenance = runOrderMaintenance(data);
-    audit(data, admin.id, "maintenance.reconcile", "SYSTEM", "orders", input.reason, null, { ...maintenance }, request);
+    audit(data, admin.id, "maintenance.reconcile", "SYSTEM", "platform", input.reason, null, { ...maintenance }, request);
+    return envelope(request, { maintenance });
+  });
+});
+
+app.post("/api/admin/maintenance/reconcile-generation", async (request) => {
+  const { user: admin } = await requireAdmin(request);
+  const input = adminReasonSchema.parse(request.body ?? {});
+  return store.update((data) => {
+    const maintenance = runGenerationMaintenance(data, generationMaintenanceOptions());
+    audit(
+      data,
+      admin.id,
+      "maintenance.generation.reconcile",
+      "SYSTEM",
+      "generation",
+      input.reason,
+      null,
+      { ...maintenance },
+      request
+    );
     return envelope(request, { maintenance });
   });
 });
@@ -1710,6 +1741,10 @@ interface OrderMaintenanceResult {
   reconciledPaidOrders: number;
   reconciledPaymentEvents: number;
   expiredCredits: number;
+  failedPendingGenerationTasks: number;
+  failedRunningGenerationTasks: number;
+  reconciledGenerationRefunds: number;
+  refundedGenerationCredits: number;
 }
 
 type OperationalAlertSeverity = "warning" | "critical";
@@ -2298,10 +2333,34 @@ function findCheckoutUrl(data: StoreData, order: Order): string | null {
 function runOrderMaintenance(data: StoreData): OrderMaintenanceResult {
   const now = new Date().toISOString();
   const expiredCredits = expireCredits(data);
+  const generationMaintenance = runGenerationMaintenance(data, generationMaintenanceOptions());
   const closedExpiredOrders = closeExpiredPendingOrders(data, now);
   const reconciledPaymentEvents = reconcileSucceededPaymentEvents(data, now);
   const reconciledPaidOrders = reconcilePaidOrderCredits(data);
-  return { closedExpiredOrders, reconciledPaidOrders, reconciledPaymentEvents, expiredCredits };
+  return {
+    closedExpiredOrders,
+    reconciledPaidOrders,
+    reconciledPaymentEvents,
+    expiredCredits,
+    failedPendingGenerationTasks: generationMaintenance.failedPendingTasks,
+    failedRunningGenerationTasks: generationMaintenance.failedRunningTasks,
+    reconciledGenerationRefunds: generationMaintenance.reconciledRefunds,
+    refundedGenerationCredits: generationMaintenance.refundedCredits
+  };
+}
+
+function generationMaintenanceOptions() {
+  return {
+    pendingTimeoutMs: envNumber("GENERATION_PENDING_TIMEOUT_MS", 5 * 60 * 1000),
+    runningTimeoutMs: envNumber("GENERATION_RUNNING_TIMEOUT_MS", 10 * 60 * 1000)
+  };
+}
+
+function taskWithRefund(data: StoreData, task: GenerationTask): GenerationTask & { refundedCredits: number } {
+  return {
+    ...task,
+    refundedCredits: taskRefundedCredits(data, task.id)
+  };
 }
 
 function closeExpiredPendingOrders(data: StoreData, now: string): number {
@@ -2398,26 +2457,6 @@ function paymentFailureEvents(data: StoreData): PaymentEvent[] {
         paymentEventCurrency(event.payload) !== normalizeCurrency(order.currency))
     );
   });
-}
-
-function refundFailureCount(data: StoreData): number {
-  const refundedTaskIds = new Set(
-    data.creditLedgerEntries
-      .filter((entry) => entry.type === "REFUND" && entry.sourceType === "TASK")
-      .map((entry) => entry.sourceId)
-  );
-  const spentTaskIds = new Set(
-    data.creditLedgerEntries
-      .filter((entry) => entry.type === "SPEND" && entry.sourceType === "TASK")
-      .map((entry) => entry.sourceId)
-  );
-  return data.generationTasks.filter(
-    (task) =>
-      ["FAILED", "BLOCKED"].includes(task.status) &&
-      task.creditCost > 0 &&
-      spentTaskIds.has(task.id) &&
-      !refundedTaskIds.has(task.id)
-  ).length;
 }
 
 function paymentEventOrderNo(payload: Record<string, unknown>): string | null {
@@ -2662,7 +2701,7 @@ async function markTaskFailedAndRefund(taskId: string, code: string, message: st
     task.failureMessage = message;
     task.completedAt = now;
     task.updatedAt = now;
-    refundTaskCredits(data, task, "Generation task could not be queued");
+    refundTaskCredits(data, task, task.creditCost, "Generation task could not be queued");
     recordOperationalIncident(data, {
       severity: "critical",
       area: "generation",
@@ -2671,31 +2710,6 @@ async function markTaskFailedAndRefund(taskId: string, code: string, message: st
       userId: task.userId,
       taskId: task.id
     });
-  });
-}
-
-function refundTaskCredits(data: StoreData, task: GenerationTask, remark: string): void {
-  const idempotencyKey = `task-refund:${task.id}`;
-  if (data.creditLedgerEntries.some((entry) => entry.idempotencyKey === idempotencyKey)) {
-    return;
-  }
-  const account = mustFindCreditAccount(data, task.userId);
-  const now = new Date().toISOString();
-  account.balance += task.creditCost;
-  account.totalEarned += task.creditCost;
-  account.updatedAt = now;
-  data.creditLedgerEntries.push({
-    id: randomUUID(),
-    userId: task.userId,
-    type: "REFUND",
-    amount: task.creditCost,
-    balanceAfter: account.balance,
-    sourceType: "TASK",
-    sourceId: task.id,
-    idempotencyKey,
-    remark,
-    createdAt: now,
-    expiresAt: null
   });
 }
 

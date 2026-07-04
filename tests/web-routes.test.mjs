@@ -247,3 +247,19 @@ test("generate page exposes safety appeal entry after direct content blocking", 
   assert.match(generatePage, /CONTENT_REVIEW_REQUIRED/);
   assert.match(apiClient, /body: \{ safetyEventId, reason \}/);
 });
+
+test("generation failures reconcile refunds and surface refunded credit copy", async () => {
+  const apiMain = await readFile(join(root, "apps/api/src/main.ts"), "utf8");
+  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const workerMain = await readFile(join(root, "apps/worker/src/main.ts"), "utf8");
+
+  assert.match(apiMain, /runGenerationMaintenance/);
+  assert.match(apiMain, /\/api\/admin\/maintenance\/reconcile-generation/);
+  assert.match(apiClient, /refundedCredits\?: number/);
+  assert.match(generatePage, /generationFailureMessage/);
+  assert.match(generatePage, /已自动返还/);
+  assert.match(workerMain, /refundTaskCredits/);
+  assert.match(workerMain, /deliveredQuote\.creditCost/);
+  assert.match(workerMain, /NO_IMAGES_DELIVERED/);
+});

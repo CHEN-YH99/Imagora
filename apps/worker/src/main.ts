@@ -6,7 +6,15 @@ import { createStore } from "@imagora/database";
 import { startGenerationWorker, type GenerationQueueJob } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
 import { createObjectStorage } from "@imagora/storage";
-import { expireCredits, type GeneratedImage, type GenerationTask, type ModelId, type StoreData } from "@imagora/shared";
+import {
+  expireCredits,
+  refundTaskCredits,
+  runGenerationMaintenance,
+  type GeneratedImage,
+  type GenerationTask,
+  type ModelId,
+  type StoreData
+} from "@imagora/shared";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -49,8 +57,7 @@ if (queueProvider === "bullmq") {
 
 async function tick(): Promise<void> {
   await store.update(async (data) => {
-    refundStaleRunningTasks(data);
-    expireCredits(data);
+    runWorkerMaintenance(data);
     const task = data.generationTasks.find((item) => item.status === "PENDING");
     if (!task) {
       return;
@@ -61,7 +68,7 @@ async function tick(): Promise<void> {
 
 async function processQueuedJob(job: GenerationQueueJob): Promise<void> {
   await store.update(async (data) => {
-    refundStaleRunningTasks(data);
+    runWorkerMaintenance(data);
     const task = data.generationTasks.find((item) => item.id === job.taskId && item.status === "PENDING");
     if (!task) {
       return;
@@ -110,6 +117,10 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
     }
 
     const createdImages = await createImages(task, result.images);
+    if (createdImages.length === 0) {
+      failTask(data, task, "NO_IMAGES_DELIVERED", "模型服务未返回可用图片，本次扣除的积分已自动返还。");
+      return;
+    }
     data.generatedImages.push(...createdImages);
     // 按实际交付张数记录供应商真实成本（分），用于后台毛利核算
     const deliveredQuote = quoteImageGeneration({
@@ -120,6 +131,10 @@ async function processTask(data: StoreData, task: GenerationTask): Promise<void>
       model: task.modelName as ModelId | undefined
     });
     task.providerCostCents = deliveredQuote.providerCostCents;
+    const creditDifference = task.creditCost - deliveredQuote.creditCost;
+    if (createdImages.length < task.quantity && creditDifference > 0) {
+      refundTaskCredits(data, task, creditDifference, "未交付图片的积分自动返还");
+    }
   } catch (error) {
     if (isProviderError(error) && error.code === "PROVIDER_CONTENT_BLOCKED") {
       recordSafetyEvent(data, task, 0, "BLOCKED", error.code, error.message, error.provider);
@@ -229,7 +244,7 @@ function failTask(
   task.failureMessage = message;
   task.completedAt = now;
   task.updatedAt = now;
-  refundTask(data, task, "Task failed before image delivery");
+  refundTaskCredits(data, task, task.creditCost, "Task failed before image delivery");
   recordOperationalIncident(data, task, code, message, status === "BLOCKED" ? "warning" : "critical");
   logger.warn({ taskId: task.id, status, code }, "task failed and refunded");
 }
@@ -284,44 +299,21 @@ function incidentRetentionMax(): number {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 100;
 }
 
-function refundStaleRunningTasks(data: StoreData): void {
-  const cutoff = Date.now() - 10 * 60 * 1000;
-  for (const task of data.generationTasks) {
-    if (task.status !== "RUNNING" || !task.startedAt) {
-      continue;
-    }
-    if (new Date(task.startedAt).getTime() < cutoff) {
-      failTask(data, task, "WORKER_TIMEOUT", "Task exceeded worker timeout and was refunded");
-    }
-  }
+function runWorkerMaintenance(data: StoreData): void {
+  runGenerationMaintenance(data, generationMaintenanceOptions());
+  expireCredits(data);
 }
 
-function refundTask(data: StoreData, task: GenerationTask, remark: string): void {
-  const idempotencyKey = `task-refund:${task.id}`;
-  if (data.creditLedgerEntries.some((entry) => entry.idempotencyKey === idempotencyKey)) {
-    return;
-  }
-  const account = data.creditAccounts.find((item) => item.userId === task.userId);
-  if (!account) {
-    return;
-  }
-  const now = new Date().toISOString();
-  account.balance += task.creditCost;
-  account.totalEarned += task.creditCost;
-  account.updatedAt = now;
-  data.creditLedgerEntries.push({
-    id: randomUUID(),
-    userId: task.userId,
-    type: "REFUND",
-    amount: task.creditCost,
-    balanceAfter: account.balance,
-    sourceType: "TASK",
-    sourceId: task.id,
-    idempotencyKey,
-    remark,
-    createdAt: now,
-    expiresAt: null
-  });
+function generationMaintenanceOptions() {
+  return {
+    pendingTimeoutMs: envNumber("GENERATION_PENDING_TIMEOUT_MS", 5 * 60 * 1000),
+    runningTimeoutMs: envNumber("GENERATION_RUNNING_TIMEOUT_MS", 10 * 60 * 1000)
+  };
+}
+
+function envNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 async function createImage(

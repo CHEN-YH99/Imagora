@@ -246,14 +246,14 @@ function GenerateExperience() {
       setTask(result.task);
       setImages(result.images);
       if (result.task.status === "SUCCEEDED" && result.images.length > 0) {
-        setMessage("生成完成，可进入详情继续下载、收藏或再次生成。");
+        setMessage(generationSuccessMessage(result.task));
         setMessageTone("success");
       } else if (
         result.task.status === "FAILED" ||
         result.task.status === "BLOCKED" ||
         result.task.status === "CANCELED"
       ) {
-        setMessage(result.task.failureMessage ?? "生成未成功，请调整提示词或稍后重试。");
+        setMessage(generationFailureMessage(result.task));
         setMessageTone("danger");
         if (result.task.status === "BLOCKED") {
           await loadLatestSafetyAppeal();
@@ -267,7 +267,7 @@ function GenerateExperience() {
       ) {
         await loadLatestSafetyAppeal();
       }
-      setMessage(error instanceof Error ? error.message : "生成失败，请稍后重试。");
+      setMessage(generationSubmitErrorMessage(error));
       setMessageTone("danger");
     } finally {
       setLoading(false);
@@ -550,7 +550,7 @@ function GenerateExperience() {
           </div>
           {task?.failureMessage ? (
             <p className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm text-ember">
-              {task.failureMessage}
+              {generationFailureMessage(task)}
             </p>
           ) : null}
           <div className="grid gap-3 sm:grid-cols-2">
@@ -588,4 +588,31 @@ function readFileAsDataUrl(file: File): Promise<string> {
     reader.onerror = () => reject(new Error("文件读取失败，请重新选择图片。"));
     reader.readAsDataURL(file);
   });
+}
+
+function generationFailureMessage(task: Task): string {
+  const baseMessage = task.failureMessage ?? "生成未成功，请调整提示词或稍后重试。";
+  const refundedCredits = task.refundedCredits ?? 0;
+  if (refundedCredits > 0) {
+    if (baseMessage.includes("自动返还")) {
+      return `${baseMessage.replace(/。$/, "")}（${formatCredits(refundedCredits)}）。`;
+    }
+    return `${baseMessage} 已自动返还 ${formatCredits(refundedCredits)}。`;
+  }
+  return `${baseMessage} 如已扣除积分，系统会自动补偿，请稍后刷新余额。`;
+}
+
+function generationSuccessMessage(task: Task): string {
+  const refundedCredits = task.refundedCredits ?? 0;
+  if (refundedCredits > 0) {
+    return `生成完成，未交付图片的差额已自动返还 ${formatCredits(refundedCredits)}。`;
+  }
+  return "生成完成，可进入详情继续下载、收藏或再次生成。";
+}
+
+function generationSubmitErrorMessage(error: unknown): string {
+  if (error instanceof ApiRequestError && error.apiMessage?.includes("Credits were refunded")) {
+    return "生成任务无法进入队列，本次扣除的积分已自动返还。";
+  }
+  return error instanceof Error ? error.message : "生成失败，请稍后重试。";
 }

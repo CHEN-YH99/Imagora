@@ -504,3 +504,144 @@ export function expireCredits(data: StoreData, nowInput?: string): number {
   }
   return expired;
 }
+
+export interface TaskRefundResult {
+  refunded: boolean;
+  amount: number;
+  balanceAfter: number | null;
+}
+
+export interface GenerationMaintenanceOptions {
+  now?: string;
+  pendingTimeoutMs?: number;
+  runningTimeoutMs?: number;
+}
+
+export interface GenerationMaintenanceResult {
+  failedPendingTasks: number;
+  failedRunningTasks: number;
+  reconciledRefunds: number;
+  refundedCredits: number;
+}
+
+const defaultPendingTaskTimeoutMs = 5 * 60 * 1000;
+const defaultRunningTaskTimeoutMs = 10 * 60 * 1000;
+
+export function refundTaskCredits(
+  data: StoreData,
+  task: GenerationTask,
+  amount = task.creditCost,
+  remark = "Task failed before image delivery",
+  nowInput?: string
+): TaskRefundResult {
+  const idempotencyKey = `task-refund:${task.id}`;
+  const account = data.creditAccounts.find((item) => item.userId === task.userId);
+  if (!account) {
+    return { refunded: false, amount: 0, balanceAfter: null };
+  }
+  if (data.creditLedgerEntries.some((entry) => entry.idempotencyKey === idempotencyKey)) {
+    return { refunded: false, amount: 0, balanceAfter: account.balance };
+  }
+  const spent = taskSpentCredits(data, task.id);
+  const alreadyRefunded = taskRefundedCredits(data, task.id);
+  const refundable = Math.max(0, spent - alreadyRefunded);
+  const refundAmount = Math.min(Math.max(0, amount), refundable);
+  if (refundAmount <= 0) {
+    return { refunded: false, amount: 0, balanceAfter: account.balance };
+  }
+  const now = nowInput ?? new Date().toISOString();
+  account.balance += refundAmount;
+  account.totalSpent = Math.max(0, account.totalSpent - refundAmount);
+  account.updatedAt = now;
+  data.creditLedgerEntries.push({
+    id: randomUUID(),
+    userId: task.userId,
+    type: "REFUND",
+    amount: refundAmount,
+    balanceAfter: account.balance,
+    sourceType: "TASK",
+    sourceId: task.id,
+    idempotencyKey,
+    remark,
+    createdAt: now,
+    expiresAt: null
+  });
+  return { refunded: true, amount: refundAmount, balanceAfter: account.balance };
+}
+
+export function taskRefundedCredits(data: StoreData, taskId: string): number {
+  return data.creditLedgerEntries
+    .filter((entry) => entry.type === "REFUND" && entry.sourceType === "TASK" && entry.sourceId === taskId)
+    .reduce((sum, entry) => sum + Math.max(0, entry.amount), 0);
+}
+
+export function refundFailureCount(data: StoreData): number {
+  return data.generationTasks.filter(
+    (task) =>
+      ["FAILED", "BLOCKED", "CANCELED"].includes(task.status) &&
+      task.creditCost > 0 &&
+      taskSpentCredits(data, task.id) > taskRefundedCredits(data, task.id)
+  ).length;
+}
+
+export function runGenerationMaintenance(
+  data: StoreData,
+  options: GenerationMaintenanceOptions = {}
+): GenerationMaintenanceResult {
+  const now = options.now ?? new Date().toISOString();
+  const nowMs = new Date(now).getTime();
+  const pendingTimeoutMs = options.pendingTimeoutMs ?? defaultPendingTaskTimeoutMs;
+  const runningTimeoutMs = options.runningTimeoutMs ?? defaultRunningTaskTimeoutMs;
+  const result: GenerationMaintenanceResult = {
+    failedPendingTasks: 0,
+    failedRunningTasks: 0,
+    reconciledRefunds: 0,
+    refundedCredits: 0
+  };
+
+  for (const task of data.generationTasks) {
+    if (task.status === "PENDING" && isOlderThan(task.createdAt, nowMs, pendingTimeoutMs)) {
+      markTaskFailed(task, "QUEUE_TIMEOUT", "生成任务排队超时，已自动返还本次扣除的积分。", now);
+      result.failedPendingTasks += 1;
+    } else if (
+      task.status === "RUNNING" &&
+      task.startedAt &&
+      isOlderThan(task.startedAt, nowMs, runningTimeoutMs)
+    ) {
+      markTaskFailed(task, "WORKER_TIMEOUT", "生成处理超时，已自动返还本次扣除的积分。", now);
+      result.failedRunningTasks += 1;
+    }
+
+    if (["FAILED", "BLOCKED", "CANCELED"].includes(task.status)) {
+      const refund = refundTaskCredits(data, task, task.creditCost, "Task ended before image delivery", now);
+      if (refund.refunded) {
+        result.reconciledRefunds += 1;
+        result.refundedCredits += refund.amount;
+      }
+    }
+  }
+
+  return result;
+}
+
+function taskSpentCredits(data: StoreData, taskId: string): number {
+  return data.creditLedgerEntries
+    .filter((entry) => entry.type === "SPEND" && entry.sourceType === "TASK" && entry.sourceId === taskId)
+    .reduce((sum, entry) => sum + Math.abs(Math.min(0, entry.amount)), 0);
+}
+
+function markTaskFailed(task: GenerationTask, code: string, message: string, now: string): void {
+  task.status = "FAILED";
+  task.failureCode = code;
+  task.failureMessage = message;
+  task.completedAt = now;
+  task.updatedAt = now;
+}
+
+function isOlderThan(value: string, nowMs: number, timeoutMs: number): boolean {
+  if (timeoutMs <= 0) {
+    return false;
+  }
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && time <= nowMs - timeoutMs;
+}

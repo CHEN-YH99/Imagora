@@ -84,6 +84,7 @@ export type Task = {
   modelName: string;
   status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "BLOCKED";
   creditCost: number;
+  refundedCredits?: number;
   failureCode: string | null;
   failureMessage: string | null;
   startedAt: string | null;
@@ -215,6 +216,10 @@ export type OrderMaintenance = {
   reconciledPaidOrders: number;
   reconciledPaymentEvents: number;
   expiredCredits: number;
+  failedPendingGenerationTasks: number;
+  failedRunningGenerationTasks: number;
+  reconciledGenerationRefunds: number;
+  refundedGenerationCredits: number;
 };
 
 export type OperationalAlert = {
@@ -559,6 +564,7 @@ const providerLabelMap: Record<string, string> = {
 };
 
 const auditActionMap: Record<string, string> = {
+  "maintenance.generation.reconcile": "生成任务补偿对账",
   "image.visibility.update": "图片可见性变更",
   "maintenance.reconcile": "订单对账",
   "plan.create": "创建套餐",
@@ -577,6 +583,7 @@ const targetTypeMap: Record<string, string> = {
   PROMPT: "提示词",
   SAFETY_RULE: "安全规则",
   SAFETY_EVENT: "安全事件",
+  SYSTEM: "系统",
   TASK: "任务",
   UPLOAD_IMAGE: "参考图",
   USER: "用户"
@@ -760,6 +767,15 @@ export function formatLedgerRemark(value: string): string {
   }
   if (value === "Retry image generation task") {
     return "重新生成任务扣减";
+  }
+  if (value === "Generation task could not be queued") {
+    return "生成任务入队失败自动返还";
+  }
+  if (value === "Task ended before image delivery" || value === "Task failed before image delivery") {
+    return "生成未交付自动返还";
+  }
+  if (value === "未交付图片的积分自动返还") {
+    return value;
   }
   if (value.startsWith("Purchased ")) {
     return `购买${formatPlanName(value.replace("Purchased ", ""))}`;
