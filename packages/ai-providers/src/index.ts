@@ -559,7 +559,7 @@ function mapOpenAiError(status: number, payload: OpenAiImageResponse, provider: 
   const statusCode = status;
 
   if (status === 401 || status === 403) {
-    return new ProviderError("PROVIDER_AUTH_FAILED", message, {
+    return new ProviderError("PROVIDER_AUTH_FAILED", formatOpenAiAuthFailureMessage(message), {
       retryable: false,
       provider,
       statusCode,
@@ -606,6 +606,11 @@ function mapOpenAiError(status: number, payload: OpenAiImageResponse, provider: 
     statusCode,
     details: payload
   });
+}
+
+function formatOpenAiAuthFailureMessage(message: string): string {
+  const normalized = message.trim() || "上游返回未授权。";
+  return `图像供应商鉴权失败，请检查 OPENAI_API_KEY 与 OPENAI_BASE_URL 配置。上游返回：${normalized}`;
 }
 
 function buildPrompt(input: GenerateImageInput): string {

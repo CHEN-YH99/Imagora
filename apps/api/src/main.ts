@@ -838,7 +838,9 @@ app.get("/api/generation/tasks/:taskId", async (request) => {
   const { user, data } = await requireAuth(request);
   const { taskId } = idParamSchema.parse(request.params);
   const task = mustFindOwnTask(data, user.id, taskId);
-  const images = data.generatedImages.filter((image) => image.taskId === task.id && !image.deletedAt);
+  const images = data.generatedImages
+    .filter((image) => image.taskId === task.id && !image.deletedAt)
+    .map(withoutImagePublicUrl);
   return envelope(request, { task: taskWithRefund(data, task), images });
 });
 
@@ -901,6 +903,23 @@ app.get("/api/images/:imageId", async (request) => {
   const image = mustFindOwnImage(data, user.id, imageId);
   const task = data.generationTasks.find((item) => item.id === image.taskId);
   return envelope(request, { image: withFavorite(data, user.id, image), task });
+});
+
+app.post("/api/images/:imageId/preview-url", async (request) => {
+  const { user, data } = await requireAuth(request);
+  const { imageId } = imageParamSchema.parse(request.params);
+  const image = mustFindOwnImage(data, user.id, imageId);
+  const expiresInSeconds = Math.max(
+    60,
+    Math.min(envNumber("PREVIEW_URL_TTL_MINUTES", envNumber("DOWNLOAD_URL_TTL_MINUTES", 15)) * 60, 60 * 60 * 24 * 7)
+  );
+  const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
+  const inlineOriginalUrl = resolveInlineDataUrl(image.publicUrl);
+
+  return envelope(request, {
+    url: inlineOriginalUrl ?? (await storage.getSignedUrl(image.storageKey, expiresInSeconds)),
+    expiresAt
+  });
 });
 
 app.post("/api/images/:imageId/favorite", async (request) => {
@@ -2835,9 +2854,21 @@ function adjustCredits(
 
 function withFavorite(data: StoreData, userId: string, image: GeneratedImage): GeneratedImage & { favorite: boolean } {
   return {
-    ...image,
+    ...withoutImagePublicUrl(image),
     favorite: data.imageFavorites.some((favorite) => favorite.userId === userId && favorite.imageId === image.id)
   };
+}
+
+function withoutImagePublicUrl(image: GeneratedImage): GeneratedImage {
+  return {
+    ...image,
+    publicUrl: ""
+  };
+}
+
+function resolveInlineDataUrl(value: string): string | null {
+  const normalized = value.trim();
+  return normalized.startsWith("data:") ? normalized : null;
 }
 
 function audit(

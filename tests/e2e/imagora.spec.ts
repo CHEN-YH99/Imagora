@@ -489,6 +489,10 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
       await fulfillData(route, { url: "data:text/plain,e2e-download", fileName: "imagora-e2e.txt" });
       return;
     }
+    if (method === "POST" && /^\/api\/images\/[^/]+\/preview-url$/.test(path)) {
+      await fulfillData(route, { url: imageUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+      return;
+    }
     if (method === "DELETE" && /^\/api\/images\/[^/]+$/.test(path)) {
       const imageId = path.split("/").at(-1);
       state.images = state.images.filter((image) => image.id !== imageId);

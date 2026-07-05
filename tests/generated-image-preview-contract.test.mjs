@@ -37,9 +37,12 @@ test("shared lightbox renders the current image source in a proportional loading
   assert.match(content, /aria-modal="true"/);
   assert.match(
     content,
-    /const lightboxSrc = image \? resolveImageSrc\(image\.thumbnailUrl, image\.publicUrl\) : null;/
+    /const fallbackSrc = image \? resolveImageSrc\(image\.thumbnailUrl, image\.publicUrl\) : null;/
   );
   assert.match(content, /const \[isImageLoaded, setIsImageLoaded\] = useState\(false\);/);
+  assert.match(content, /apiFetch<\{ url: string; expiresAt: string \}>/);
+  assert.match(content, /`\/api\/images\/\$\{image\.id\}\/preview-url`/);
+  assert.match(content, /setLightboxSrc\(fullSizeSrc\);/);
   assert.match(content, /src=\{lightboxSrc\}/);
   assert.match(content, /onLoad=\{\(\) => setIsImageLoaded\(true\)\}/);
   assert.match(content, /object-contain/);

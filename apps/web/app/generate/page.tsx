@@ -678,8 +678,19 @@ function readFileAsDataUrl(file: File): Promise<string> {
 }
 
 function generationFailureMessage(task: Task): string {
-  const baseMessage = task.failureMessage ?? "生成未成功，请调整提示词或稍后重试。";
   const refundedCredits = task.refundedCredits ?? 0;
+  if (task.failureCode === "PROVIDER_AUTH_FAILED") {
+    const requestId = extractProviderRequestId(task.failureMessage);
+    const baseMessage = requestId
+      ? `图像供应商鉴权失败，当前配置的令牌或网关不可用，请检查 OPENAI_API_KEY 与 OPENAI_BASE_URL。上游 request id: ${requestId}。`
+      : "图像供应商鉴权失败，当前配置的令牌或网关不可用，请检查 OPENAI_API_KEY 与 OPENAI_BASE_URL。";
+    return appendRefundHint(baseMessage, refundedCredits);
+  }
+  const baseMessage = task.failureMessage ?? "生成未成功，请调整提示词或稍后重试。";
+  return appendRefundHint(baseMessage, refundedCredits);
+}
+
+function appendRefundHint(baseMessage: string, refundedCredits: number): string {
   if (refundedCredits > 0) {
     if (baseMessage.includes("自动返还")) {
       return `${baseMessage.replace(/。$/, "")}（${formatCredits(refundedCredits)}）。`;
@@ -687,6 +698,14 @@ function generationFailureMessage(task: Task): string {
     return `${baseMessage} 已自动返还 ${formatCredits(refundedCredits)}。`;
   }
   return `${baseMessage} 如已扣除积分，系统会自动补偿，请稍后刷新余额。`;
+}
+
+function extractProviderRequestId(message: string | null | undefined): string | null {
+  if (!message) {
+    return null;
+  }
+  const match = /request id:\s*([^)。\s]+)/i.exec(message);
+  return match?.[1] ?? null;
 }
 
 function generationWaitTimeoutMessage(task: Task | null): string {
@@ -710,6 +729,12 @@ function generationSuccessMessage(task: Task): string {
 function generationSubmitErrorMessage(error: unknown): string {
   if (error instanceof ApiRequestError && error.apiMessage?.includes("Credits were refunded")) {
     return "生成任务无法进入队列，本次扣除的积分已自动返还。";
+  }
+  if (error instanceof ApiRequestError && error.code === "PROVIDER_AUTH_FAILED") {
+    const requestId = extractProviderRequestId(error.apiMessage ?? error.message);
+    return requestId
+      ? `图像供应商鉴权失败，请检查 OPENAI_API_KEY 与 OPENAI_BASE_URL。上游 request id: ${requestId}。`
+      : "图像供应商鉴权失败，请检查 OPENAI_API_KEY 与 OPENAI_BASE_URL。";
   }
   return error instanceof Error ? error.message : "生成失败，请稍后重试。";
 }

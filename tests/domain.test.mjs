@@ -306,6 +306,9 @@ test("openai provider maps timeout, moderation, auth and empty result errors", a
       (error) => {
         assert.equal(error instanceof ProviderError, true);
         assert.equal(error.code, "PROVIDER_AUTH_FAILED");
+        assert.match(error.message, /OPENAI_API_KEY/);
+        assert.match(error.message, /OPENAI_BASE_URL/);
+        assert.match(error.message, /Bad key/);
         return true;
       }
     );

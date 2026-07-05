@@ -1,8 +1,8 @@
 "use client";
 
 import { Sparkles, X } from "lucide-react";
-import { useEffect, useState, type CSSProperties } from "react";
-import { resolveImageSrc, type GeneratedImage } from "../lib/api";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { apiFetch, resolveImageSrc, type GeneratedImage } from "../lib/api";
 
 export function GeneratedImagePreviewButton({
   image,
@@ -79,9 +79,11 @@ export function GeneratedImageLightbox({
   ariaLabel?: string;
   onClose: () => void;
 }) {
-  const lightboxSrc = image ? resolveImageSrc(image.thumbnailUrl, image.publicUrl) : null;
+  const fallbackSrc = image ? resolveImageSrc(image.thumbnailUrl, image.publicUrl) : null;
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(fallbackSrc);
   const [isImageLoaded, setIsImageLoaded] = useState(false);
   const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const lightboxImageRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     if (!image) {
@@ -105,9 +107,59 @@ export function GeneratedImageLightbox({
   }, [image, onClose]);
 
   useEffect(() => {
+    setLightboxSrc(fallbackSrc);
     setIsImageLoaded(false);
-    setImageLoadFailed(false);
+    setImageLoadFailed(!fallbackSrc);
+  }, [fallbackSrc, image?.id]);
+
+  useEffect(() => {
+    const currentImage = lightboxImageRef.current;
+    if (!currentImage || !lightboxSrc) {
+      return;
+    }
+    if (currentImage.complete && currentImage.naturalWidth > 0) {
+      setIsImageLoaded(true);
+      setImageLoadFailed(false);
+    }
   }, [lightboxSrc]);
+
+  useEffect(() => {
+    if (!image) {
+      return;
+    }
+
+    const imageId = image.id;
+    let cancelled = false;
+
+    async function loadFullSizePreview() {
+      try {
+        const result = await apiFetch<{ url: string; expiresAt: string }>(`/api/images/${imageId}/preview-url`, {
+          method: "POST",
+          body: {}
+        });
+        const fullSizeSrc = resolveImageSrc(result.url);
+        if (cancelled || !fullSizeSrc || fullSizeSrc === fallbackSrc) {
+          return;
+        }
+
+        await preloadImageSource(fullSizeSrc);
+
+        if (!cancelled) {
+          setLightboxSrc(fullSizeSrc);
+          setIsImageLoaded(true);
+          setImageLoadFailed(false);
+        }
+      } catch {
+        return;
+      }
+    }
+
+    void loadFullSizePreview();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fallbackSrc, image]);
 
   if (!image) {
     return null;
@@ -146,6 +198,7 @@ export function GeneratedImageLightbox({
               }`}
               decoding="async"
               height={image.height}
+              ref={lightboxImageRef}
               onError={() => setImageLoadFailed(true)}
               onLoad={() => setIsImageLoaded(true)}
               src={lightboxSrc}
@@ -215,4 +268,18 @@ function greatestCommonDivisor(left: number, right: number): number {
   }
 
   return a || 1;
+}
+
+function preloadImageSource(src: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.decoding = "async";
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error("Failed to preload image"));
+    image.src = src;
+
+    if (image.complete && image.naturalWidth > 0) {
+      resolve();
+    }
+  });
 }

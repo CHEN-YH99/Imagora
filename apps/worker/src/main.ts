@@ -488,7 +488,7 @@ async function createImage(
     storageKey: stored.key,
     thumbnailKey,
     thumbnailUrl,
-    publicUrl: "",
+    publicUrl: stored.publicUrl,
     width: task.width,
     height: task.height,
     fileSize: stored.fileSize,

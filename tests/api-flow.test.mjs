@@ -498,6 +498,11 @@ test("api and worker complete generation and enforce admin safety rules", async 
     assert.equal(completed.data.task.modelName, "mock:default");
     assert.equal(completed.data.images.length, 1);
     const generatedImageId = completed.data.images[0].id;
+    assert.equal(completed.data.images[0].publicUrl, "");
+
+    const previewUrl = await post(baseUrl, `/api/images/${generatedImageId}/preview-url`, {}, demoSession);
+    assert.match(previewUrl.data.url, /^data:image\/svg\+xml/);
+    assert.ok(previewUrl.data.expiresAt);
 
     const downloadUrl = await post(baseUrl, `/api/images/${generatedImageId}/download-url`, {}, demoSession);
     assert.match(downloadUrl.data.url, /^mock-signed:\/\//);
@@ -514,6 +519,17 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const foreignDownloadPayload = await foreignDownload.json();
     assert.equal(foreignDownload.status, 404);
     assert.equal(foreignDownloadPayload.error.code, "NOT_FOUND");
+    const foreignPreview = await fetch(`${baseUrl}/api/images/${generatedImageId}/preview-url`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: otherUserSession
+      },
+      body: JSON.stringify({})
+    });
+    const foreignPreviewPayload = await foreignPreview.json();
+    assert.equal(foreignPreview.status, 404);
+    assert.equal(foreignPreviewPayload.error.code, "NOT_FOUND");
     const foreignFavoriteRemoval = await fetch(`${baseUrl}/api/images/${generatedImageId}/favorite`, {
       method: "DELETE",
       headers: {
@@ -1267,6 +1283,10 @@ test("api and worker complete generation with openai provider flow", async () =>
     const download = await post(baseUrl, `/api/images/${completed.data.images[0].id}/download-url`, {}, demoSession);
     assert.match(download.data.url, /^mock-signed:\/\//);
     assert.match(download.data.fileName, /\.png$/);
+
+    const preview = await post(baseUrl, `/api/images/${completed.data.images[0].id}/preview-url`, {}, demoSession);
+    assert.match(preview.data.url, /^data:image\/png;base64,/);
+    assert.notEqual(preview.data.url, completed.data.images[0].thumbnailUrl);
   } finally {
     api.kill();
     worker.kill();
