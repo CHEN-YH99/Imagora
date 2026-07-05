@@ -1,7 +1,7 @@
 "use client";
 
 import { Sparkles, X } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { resolveImageSrc, type GeneratedImage } from "../lib/api";
 
 export function GeneratedImagePreviewButton({
@@ -79,10 +79,12 @@ export function GeneratedImageLightbox({
   ariaLabel?: string;
   onClose: () => void;
 }) {
-  const lightboxSrc = image ? resolveImageSrc(image.publicUrl, image.thumbnailUrl) : null;
+  const lightboxSrc = image ? resolveImageSrc(image.thumbnailUrl, image.publicUrl) : null;
+  const [isImageLoaded, setIsImageLoaded] = useState(false);
+  const [imageLoadFailed, setImageLoadFailed] = useState(false);
 
   useEffect(() => {
-    if (!lightboxSrc) {
+    if (!image) {
       return;
     }
 
@@ -100,9 +102,14 @@ export function GeneratedImageLightbox({
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [lightboxSrc, onClose]);
+  }, [image, onClose]);
 
-  if (!image || !lightboxSrc) {
+  useEffect(() => {
+    setIsImageLoaded(false);
+    setImageLoadFailed(false);
+  }, [lightboxSrc]);
+
+  if (!image) {
     return null;
   }
 
@@ -126,15 +133,39 @@ export function GeneratedImageLightbox({
         className="relative flex max-h-[88vh] max-w-[min(96vw,1200px)] flex-col items-center"
         onClick={(event) => event.stopPropagation()}
       >
-        <img
-          alt={alt}
-          className="max-h-[82vh] max-w-full rounded-2xl border border-white/16 bg-black/30 object-contain shadow-glow"
-          decoding="async"
-          height={image.height}
-          src={lightboxSrc}
-          style={{ aspectRatio: `${image.width} / ${image.height}` }}
-          width={image.width}
-        />
+        <div
+          className="relative flex max-h-[82vh] max-w-[96vw] items-center justify-center overflow-hidden rounded-2xl border border-white/16 bg-black/30 shadow-glow"
+          style={lightboxFrameStyle(image.width, image.height)}
+        >
+          {lightboxSrc && !imageLoadFailed ? (
+            <img
+              key={lightboxSrc}
+              alt={alt}
+              className={`h-full w-full object-contain transition-opacity duration-200 ${
+                isImageLoaded ? "opacity-100" : "opacity-0"
+              }`}
+              decoding="async"
+              height={image.height}
+              onError={() => setImageLoadFailed(true)}
+              onLoad={() => setIsImageLoaded(true)}
+              src={lightboxSrc}
+              width={image.width}
+            />
+          ) : (
+            <span
+              aria-label={alt}
+              className="flex h-full min-h-48 w-full items-center justify-center px-6 text-center text-sm text-white/45"
+              role="img"
+            >
+              预览暂不可用
+            </span>
+          )}
+          {lightboxSrc && !isImageLoaded && !imageLoadFailed ? (
+            <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-ink/50 text-sm text-white/58">
+              图片加载中...
+            </span>
+          ) : null}
+        </div>
         <figcaption className="mt-3 flex flex-wrap items-center justify-center gap-2 text-xs text-white/58">
           <span className="rounded-full border border-white/12 bg-white/7 px-3 py-1 backdrop-blur-sm">
             {image.width} × {image.height}
@@ -146,6 +177,22 @@ export function GeneratedImageLightbox({
       </figure>
     </div>
   );
+}
+
+function lightboxFrameStyle(width: number, height: number): CSSProperties {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return {
+      aspectRatio: "1 / 1",
+      width: "min(96vw, 82vh, 1200px)"
+    };
+  }
+
+  const roundedWidth = Math.max(1, Math.round(width));
+  const roundedHeight = Math.max(1, Math.round(height));
+  return {
+    aspectRatio: `${roundedWidth} / ${roundedHeight}`,
+    width: `min(96vw, 1200px, calc(82vh * ${roundedWidth} / ${roundedHeight}))`
+  };
 }
 
 export function formatImageAspectRatio(width: number, height: number): string {

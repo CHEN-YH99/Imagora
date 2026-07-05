@@ -270,6 +270,10 @@ test("历史页图片支持 hover 预览大图并显示实际比例", async ({ p
   await previewButton.click();
   const dialog = page.getByRole("dialog", { name: "生成图片大图预览" });
   await expect(dialog).toBeVisible();
+  const dialogImage = dialog.getByRole("img", { name: "生成图片大图预览" });
+  await expect(dialogImage).toBeVisible();
+  await expect.poll(() => dialogImage.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  await expect(dialogImage).toHaveCSS("object-fit", "contain");
   await expect(dialog.getByText("1024 × 1024")).toBeVisible();
   await expect(dialog.getByText("比例 1:1")).toBeVisible();
   await expect(page.getByRole("link", { name: "详情" })).toBeVisible();
@@ -729,7 +733,7 @@ function createMockState(): MockState {
         taskId: "task-history",
         userId: creatorUser.id,
         thumbnailUrl: imageUrl,
-        publicUrl: imageUrl,
+        publicUrl: "",
         width: 1024,
         height: 1024,
         visibility: "PRIVATE",

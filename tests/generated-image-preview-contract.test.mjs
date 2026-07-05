@@ -30,17 +30,20 @@ test("shared preview button guards empty image sources with hover CTA and ratio 
   assert.match(content, /style=\{\{ aspectRatio: `\$\{image\.width\} \/ \$\{image\.height\}` \}\}/);
 });
 
-test("shared lightbox falls back from publicUrl and renders proportional dialog metadata", async () => {
+test("shared lightbox renders the current image source in a proportional loading frame", async () => {
   const content = await readFile(sharedPreviewFile, "utf8");
 
   assert.match(content, /role="dialog"/);
   assert.match(content, /aria-modal="true"/);
   assert.match(
     content,
-    /const lightboxSrc = image \? resolveImageSrc\(image\.publicUrl, image\.thumbnailUrl\) : null;/
+    /const lightboxSrc = image \? resolveImageSrc\(image\.thumbnailUrl, image\.publicUrl\) : null;/
   );
+  assert.match(content, /const \[isImageLoaded, setIsImageLoaded\] = useState\(false\);/);
   assert.match(content, /src=\{lightboxSrc\}/);
+  assert.match(content, /onLoad=\{\(\) => setIsImageLoaded\(true\)\}/);
   assert.match(content, /object-contain/);
+  assert.match(content, /style=\{lightboxFrameStyle\(image\.width, image\.height\)\}/);
   assert.match(content, /\{image\.width\} × \{image\.height\}/);
   assert.match(content, /比例 \{formatImageAspectRatio\(image\.width, image\.height\)\}/);
 });
