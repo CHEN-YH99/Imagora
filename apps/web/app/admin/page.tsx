@@ -912,7 +912,7 @@ export default function AdminPage() {
         <Metric label="任务数" value={metrics?.tasks ?? 0} />
         <Metric label="图片数" value={metrics?.images ?? 0} />
         <Metric label="已支付订单" value={metrics?.paidOrders ?? 0} />
-        <Metric label="收入" value={formatMoney(metrics?.paidRevenueCents ?? 0, "USD")} />
+        <Metric label="收入" value={formatMoney(metrics?.paidRevenueCents ?? 0, "CNY")} />
         <Metric label="安全拦截" value={metrics?.blockedSafetyEvents ?? 0} />
         <Metric label="待复核" value={metrics?.reviewRequiredSafetyEvents ?? 0} />
       </div>
@@ -959,8 +959,8 @@ export default function AdminPage() {
         <Metric label="在途积分" value={operationalMetrics?.domain.creditsOutstanding ?? 0} />
         <Metric label="7天内到期积分" value={operationalMetrics?.domain.creditsExpiringSoon ?? 0} />
         <Metric label="累计已过期积分" value={operationalMetrics?.domain.creditsExpiredTotal ?? 0} />
-        <Metric label="AI成本" value={formatMoney(operationalMetrics?.domain.aiCostCents ?? 0, "USD")} />
-        <Metric label="毛利" value={formatMoney(operationalMetrics?.domain.grossProfitCents ?? 0, "USD")} />
+        <Metric label="AI成本" value={formatMoney(operationalMetrics?.domain.aiCostCents ?? 0, "CNY")} />
+        <Metric label="毛利" value={formatMoney(operationalMetrics?.domain.grossProfitCents ?? 0, "CNY")} />
       </div>
 
       <Panel className="mt-5">

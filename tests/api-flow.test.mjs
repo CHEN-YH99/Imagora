@@ -875,7 +875,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
         name: "QA Pack",
         description: "Automated admin plan",
         priceCents: 1234,
-        currency: "USD",
+        currency: "CNY",
         credits: 345,
         validDays: 45,
         status: "ACTIVE",

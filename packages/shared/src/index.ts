@@ -104,7 +104,7 @@ export interface GenerationTask {
   modelName: string;
   status: TaskStatus;
   creditCost: number;
-  // 供应商侧真实美元成本（分），任务成功后由 worker 落库，用于毛利核算
+  // 供应商侧真实成本（分），任务成功后由 worker 落库，用于毛利核算
   providerCostCents: number;
   failureCode: string | null;
   failureMessage: string | null;

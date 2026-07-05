@@ -93,6 +93,7 @@ function GenerateExperience() {
   const [quantity, setQuantity] = useState(
     initialTaskSnapshot?.task.quantity ?? resolveInitialQuantity(searchParams.get("quantity"))
   );
+  const [quantityInput, setQuantityInput] = useState(String(quantity));
   const [quality, setQuality] = useState(
     initialTaskSnapshot?.task.quality ?? resolveInitialQuality(searchParams.get("quality"))
   );
@@ -161,7 +162,7 @@ function GenerateExperience() {
     if (q && qualityOptions.some((o) => o.value === q)) setQuality(q);
     if (qty) {
       const n = Number(qty);
-      if (Number.isInteger(n) && n >= 1 && n <= 4) setQuantity(n);
+      if (Number.isInteger(n) && n >= 1 && n <= 4) setClampedQuantity(n);
     }
     if (m) {
       setModel(resolveSelectableImageModel(m));
@@ -328,9 +329,28 @@ function GenerateExperience() {
     setPrompt(nextTask.prompt);
     setNegativePrompt(nextTask.negativePrompt ?? "");
     setAspectRatio(nextTask.aspectRatio);
-    setQuantity(nextTask.quantity);
+    setClampedQuantity(nextTask.quantity);
     setQuality(nextTask.quality);
     setModel(resolveSelectableImageModel(nextTask.modelName));
+  }
+
+  function setClampedQuantity(nextValue: number) {
+    const nextQuantity = Math.max(1, Math.min(4, Math.trunc(nextValue)));
+    setQuantity(nextQuantity);
+    setQuantityInput(String(nextQuantity));
+  }
+
+  function setQuantityFromInput(rawValue: string) {
+    const trimmedValue = rawValue.trim();
+    if (!trimmedValue) {
+      setQuantityInput("");
+      return;
+    }
+    const nextValue = Number(trimmedValue);
+    if (!Number.isFinite(nextValue)) {
+      return;
+    }
+    setClampedQuantity(nextValue);
   }
 
   function validateForm(): string | null {
@@ -551,19 +571,10 @@ function GenerateExperience() {
                       type="number"
                       min={1}
                       max={4}
-                      value={quantity}
-                      onChange={(event) => {
-                        const rawValue = event.target.value.trim();
-                        if (!rawValue) {
-                          setQuantity(1);
-                          return;
-                        }
-                        const nextValue = Number(rawValue);
-                        if (!Number.isFinite(nextValue)) {
-                          return;
-                        }
-                        setQuantity(Math.max(1, Math.min(4, Math.trunc(nextValue))));
-                      }}
+                      value={quantityInput}
+                      onFocus={(event) => event.target.select()}
+                      onChange={(event) => setQuantityFromInput(event.target.value)}
+                      onBlur={() => setQuantityInput(String(quantity))}
                     />
                   </label>
                 </div>

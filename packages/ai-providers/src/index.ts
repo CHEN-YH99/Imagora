@@ -120,7 +120,7 @@ interface ProviderModelConfig {
   qualityMultiplier: Record<Quality, number>;
   sizeMultiplier: Record<OpenAiImageSize, number>;
   quantityMultiplier: number;
-  // 供应商侧每张图的真实美元成本（分），用于毛利核算；mock 为 0
+  // 供应商侧每张图的真实成本（分），用于毛利核算；mock 为 0
   costCentsPerImage: number;
 }
 

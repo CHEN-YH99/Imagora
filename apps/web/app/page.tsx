@@ -169,7 +169,7 @@ const promptExamples = [
 const pricingPlans = [
   {
     name: "入门版",
-    price: "9 美元",
+    price: "9 元",
     credits: "220 积分",
     note: "适合灵感探索",
     highlight: false,
@@ -177,7 +177,7 @@ const pricingPlans = [
   },
   {
     name: "创作者版",
-    price: "19 美元",
+    price: "19 元",
     credits: "620 积分",
     note: "多数创作者的起点",
     highlight: true,
@@ -185,7 +185,7 @@ const pricingPlans = [
   },
   {
     name: "团队版",
-    price: "49 美元",
+    price: "49 元",
     credits: "1,850 积分",
     note: "适合小团队和电商运营",
     highlight: false,
