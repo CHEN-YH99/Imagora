@@ -218,11 +218,46 @@ export function Panel({ children, className = "" }: { children: React.ReactNode;
   );
 }
 
-export function StatusPill({ children }: { children: React.ReactNode }) {
-  const label = typeof children === "string" ? formatStatusLabel(children) : children;
+export function StatusPill({
+  children,
+  className = ""
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  const rawValue = typeof children === "string" ? children : null;
+  const label = rawValue ? formatStatusLabel(rawValue) : children;
   return (
-    <span className="rounded-full border border-white/10 bg-white/8 px-3 py-1 text-xs text-white/68">{label}</span>
+    <span
+      className={`inline-flex min-h-8 shrink-0 items-center justify-center whitespace-nowrap rounded-full border px-3.5 py-1 text-center text-xs font-medium leading-none ${statusPillToneClass(rawValue)} ${className}`}
+    >
+      {label}
+    </span>
   );
+}
+
+function statusPillToneClass(value: string | null): string {
+  if (!value) {
+    return "border-white/10 bg-white/8 text-white/68";
+  }
+
+  if (["SUCCEEDED", "PAID", "ACTIVE", "APPROVED", "PASSED", "PUBLIC", "RESOLVED", "SENT"].includes(value)) {
+    return "border-mint/35 bg-mint/10 text-mint";
+  }
+
+  if (["RUNNING", "ACKNOWLEDGED", "REFUNDED", "PRIVATE", "IDLE", "info"].includes(value)) {
+    return "border-cyanx/35 bg-cyanx/10 text-cyanx";
+  }
+
+  if (["PENDING", "OPEN", "REVIEW_REQUIRED", "warning"].includes(value)) {
+    return "border-volt/35 bg-volt/10 text-volt";
+  }
+
+  if (["FAILED", "BLOCKED", "CANCELED", "CLOSED", "SUSPENDED", "DELETED", "REJECTED", "HIDDEN", "critical"].includes(value)) {
+    return "border-ember/35 bg-ember/10 text-ember";
+  }
+
+  return "border-white/10 bg-white/8 text-white/68";
 }
 
 export function InlineNotice({

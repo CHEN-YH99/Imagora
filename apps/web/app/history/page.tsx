@@ -157,9 +157,9 @@ export default function HistoryPage() {
                 type="button"
                 onClick={() => setSelectedTaskId(task.id)}
               >
-                <div className="flex items-start justify-between gap-3">
-                  <p className="line-clamp-2 text-sm leading-6 text-white/74">{task.prompt}</p>
-                  <StatusPill>{task.status}</StatusPill>
+                <div className="flex items-start justify-between gap-4">
+                  <p className="min-w-0 flex-1 line-clamp-2 text-sm leading-6 text-white/74">{task.prompt}</p>
+                  <StatusPill className="min-w-[4.75rem]">{task.status}</StatusPill>
                 </div>
                 <p className="mt-3 text-xs text-white/46">
                   {formatStyleLabel(task.style)} · {task.aspectRatio} · {task.quantity} 张 ·{" "}
@@ -184,7 +184,7 @@ export default function HistoryPage() {
               <h2 className="text-xl font-semibold">任务详情</h2>
               <p className="mt-1 text-sm text-white/50">{selectedTask?.id ?? "未选择任务"}</p>
             </div>
-            {selectedTask ? <StatusPill>{selectedTask.status}</StatusPill> : null}
+            {selectedTask ? <StatusPill className="min-w-[4.75rem]">{selectedTask.status}</StatusPill> : null}
           </div>
 
           {selectedTask ? (
