@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
@@ -25,7 +26,13 @@ import {
   X,
   Zap
 } from "lucide-react";
-import { apiBaseUrl, DEFAULT_IMAGE_MODEL_ID, formatCredits, IMAGE_MODEL_OPTIONS } from "../lib/api";
+import {
+  DEFAULT_IMAGE_MODEL_ID,
+  formatCredits,
+  getCurrentUser,
+  IMAGE_MODEL_OPTIONS,
+  peekCurrentUser
+} from "../lib/api";
 
 type StyleOption = {
   id: string;
@@ -38,6 +45,7 @@ type StyleOption = {
 };
 
 type Quality = "1k" | "2k" | "4k";
+type PromptLoopPhase = "typing" | "holding" | "deleting";
 
 const aspectRatioOptions = [
   { value: "1:1", label: "1:1  方形" },
@@ -185,6 +193,11 @@ const pricingPlans = [
 ];
 
 const qualityMultiplier: Record<Quality, number> = { "1k": 0.7, "2k": 1, "4k": 1.65 };
+const qualityToGenerateValue: Record<Quality, "draft" | "standard" | "high"> = {
+  "1k": "draft",
+  "2k": "standard",
+  "4k": "high"
+};
 
 const stageClasses = [
   "stage-cinematic",
@@ -195,9 +208,6 @@ const stageClasses = [
   "stage-isometric"
 ];
 
-// demo 展示用的静态色块，每个对应一种风格
-const demoArtClasses = ["art-cinematic", "art-product", "art-anime", "art-poster", "art-architecture", "art-isometric"];
-
 export default function HomePage() {
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -206,37 +216,148 @@ export default function HomePage() {
   const [aspectRatio, setAspectRatio] = useState("1:1");
   const [quality, setQuality] = useState<Quality>("2k");
   const [quantity, setQuantity] = useState(2);
-  const [prompt, setPrompt] = useState(promptExamples[0] ?? "");
-  const [demoProgress, setDemoProgress] = useState(0);
-  const [demoPhase, setDemoPhase] = useState<"idle" | "running" | "done">("idle");
+  const [prompt, setPrompt] = useState("");
+  const [promptMode, setPromptMode] = useState<"auto" | "manual">("auto");
+  const [promptLoopIndex, setPromptLoopIndex] = useState(0);
+  const [promptLoopLength, setPromptLoopLength] = useState(0);
+  const [promptLoopPhase, setPromptLoopPhase] = useState<PromptLoopPhase>("typing");
+  const [authCheckState, setAuthCheckState] = useState<"idle" | "checking">("idle");
+  const [entryNotice, setEntryNotice] = useState<{ tone: "info" | "danger"; text: string } | null>(null);
 
-  // 检测真实登录状态，不依赖 demo 账号
   useEffect(() => {
-    fetch(`${apiBaseUrl}/api/auth/me`, { credentials: "include" })
-      .then((r) => {
-        if (r.ok) setIsLoggedIn(true);
+    const cachedUser = peekCurrentUser();
+    if (cachedUser !== undefined) {
+      setIsLoggedIn(Boolean(cachedUser));
+    }
+
+    getCurrentUser()
+      .then((user) => {
+        setIsLoggedIn(Boolean(user));
       })
-      .catch(() => {});
+      .catch(() => {
+        if (cachedUser === undefined) {
+          setIsLoggedIn(false);
+        }
+      });
   }, []);
 
   const creditCost = useMemo(() => Math.ceil(8 * qualityMultiplier[quality] * quantity), [quality, quantity]);
+  const activePromptTemplate = promptExamples[promptLoopIndex] ?? promptExamples[0] ?? "";
+  const promptValue =
+    promptMode === "auto" ? activePromptTemplate.slice(0, Math.max(promptLoopLength, 0)) : prompt;
+  const effectivePrompt = (promptMode === "auto" ? activePromptTemplate : prompt).trim();
+  const generatePath = useMemo(() => {
+    const params = new URLSearchParams({
+      prompt: effectivePrompt,
+      aspectRatio,
+      quality: qualityToGenerateValue[quality],
+      quantity: String(quantity),
+      model: selectedModel
+    });
+    return `/generate?${params.toString()}`;
+  }, [aspectRatio, effectivePrompt, quality, quantity, selectedModel]);
+  const actionHint =
+    authCheckState === "checking"
+      ? "正在检查登录状态，马上带你进入对应页面。"
+      : isLoggedIn
+        ? "已登录，点击后会直接进入生成工作台，并保留当前提示词和参数。"
+        : "未登录会先跳转到登录页，登录成功后会自动带回当前预设。";
+  const promptHint =
+    promptMode === "auto"
+      ? "示例提示词正在自动演示，点一下输入框就能接管编辑。"
+      : "当前为手动编辑内容，点击右侧按钮可恢复自动演示。";
+  const actionHintToneClass =
+    authCheckState === "checking"
+      ? "border-cyanx/30 bg-cyanx/10 text-cyanx"
+      : isLoggedIn
+        ? "border-mint/30 bg-mint/10 text-mint"
+        : "border-white/12 bg-black/28 text-white/72";
 
-  async function handleGenerate() {
-    if (!prompt.trim() || demoPhase === "running") return;
-    // 模拟进度动画，完成后跳转注册页并携带提示词
-    setDemoPhase("running");
-    setDemoProgress(0);
-    for (const step of [12, 28, 47, 63, 81, 100]) {
-      await sleep(350);
-      setDemoProgress(step);
+  useEffect(() => {
+    if (promptMode !== "auto" || !activePromptTemplate) {
+      return;
     }
-    setDemoPhase("done");
-    await sleep(500);
-    router.push(`/register?from=demo&prompt=${encodeURIComponent(prompt)}`);
+
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    if (promptLoopPhase === "typing") {
+      if (promptLoopLength < activePromptTemplate.length) {
+        timeoutId = setTimeout(() => {
+          setPromptLoopLength((current) => current + 1);
+        }, 42);
+      } else {
+        timeoutId = setTimeout(() => {
+          setPromptLoopPhase("holding");
+        }, 1400);
+      }
+    } else if (promptLoopPhase === "holding") {
+      timeoutId = setTimeout(() => {
+        setPromptLoopPhase("deleting");
+      }, 120);
+    } else if (promptLoopLength > 0) {
+      timeoutId = setTimeout(() => {
+        setPromptLoopLength((current) => Math.max(0, current - 1));
+      }, 22);
+    } else {
+      timeoutId = setTimeout(() => {
+        setPromptLoopIndex((current) => (current + 1) % promptExamples.length);
+        setPromptLoopPhase("typing");
+      }, 240);
+    }
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [activePromptTemplate, promptLoopLength, promptLoopPhase, promptMode]);
+
+  function switchToManualPrompt(nextPrompt?: string) {
+    setPromptMode("manual");
+    setPrompt(nextPrompt ?? activePromptTemplate);
+    setPromptLoopPhase("typing");
+    setPromptLoopLength(0);
+    setEntryNotice(null);
   }
 
-  const isRunning = demoPhase === "running";
-  const isDone = demoPhase === "done";
+  function resumePromptLoop() {
+    setPromptMode("auto");
+    setPrompt("");
+    setPromptLoopLength(0);
+    setPromptLoopPhase("typing");
+    setEntryNotice(null);
+  }
+
+  function applyPromptPreset(nextPrompt: string) {
+    switchToManualPrompt(nextPrompt);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function handleGenerate() {
+    if (!effectivePrompt || authCheckState === "checking") {
+      return;
+    }
+
+    setEntryNotice(null);
+    const cachedUser = peekCurrentUser();
+    if (cachedUser !== undefined) {
+      setIsLoggedIn(Boolean(cachedUser));
+      router.push(cachedUser ? generatePath : `/login?next=${encodeURIComponent(generatePath)}`);
+      return;
+    }
+
+    setAuthCheckState("checking");
+    try {
+      const user = await getCurrentUser();
+      setIsLoggedIn(Boolean(user));
+      router.push(user ? generatePath : `/login?next=${encodeURIComponent(generatePath)}`);
+    } catch (error) {
+      setEntryNotice({
+        tone: "danger",
+        text: error instanceof Error ? error.message : "登录状态检查失败，请刷新页面后重试。"
+      });
+    } finally {
+      setAuthCheckState("idle");
+    }
+  }
 
   return (
     <main className="min-h-screen bg-ink text-white">
@@ -269,29 +390,29 @@ export default function HomePage() {
 
           <div className="hidden items-center gap-2 md:flex">
             {isLoggedIn ? (
-              <a
+              <Link
                 className="focus-ring inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-mint"
                 href="/generate"
               >
                 <Sparkles className="size-4" aria-hidden="true" />
                 进入工作台
-              </a>
+              </Link>
             ) : (
               <>
-                <a
+                <Link
                   className="focus-ring inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm text-white/78 transition-colors duration-200 hover:bg-white/10 hover:text-white"
                   href="/login"
                 >
                   <LogIn className="size-4" aria-hidden="true" />
                   登录
-                </a>
-                <a
+                </Link>
+                <Link
                   className="focus-ring inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-mint"
                   href="/register"
                 >
                   <UserPlus className="size-4" aria-hidden="true" />
                   注册
-                </a>
+                </Link>
               </>
             )}
           </div>
@@ -325,29 +446,29 @@ export default function HomePage() {
             ))}
             <div className="mt-2 border-t border-white/10 pt-2">
               {isLoggedIn ? (
-                <a
+                <Link
                   href="/generate"
                   className="focus-ring flex rounded-2xl px-4 py-3 font-semibold text-mint transition-colors duration-200 hover:bg-white/10"
                   onClick={() => setMenuOpen(false)}
                 >
                   进入工作台
-                </a>
+                </Link>
               ) : (
                 <>
-                  <a
+                  <Link
                     href="/login"
                     className="focus-ring flex rounded-2xl px-4 py-3 text-white/76 transition-colors duration-200 hover:bg-white/10 hover:text-white"
                     onClick={() => setMenuOpen(false)}
                   >
                     登录
-                  </a>
-                  <a
+                  </Link>
+                  <Link
                     href="/register"
                     className="focus-ring flex rounded-2xl px-4 py-3 font-semibold text-mint transition-colors duration-200 hover:bg-white/10"
                     onClick={() => setMenuOpen(false)}
                   >
                     免费注册
-                  </a>
+                  </Link>
                 </>
               )}
             </div>
@@ -378,22 +499,22 @@ export default function HomePage() {
           {/* Hero CTA */}
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
             {isLoggedIn ? (
-              <a
+              <Link
                 href="/generate"
                 className="focus-ring inline-flex items-center gap-2 rounded-full bg-mint px-6 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt"
               >
                 <Sparkles className="size-4" aria-hidden="true" />
                 进入工作台
-              </a>
+              </Link>
             ) : (
               <>
-                <a
+                <Link
                   href="/register"
                   className="focus-ring inline-flex items-center gap-2 rounded-full bg-mint px-6 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt"
                 >
                   <UserPlus className="size-4" aria-hidden="true" />
                   免费注册
-                </a>
+                </Link>
                 <a
                   href="#generator"
                   className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/14 px-6 py-3 font-semibold text-white transition-colors duration-200 hover:bg-white/10"
@@ -411,15 +532,54 @@ export default function HomePage() {
               提示词
             </label>
             <div className="flex flex-col gap-3 md:flex-row">
-              <textarea
-                id="prompt"
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                disabled={isRunning || isDone}
-                className="focus-ring min-h-28 flex-1 resize-none rounded-[1.35rem] border border-white/12 bg-black/34 px-5 py-4 text-base leading-7 text-white placeholder:text-white/40 disabled:opacity-60"
-                maxLength={420}
-                placeholder="描述你想生成的图片内容、主体、风格、光线和用途..."
-              />
+              <div className="flex flex-1 flex-col gap-2">
+                <textarea
+                  id="prompt"
+                  value={promptValue}
+                  onFocus={() => {
+                    if (promptMode === "auto") {
+                      switchToManualPrompt();
+                    }
+                  }}
+                  onChange={(e) => {
+                    if (promptMode === "auto") {
+                      setPromptMode("manual");
+                    }
+                    setPrompt(e.target.value);
+                    setEntryNotice(null);
+                  }}
+                  className="focus-ring min-h-28 resize-none rounded-[1.35rem] border border-white/12 bg-black/34 px-5 py-4 text-base leading-7 text-white placeholder:text-white/40"
+                  maxLength={420}
+                  placeholder="描述你想生成的图片内容、主体、风格、光线和用途..."
+                  spellCheck={false}
+                />
+                <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                  <div className="inline-flex items-center gap-2 text-xs text-white/48">
+                    <span
+                      className={`h-2.5 w-2.5 rounded-full ${
+                        promptMode === "auto" ? "bg-cyanx shadow-[0_0_0_4px_rgba(37,216,255,0.12)]" : "bg-mint shadow-[0_0_0_4px_rgba(88,240,182,0.12)]"
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <span>{promptHint}</span>
+                  </div>
+                  {promptMode === "manual" ? (
+                    <button
+                      type="button"
+                      onClick={resumePromptLoop}
+                      className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/12 px-3 py-1.5 text-xs text-white/68 transition-colors duration-200 hover:bg-white/10 hover:text-white"
+                    >
+                      <RefreshCw className="size-3.5" aria-hidden="true" />
+                      恢复示例演示
+                    </button>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-xs text-white/40">
+                      <span className="inline-block h-4 w-px bg-white/14" aria-hidden="true" />
+                      <span className="motion-safe:animate-pulse">输入光标</span>
+                    </span>
+                  )}
+                </div>
+              </div>
               <div className="flex min-w-0 flex-col justify-between rounded-[1.35rem] border border-white/12 bg-white/8 p-4 md:w-64">
                 <div className="flex flex-col gap-2 text-sm">
                   <select
@@ -427,7 +587,6 @@ export default function HomePage() {
                     value={selectedModel}
                     onChange={(e) => setSelectedModel(e.target.value)}
                     aria-label="选择模型"
-                    disabled={isRunning || isDone}
                   >
                     {IMAGE_MODEL_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>
@@ -440,7 +599,6 @@ export default function HomePage() {
                     value={aspectRatio}
                     onChange={(e) => setAspectRatio(e.target.value)}
                     aria-label="选择比例"
-                    disabled={isRunning || isDone}
                   >
                     {aspectRatioOptions.map((o) => (
                       <option key={o.value} value={o.value}>
@@ -455,7 +613,6 @@ export default function HomePage() {
                         className="focus-ring rounded-full px-2 text-white/70 hover:bg-white/10 hover:text-white"
                         type="button"
                         aria-label="减少生成数量"
-                        disabled={isRunning || isDone}
                         onClick={() => setQuantity((v) => Math.max(1, v - 1))}
                       >
                         -
@@ -465,7 +622,6 @@ export default function HomePage() {
                         className="focus-ring rounded-full px-2 text-white/70 hover:bg-white/10 hover:text-white"
                         type="button"
                         aria-label="增加生成数量"
-                        disabled={isRunning || isDone}
                         onClick={() => setQuantity((v) => Math.min(4, v + 1))}
                       >
                         +
@@ -475,12 +631,12 @@ export default function HomePage() {
                 </div>
                 <button
                   type="button"
-                  disabled={isRunning || isDone || !prompt.trim()}
+                  disabled={authCheckState === "checking" || !effectivePrompt}
                   onClick={() => void handleGenerate()}
                   className="focus-ring mt-4 inline-flex items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Wand2 className="size-4" aria-hidden="true" />
-                  {isRunning ? "生成中..." : isDone ? "跳转中..." : "生成预览"}
+                  {authCheckState === "checking" ? "正在检查登录..." : "生成预览"}
                 </button>
               </div>
             </div>
@@ -493,51 +649,55 @@ export default function HomePage() {
                     key={item}
                     type="button"
                     aria-pressed={quality === item}
-                    disabled={isRunning || isDone}
                     onClick={() => setQuality(item)}
-                    className={`focus-ring rounded-full border px-4 py-2 text-sm transition-colors duration-200 disabled:opacity-50 ${quality === item ? "border-mint bg-mint text-ink" : "border-white/14 bg-white/8 text-white/72 hover:bg-white/14 hover:text-white"}`}
+                    className={`focus-ring rounded-full border px-4 py-2 text-sm transition-colors duration-200 ${quality === item ? "border-mint bg-mint text-ink" : "border-white/14 bg-white/8 text-white/72 hover:bg-white/14 hover:text-white"}`}
                   >
                     {item.toUpperCase()}
                   </button>
                 ))}
               </div>
-              <div className="flex items-center gap-3 rounded-full border border-white/12 bg-black/28 px-4 py-2 text-sm text-white/78">
+              <div className={`flex items-center gap-3 rounded-full border px-4 py-2 text-sm ${actionHintToneClass}`}>
                 <span className="inline-flex items-center gap-2">
                   <Coins className="size-4 text-volt" aria-hidden="true" />
                   {formatCredits(creditCost)}
                 </span>
                 <span className="h-4 w-px bg-white/18" aria-hidden="true" />
-                <span className="text-white/50">注册后使用</span>
+                <span>{authCheckState === "checking" ? "检查中" : isLoggedIn ? "已登录直达" : "登录后保留预设"}</span>
               </div>
             </div>
 
-            {/* 状态区：进度条 / demo 图 / 跳转提示 */}
+            {/* 状态区：登录分流与当前提示 */}
             <div className="mt-3 rounded-[1.25rem] border border-white/12 bg-black/24 p-4">
-              {isRunning ? (
+              <div className="grid gap-3 md:grid-cols-[1.15fr_0.85fr] md:items-start">
                 <div>
-                  <p className="mb-3 text-sm text-white/70">正在生成预览图，完成后引导注册...</p>
-                  <div className="h-2 overflow-hidden rounded-full bg-white/10">
-                    <div
-                      className="h-full rounded-full bg-mint transition-all duration-300"
-                      style={{ width: `${demoProgress}%` }}
-                    />
-                  </div>
-                  <p className="mt-2 text-right text-xs text-white/40">{demoProgress}%</p>
+                  <p className="text-sm font-medium text-white">进入路径</p>
+                  <p className="mt-2 text-sm leading-6 text-white/70">{actionHint}</p>
+                  <p className="mt-2 text-xs leading-5 text-white/48">
+                    当前会带入 {aspectRatio} 比例、{quantity} 张、{quality.toUpperCase()} 画质和已选模型，省得你进去再点一轮。
+                  </p>
                 </div>
-              ) : isDone ? (
-                <div>
-                  <p className="mb-3 text-sm text-white/70">预览已生成，正在跳转注册页面...</p>
-                  <div className="grid grid-cols-3 gap-2">
-                    {demoArtClasses.slice(0, quantity > 3 ? 4 : quantity > 2 ? 3 : quantity).map((cls) => (
-                      <div key={cls} className={`gallery-art ${cls} rounded-xl`} aria-hidden="true" />
-                    ))}
+                <div className="rounded-[1.05rem] border border-white/10 bg-white/6 p-3">
+                  <p className="text-sm font-medium text-white">当前预设</p>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-white/62">
+                    <span className="rounded-xl bg-black/28 px-3 py-2">比例 {aspectRatio}</span>
+                    <span className="rounded-xl bg-black/28 px-3 py-2">数量 {quantity} 张</span>
+                    <span className="rounded-xl bg-black/28 px-3 py-2">画质 {quality.toUpperCase()}</span>
+                    <span className="rounded-xl bg-black/28 px-3 py-2">模型已同步</span>
                   </div>
                 </div>
-              ) : (
-                <p className="text-sm text-white/70">
-                  生成服务已就绪，输入提示词后点击生成预览。注册后可保存结果并获得 120 欢迎积分。
+              </div>
+              {entryNotice ? (
+                <p
+                  className={`mt-3 rounded-2xl border px-3 py-2 text-sm ${
+                    entryNotice.tone === "danger"
+                      ? "border-ember/40 bg-ember/10 text-ember"
+                      : "border-cyanx/30 bg-cyanx/10 text-cyanx"
+                  }`}
+                  role="status"
+                >
+                  {entryNotice.text}
                 </p>
-              )}
+              ) : null}
             </div>
           </div>
         </div>
@@ -551,11 +711,7 @@ export default function HomePage() {
               <button
                 key={`${item}-${index}`}
                 type="button"
-                onClick={() => {
-                  setDemoPhase("idle");
-                  setDemoProgress(0);
-                  setPrompt(item);
-                }}
+                onClick={() => switchToManualPrompt(item)}
                 className="focus-ring inline-flex max-w-96 items-center gap-3 rounded-full border border-white/12 bg-white/8 px-5 py-3 text-left text-sm text-white/72 transition-colors duration-200 hover:border-mint/60 hover:bg-white/12 hover:text-white"
               >
                 <Copy className="size-4 shrink-0 text-cyanx" aria-hidden="true" />
@@ -609,12 +765,7 @@ export default function HomePage() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        setDemoPhase("idle");
-                        setDemoProgress(0);
-                        setPrompt(item.prompt);
-                        window.scrollTo({ top: 0, behavior: "smooth" });
-                      }}
+                      onClick={() => applyPromptPreset(item.prompt)}
                       className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/12 px-4 py-2 text-sm text-white/76 transition-colors duration-200 hover:bg-white/10 hover:text-white"
                     >
                       <RefreshCw className="size-4" aria-hidden="true" />
@@ -686,12 +837,7 @@ export default function HomePage() {
               <button
                 key={item}
                 type="button"
-                onClick={() => {
-                  setDemoPhase("idle");
-                  setDemoProgress(0);
-                  setPrompt(item);
-                  window.scrollTo({ top: 0, behavior: "smooth" });
-                }}
+                onClick={() => applyPromptPreset(item)}
                 className="focus-ring group flex items-start gap-4 rounded-[1.25rem] border border-white/12 bg-white/7 p-4 text-left transition-colors duration-200 hover:border-mint/60 hover:bg-white/10"
               >
                 <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-ink">
@@ -769,13 +915,13 @@ export default function HomePage() {
                     </li>
                   ))}
                 </ul>
-                <a
+                <Link
                   href={isLoggedIn ? "/generate" : "/register"}
                   className={`focus-ring mt-8 inline-flex w-full items-center justify-center gap-2 rounded-full px-5 py-3 text-sm font-semibold transition-colors duration-200 ${plan.highlight ? "bg-mint text-ink hover:bg-volt" : "bg-white text-ink hover:bg-mint"}`}
                 >
                   {isLoggedIn ? "进入工作台" : `注册使用${plan.name}`}
                   <ArrowRight className="size-4" aria-hidden="true" />
-                </a>
+                </Link>
               </article>
             ))}
           </div>
@@ -794,21 +940,21 @@ export default function HomePage() {
             </div>
             <div className="flex flex-wrap gap-3">
               {isLoggedIn ? (
-                <a
+                <Link
                   href="/generate"
                   className="focus-ring inline-flex items-center gap-2 rounded-full bg-white px-5 py-3 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-mint"
                 >
                   <Sparkles className="size-4" aria-hidden="true" />
                   进入工作台
-                </a>
+                </Link>
               ) : (
-                <a
+                <Link
                   href="/register"
                   className="focus-ring inline-flex items-center gap-2 rounded-full bg-white px-5 py-3 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-mint"
                 >
                   <Play className="size-4" aria-hidden="true" />
                   免费注册
-                </a>
+                </Link>
               )}
               <a
                 href="#pricing"
@@ -855,10 +1001,4 @@ function FlowCard({ icon: Icon, title, text }: { icon: LucideIcon; title: string
       <p className="mt-3 text-sm leading-6 text-white/66">{text}</p>
     </article>
   );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }

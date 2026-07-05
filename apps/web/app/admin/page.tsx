@@ -21,6 +21,7 @@ import {
   formatStyleLabel,
   getCurrentUser,
   formatTargetType,
+  peekCurrentUser,
   resolveImageSrc,
   type AuditLog,
   type AdminMetrics,
@@ -195,6 +196,7 @@ function formatMilliseconds(value: number | null | undefined): string {
 
 export default function AdminPage() {
   const router = useRouter();
+  const cachedUser = peekCurrentUser();
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [operationalMetrics, setOperationalMetrics] = useState<AdminOperationalMetrics | null>(null);
   const [users, setUsers] = useState<User[]>([]);
@@ -232,12 +234,30 @@ export default function AdminPage() {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [confirmReason, setConfirmReason] = useState("");
   const [confirmLoading, setConfirmLoading] = useState(false);
-  const [accessState, setAccessState] = useState<AdminAccessState>("checking");
+  const [accessState, setAccessState] = useState<AdminAccessState>(
+    cachedUser?.role === "ADMIN" ? "granted" : "checking"
+  );
 
   useEffect(() => {
     let active = true;
 
-    getCurrentUser({ force: true })
+    if (cachedUser !== undefined) {
+      if (!cachedUser) {
+        router.replace("/login?next=%2Fadmin");
+        return () => {
+          active = false;
+        };
+      }
+      if (cachedUser.role !== "ADMIN") {
+        router.replace("/generate");
+        return () => {
+          active = false;
+        };
+      }
+      setAccessState("granted");
+    }
+
+    getCurrentUser({ force: cachedUser === undefined })
       .then((currentUser) => {
         if (!active) {
           return;
@@ -265,7 +285,7 @@ export default function AdminPage() {
     return () => {
       active = false;
     };
-  }, [router]);
+  }, [cachedUser, router]);
 
   // 详情抽屉支持 Escape 关闭：aria-modal 对话框的通用无障碍预期，也避免遮挡后续操作
   useEffect(() => {

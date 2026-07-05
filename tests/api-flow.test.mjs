@@ -580,12 +580,20 @@ test("api and worker complete generation and enforce admin safety rules", async 
     );
 
     const beforePaymentCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const orderClientRequestId = crypto.randomUUID();
     const orderCreated = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "mock" },
+      { planId: "starter", paymentProvider: "mock", clientRequestId: orderClientRequestId },
       demoSession
     );
+    const duplicateOrderCreate = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock", clientRequestId: orderClientRequestId },
+      demoSession
+    );
+    assert.equal(duplicateOrderCreate.data.order.id, orderCreated.data.order.id);
     const providerEventId = `evt_${crypto.randomUUID()}`;
     const webhookPayload = {
       providerEventId,
@@ -612,7 +620,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const mismatchOrder = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "mock" },
+      { planId: "starter", paymentProvider: "mock", clientRequestId: crypto.randomUUID() },
       demoSession
     );
     const mismatchWebhook = await post(baseUrl, "/api/payments/webhooks/mock", {
@@ -632,7 +640,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const currencyMismatchOrder = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "mock" },
+      { planId: "starter", paymentProvider: "mock", clientRequestId: crypto.randomUUID() },
       demoSession
     );
     const currencyMismatchWebhook = await post(baseUrl, "/api/payments/webhooks/mock", {
@@ -652,7 +660,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const orderNoMismatchOrder = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "mock" },
+      { planId: "starter", paymentProvider: "mock", clientRequestId: crypto.randomUUID() },
       demoSession
     );
     const orderNoMismatchWebhook = await post(baseUrl, "/api/payments/webhooks/mock", {
@@ -727,7 +735,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const eventBackfillOrder = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "mock" },
+      { planId: "starter", paymentProvider: "mock", clientRequestId: crypto.randomUUID() },
       demoSession
     );
     const beforeEventBackfillCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
@@ -754,7 +762,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const expiredOrder = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "mock" },
+      { planId: "starter", paymentProvider: "mock", clientRequestId: crypto.randomUUID() },
       demoSession
     );
     await markOrderExpired(storePath, expiredOrder.data.order.id);
@@ -780,7 +788,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const lateWebhookOrder = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "mock" },
+      { planId: "starter", paymentProvider: "mock", clientRequestId: crypto.randomUUID() },
       demoSession
     );
     const beforeLateWebhookCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
@@ -1507,17 +1515,18 @@ test("api wires stripe provider into checkout, webhook signing and credit grant"
         Cookie: demoSession,
         Origin: origin
       },
-      body: JSON.stringify({ planId: "starter", paymentProvider: "mock" })
+      body: JSON.stringify({ planId: "starter", paymentProvider: "mock", clientRequestId: crypto.randomUUID() })
     });
     const wrongProviderPayload = await wrongProviderReject.json();
     assert.equal(wrongProviderReject.status, 400);
     assert.equal(wrongProviderPayload.error.code, "VALIDATION_ERROR");
 
     const beforeCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const stripeOrderClientRequestId = crypto.randomUUID();
     const orderCreated = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "stripe" },
+      { planId: "starter", paymentProvider: "stripe", clientRequestId: stripeOrderClientRequestId },
       demoSession
     );
     assert.equal(orderCreated.data.order.paymentProvider, "stripe");
@@ -1538,6 +1547,14 @@ test("api wires stripe provider into checkout, webhook signing and credit grant"
       checkoutBody.get("line_items[0][price_data][currency]"),
       orderCreated.data.order.currency.toLowerCase()
     );
+    const duplicateOrderCreated = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "stripe", clientRequestId: stripeOrderClientRequestId },
+      demoSession
+    );
+    assert.equal(duplicateOrderCreated.data.order.id, orderCreated.data.order.id);
+    assert.equal(stripeServer.requests.length, 1);
 
     const sessionId = stripeServer.lastSessionId();
     const eventId = `evt_${crypto.randomUUID()}`;
@@ -1608,7 +1625,7 @@ test("api wires stripe provider into checkout, webhook signing and credit grant"
     const amountMismatchOrder = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "stripe" },
+      { planId: "starter", paymentProvider: "stripe", clientRequestId: crypto.randomUUID() },
       demoSession
     );
     const amountMismatchSession = stripeServer.lastSessionId();
@@ -1631,7 +1648,7 @@ test("api wires stripe provider into checkout, webhook signing and credit grant"
     const orderNoMismatchOrder = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "stripe" },
+      { planId: "starter", paymentProvider: "stripe", clientRequestId: crypto.randomUUID() },
       demoSession
     );
     const orderNoMismatchSession = stripeServer.lastSessionId();
@@ -1651,7 +1668,7 @@ test("api wires stripe provider into checkout, webhook signing and credit grant"
     const continueOrder = await post(
       baseUrl,
       "/api/orders",
-      { planId: "starter", paymentProvider: "stripe" },
+      { planId: "starter", paymentProvider: "stripe", clientRequestId: crypto.randomUUID() },
       demoSession
     );
     const continuePayResponse = await post(baseUrl, `/api/orders/${continueOrder.data.order.id}/pay`, {}, demoSession);

@@ -1,8 +1,11 @@
 import { expect, type Page, type Route, test } from "@playwright/test";
 
 const now = "2026-07-01T08:00:00.000Z";
-const imageUrl = `data:image/svg+xml,${encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="#0b1215"/><circle cx="128" cy="112" r="64" fill="#8df8d2"/><text x="128" y="206" fill="#fff" font-size="24" text-anchor="middle">E2E</text></svg>'
+const thumbnailUrl = `data:image/svg+xml,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#0b1215"/><circle cx="32" cy="28" r="16" fill="#8df8d2"/><text x="32" y="52" fill="#fff" font-size="8" text-anchor="middle">THUMB</text></svg>'
+)}`;
+const fullSizeImageUrl = `data:image/svg+xml,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024"><rect width="1024" height="1024" fill="#0b1215"/><circle cx="512" cy="448" r="256" fill="#8df8d2"/><text x="512" y="824" fill="#fff" font-size="96" text-anchor="middle">FULL SIZE</text></svg>'
 )}`;
 const captchaSvg =
   '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="130"><rect width="180" height="130" fill="#f8fafc"/><rect x="66" y="42" width="48" height="48" rx="8" fill="#10b981"/></svg>';
@@ -272,7 +275,8 @@ test("历史页图片支持 hover 预览大图并显示实际比例", async ({ p
   await expect(dialog).toBeVisible();
   const dialogImage = dialog.getByRole("img", { name: "生成图片大图预览" });
   await expect(dialogImage).toBeVisible();
-  await expect.poll(() => dialogImage.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  await expect.poll(() => dialogImage.evaluate((image) => (image as HTMLImageElement).src)).toBe(fullSizeImageUrl);
+  await expect.poll(() => dialogImage.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBe(1024);
   await expect(dialogImage).toHaveCSS("object-fit", "contain");
   await expect(dialog.getByText("1024 × 1024")).toBeVisible();
   await expect(dialog.getByText("比例 1:1")).toBeVisible();
@@ -490,7 +494,7 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
       return;
     }
     if (method === "POST" && /^\/api\/images\/[^/]+\/preview-url$/.test(path)) {
-      await fulfillData(route, { url: imageUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+      await fulfillData(route, { url: fullSizeImageUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() });
       return;
     }
     if (method === "DELETE" && /^\/api\/images\/[^/]+$/.test(path)) {
@@ -736,7 +740,7 @@ function createMockState(): MockState {
         id: "image-history",
         taskId: "task-history",
         userId: creatorUser.id,
-        thumbnailUrl: imageUrl,
+        thumbnailUrl,
         publicUrl: "",
         width: 1024,
         height: 1024,

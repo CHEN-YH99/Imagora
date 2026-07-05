@@ -45,6 +45,8 @@ export default tseslint.config(
         process: "readonly",
         console: "readonly",
         fetch: "readonly",
+        AbortController: "readonly",
+        AbortSignal: "readonly",
         Buffer: "readonly",
         crypto: "readonly",
         setTimeout: "readonly",

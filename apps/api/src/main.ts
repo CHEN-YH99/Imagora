@@ -137,6 +137,12 @@ const rateLimitRules: RateLimitRule[] = [
     method: "POST",
     pattern: /^\/api\/images\/[^/]+\/download-url$/,
     max: envNumber("RATE_LIMIT_DOWNLOAD_MAX", 60)
+  },
+  {
+    id: "preview-url",
+    method: "POST",
+    pattern: /^\/api\/images\/[^/]+\/preview-url$/,
+    max: envNumber("RATE_LIMIT_PREVIEW_MAX", envNumber("RATE_LIMIT_DOWNLOAD_MAX", 60))
   }
 ];
 
@@ -989,6 +995,19 @@ app.post("/api/orders", async (request, reply) => {
   assertPaymentProviderEnabled(input.paymentProvider);
   return store.update(async (data) => {
     runOrderMaintenance(data);
+    const duplicate = input.clientRequestId
+      ? findOrderByClientRequestId(data, user.id, input.clientRequestId)
+      : null;
+    if (duplicate) {
+      if (duplicate.planId !== input.planId || duplicate.paymentProvider !== input.paymentProvider) {
+        throw new AppError("CONFLICT", "clientRequestId has already been used for another order", 409);
+      }
+      const duplicatePlan = data.plans.find((item) => item.id === duplicate.planId);
+      if (!duplicatePlan) {
+        throw new AppError("PLAN_UNAVAILABLE", "Plan is not available", 404);
+      }
+      return envelope(request, { order: duplicate, plan: duplicatePlan, checkoutUrl: findCheckoutUrl(data, duplicate) });
+    }
     const plan = data.plans.find((item) => item.id === input.planId && item.status === "ACTIVE");
     if (!plan) {
       throw new AppError("PLAN_UNAVAILABLE", "Plan is not available", 404);
@@ -1030,7 +1049,8 @@ app.post("/api/orders", async (request, reply) => {
           orderId: order.id,
           orderNo: order.orderNo,
           amountCents: order.amountCents,
-          currency: order.currency
+          currency: order.currency,
+          clientRequestId: input.clientRequestId ?? null
         },
         processedAt: now,
         createdAt: now
@@ -1208,7 +1228,17 @@ app.post("/api/admin/maintenance/reconcile", async (request) => {
   const input = adminReasonSchema.parse(request.body ?? {});
   return store.update((data) => {
     const maintenance = runOrderMaintenance(data);
-    audit(data, admin.id, "maintenance.reconcile", "SYSTEM", "platform", input.reason, null, { ...maintenance }, request);
+    audit(
+      data,
+      admin.id,
+      "maintenance.reconcile",
+      "SYSTEM",
+      "platform",
+      input.reason,
+      null,
+      { ...maintenance },
+      request
+    );
     return envelope(request, { maintenance });
   });
 });
@@ -1968,7 +1998,8 @@ const paymentWebhookParamSchema = z.object({ provider: z.string().min(1) });
 
 const createOrderSchema = z.object({
   planId: z.string().min(1),
-  paymentProvider: z.enum(["mock", "stripe", "wechat", "alipay"]).default("mock")
+  paymentProvider: z.enum(["mock", "stripe", "wechat", "alipay"]).default("mock"),
+  clientRequestId: z.string().min(8).max(120).optional()
 });
 
 const adminReasonSchema = z.object({ reason: z.string().trim().min(3).max(240) });
@@ -2204,7 +2235,11 @@ function resolveGenerationProviderSelection(model?: ModelId): {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Provider model is not configured";
-    if (providerMetadata.name === "mock" && requestedModel && isCompatibleOpenAiRequestForMockProvider(requestedModel)) {
+    if (
+      providerMetadata.name === "mock" &&
+      requestedModel &&
+      isCompatibleOpenAiRequestForMockProvider(requestedModel)
+    ) {
       return {
         providerMetadata: {
           ...providerMetadata,
@@ -2356,6 +2391,18 @@ function findCheckoutUrl(data: StoreData, order: Order): string | null {
   return typeof checkoutUrl === "string" && checkoutUrl.length > 0 ? checkoutUrl : null;
 }
 
+function findOrderByClientRequestId(data: StoreData, userId: string, clientRequestId: string): Order | null {
+  const event = data.paymentEvents
+    .filter(
+      (item) => item.eventType === "checkout.created" && paymentEventClientRequestId(item.payload) === clientRequestId
+    )
+    .sort(descCreated)[0];
+  if (!event) {
+    return null;
+  }
+  return data.orders.find((order) => order.id === event.orderId && order.userId === userId) ?? null;
+}
+
 function runOrderMaintenance(data: StoreData): OrderMaintenanceResult {
   const now = new Date().toISOString();
   const expiredCredits = expireCredits(data);
@@ -2504,6 +2551,11 @@ function reconcilePaidOrderCredits(data: StoreData): number {
 function paymentEventAmount(payload: Record<string, unknown>): number | null {
   const amount = payload.amountCents;
   return typeof amount === "number" && Number.isInteger(amount) ? amount : null;
+}
+
+function paymentEventClientRequestId(payload: Record<string, unknown>): string | null {
+  const clientRequestId = payload.clientRequestId;
+  return typeof clientRequestId === "string" && clientRequestId.length > 0 ? clientRequestId : null;
 }
 
 function paymentFailureEvents(data: StoreData): PaymentEvent[] {

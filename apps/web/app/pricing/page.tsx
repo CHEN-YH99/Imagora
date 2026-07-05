@@ -38,6 +38,7 @@ function PricingView() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [message, setMessage] = useState("");
   const [returnNotice, setReturnNotice] = useState<{ tone: "danger" | "info"; text: string } | null>(null);
+  const [buyingPlanId, setBuyingPlanId] = useState<string | null>(null);
 
   useEffect(() => {
     const canceled = searchParams.get("canceled");
@@ -63,10 +64,16 @@ function PricingView() {
   }
 
   async function buy(planId: string) {
+    if (buyingPlanId) {
+      return;
+    }
+
+    setBuyingPlanId(planId);
+    setMessage("");
     try {
       const order = await apiFetch<{ order: { id: string }; checkoutUrl: string | null }>("/api/orders", {
         method: "POST",
-        body: { planId, paymentProvider }
+        body: { planId, paymentProvider, clientRequestId: crypto.randomUUID() }
       });
       if (order.checkoutUrl) {
         window.location.href = order.checkoutUrl;
@@ -82,6 +89,8 @@ function PricingView() {
       setMessage(`订单${formatStatusLabel(paid.order.status)}，支付后余额为 ${formatCredits(paid.balanceAfter)}。`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "支付失败，请稍后重试。");
+    } finally {
+      setBuyingPlanId(null);
     }
   }
 
@@ -99,22 +108,26 @@ function PricingView() {
       ) : null}
       <div className="grid gap-5 lg:grid-cols-3">
         {plans.map((plan, index) => (
-          <Panel key={plan.id} className={index === 1 ? "border-mint bg-mint/10" : ""}>
-            <div className="flex items-start justify-between gap-4">
+          <Panel key={plan.id} className={`flex h-full flex-col ${index === 1 ? "border-mint bg-mint/10" : ""}`}>
+            <div className="flex items-start justify-between gap-4 lg:min-h-[7rem]">
               <div>
                 <h2 className="text-2xl font-semibold">{formatPlanName(plan.name)}</h2>
                 <p className="mt-2 text-sm leading-6 text-white/60">{formatPlanDescription(plan.description)}</p>
               </div>
               {index === 1 ? (
-                <span className="rounded-full bg-mint px-3 py-1 text-sm font-semibold text-ink">推荐</span>
+                <span className="inline-flex shrink-0 items-center justify-center whitespace-nowrap rounded-full bg-mint px-4 py-1 text-sm font-semibold text-ink">
+                  推荐
+                </span>
               ) : null}
             </div>
-            <p className="mt-8 text-5xl font-semibold">{formatMoney(plan.priceCents, plan.currency)}</p>
-            <p className="mt-4 inline-flex items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm text-volt">
-              <Coins className="size-4" aria-hidden="true" />
-              {formatCredits(plan.credits)}
-            </p>
-            <ul className="mt-8 space-y-3 text-sm text-white/70">
+            <div className="pt-8 lg:min-h-[9.5rem]">
+              <p className="text-5xl font-semibold">{formatMoney(plan.priceCents, plan.currency)}</p>
+              <p className="mt-4 inline-flex items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm text-volt">
+                <Coins className="size-4" aria-hidden="true" />
+                {formatCredits(plan.credits)}
+              </p>
+            </div>
+            <ul className="flex-1 pt-8 space-y-3 text-sm text-white/70">
               <li className="flex gap-2">
                 <Check className="size-4 text-mint" aria-hidden="true" />
                 支付确认后积分即时到账
@@ -128,13 +141,21 @@ function PricingView() {
                 有效期：{plan.validDays ? `${plan.validDays} 天` : "长期有效"}
               </li>
             </ul>
-            <button
-              className="focus-ring mt-8 w-full rounded-full bg-white px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-mint"
-              type="button"
-              onClick={() => buy(plan.id)}
-            >
-              购买积分
-            </button>
+            <div className="mt-auto pt-8">
+              {(() => {
+                const isBuying = buyingPlanId === plan.id;
+                return (
+              <button
+                className="focus-ring w-full rounded-full bg-white px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-mint disabled:cursor-not-allowed disabled:bg-white/70 disabled:text-ink/70"
+                disabled={Boolean(buyingPlanId)}
+                type="button"
+                onClick={() => buy(plan.id)}
+              >
+                {isBuying ? "处理中..." : "购买积分"}
+              </button>
+                );
+              })()}
+            </div>
           </Panel>
         ))}
         {plans.length === 0 ? (

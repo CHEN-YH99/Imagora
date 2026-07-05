@@ -128,12 +128,11 @@ export function GeneratedImageLightbox({
       return;
     }
 
-    const imageId = image.id;
     let cancelled = false;
 
-    async function loadFullSizePreview() {
+    async function loadFullSizePreview(image: GeneratedImage) {
       try {
-        const result = await apiFetch<{ url: string; expiresAt: string }>(`/api/images/${imageId}/preview-url`, {
+        const result = await apiFetch<{ url: string; expiresAt: string }>(`/api/images/${image.id}/preview-url`, {
           method: "POST",
           body: {}
         });
@@ -154,7 +153,7 @@ export function GeneratedImageLightbox({
       }
     }
 
-    void loadFullSizePreview();
+    void loadFullSizePreview(image);
 
     return () => {
       cancelled = true;

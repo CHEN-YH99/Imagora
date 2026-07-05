@@ -1,8 +1,8 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Coins, ImagePlus, Sparkles, X, Wand2 } from "lucide-react";
+import { Coins, Sparkles, Wand2 } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import {
@@ -13,13 +13,11 @@ import {
   apiFetch,
   formatCredits,
   getSafetyAppeals,
-  resolveImageSrc,
   resolveSelectableImageModel,
   submitSafetyAppeal,
   waitForTask,
   type CreditAccount,
   type GeneratedImage,
-  type ReferenceImage,
   type SafetyAppeal,
   type SafetyEvent,
   type Task
@@ -67,19 +65,19 @@ function GenerateExperience() {
   const [task, setTask] = useState<Task | null>(null);
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
-  const [referenceImage, setReferenceImage] = useState<ReferenceImage | null>(null);
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState<"info" | "success" | "danger">("danger");
   const [loading, setLoading] = useState(false);
-  const [uploadingReference, setUploadingReference] = useState(false);
   const [appealEventId, setAppealEventId] = useState<string | null>(null);
   const [showAppealForm, setShowAppealForm] = useState(false);
   const [appealReason, setAppealReason] = useState("");
   const [appealStatus, setAppealStatus] = useState<SafetyAppeal | null>(null);
   const [appealLoading, setAppealLoading] = useState(false);
+  const quoteRequestSequenceRef = useRef(0);
   const isGenerationProcessing =
     images.length === 0 && (loading || task?.status === "PENDING" || task?.status === "RUNNING");
   const processingAspectRatio = task ? `${task.width} / ${task.height}` : aspectRatio.replace(":", " / ");
+  const hasPrompt = prompt.trim().length > 0;
   const terminalGenerationFailureMessage =
     images.length === 0 &&
     task &&
@@ -90,7 +88,6 @@ function GenerateExperience() {
       ? generationFailureMessage(task)
       : "";
   const resultStatus = isGenerationProcessing ? (task?.status ?? "RUNNING") : (task?.status ?? "IDLE");
-  const referenceImageSrc = referenceImage ? resolveImageSrc(referenceImage.publicUrl) : null;
 
   useEffect(() => {
     loadAccount();
@@ -115,22 +112,46 @@ function GenerateExperience() {
   }, [searchParams]);
 
   useEffect(() => {
-    apiFetch<{ creditCost: number }>("/api/generation/quote", {
-      method: "POST",
-      body: {
-        prompt,
-        negativePrompt,
-        style: "realistic",
-        aspectRatio,
-        quantity,
-        quality,
-        model,
-        referenceImageId: referenceImage?.id
-      }
-    })
-      .then((result) => setQuote(result.creditCost))
-      .catch(() => setQuote(0));
-  }, [aspectRatio, negativePrompt, prompt, quality, quantity, referenceImage?.id, model]);
+    if (!hasPrompt) {
+      quoteRequestSequenceRef.current += 1;
+      setQuote(0);
+      return;
+    }
+
+    const requestSequence = quoteRequestSequenceRef.current + 1;
+    quoteRequestSequenceRef.current = requestSequence;
+    let canceled = false;
+
+    const timeoutId = setTimeout(() => {
+      void apiFetch<{ creditCost: number }>("/api/generation/quote", {
+        method: "POST",
+        body: {
+          prompt,
+          negativePrompt,
+          style: "realistic",
+          aspectRatio,
+          quantity,
+          quality,
+          model
+        }
+      })
+        .then((result) => {
+          if (!canceled && quoteRequestSequenceRef.current === requestSequence) {
+            setQuote(result.creditCost);
+          }
+        })
+        .catch(() => {
+          if (!canceled && quoteRequestSequenceRef.current === requestSequence) {
+            setQuote(0);
+          }
+        });
+    }, 280);
+
+    return () => {
+      canceled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [aspectRatio, hasPrompt, model, quality, quantity]);
 
   async function ensureLoggedIn(): Promise<void> {
     if (account) return;
@@ -170,31 +191,6 @@ function GenerateExperience() {
       setAppealStatus(existing ?? null);
     } catch {
       // 安全事件只用于恢复入口，查询失败不应覆盖主错误提示。
-    }
-  }
-
-  async function uploadReference(file: File) {
-    setUploadingReference(true);
-    setMessage("");
-    setMessageTone("danger");
-    try {
-      await ensureLoggedIn();
-      const dataUrl = await readFileAsDataUrl(file);
-      const result = await apiFetch<{ referenceImage: ReferenceImage; duplicate: boolean }>(
-        "/api/uploads/reference-images",
-        {
-          method: "POST",
-          body: { fileName: file.name, mimeType: file.type, contentBase64: dataUrl.split(",")[1] ?? "" }
-        }
-      );
-      setReferenceImage(result.referenceImage);
-      setMessage("参考图上传完成，提交生成时会一并参与创作。");
-      setMessageTone("success");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "参考图上传失败，请重新选择图片。");
-      setMessageTone("danger");
-    } finally {
-      setUploadingReference(false);
     }
   }
 
@@ -253,7 +249,6 @@ function GenerateExperience() {
           clientRequestId: crypto.randomUUID(),
           prompt,
           negativePrompt,
-          referenceImageId: referenceImage?.id,
           style: "realistic",
           aspectRatio,
           quantity,
@@ -317,7 +312,7 @@ function GenerateExperience() {
             <label className="block text-sm text-white/70">
               提示词
               <textarea
-                className="focus-ring mt-2 min-h-36 w-full resize-none rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+                className="focus-ring mt-2 min-h-52 w-full resize-none rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
               />
@@ -332,71 +327,6 @@ function GenerateExperience() {
                 onChange={(event) => setNegativePrompt(event.target.value)}
               />
             </label>
-
-            {/* 参考图 */}
-            <div className="rounded-2xl border border-white/12 bg-black/20 p-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <span className="inline-flex items-center gap-2 text-sm text-white/70">
-                  <ImagePlus className="size-4 text-mint" aria-hidden="true" />
-                  参考图
-                </span>
-                {referenceImage ? (
-                  <button
-                    className="focus-ring inline-flex size-8 items-center justify-center rounded-full border border-white/10 text-white/60 transition-colors duration-200 hover:bg-white/10 hover:text-white"
-                    type="button"
-                    onClick={() => setReferenceImage(null)}
-                    aria-label="清除参考图"
-                  >
-                    <X className="size-4" aria-hidden="true" />
-                  </button>
-                ) : null}
-              </div>
-              {referenceImage ? (
-                <div className="flex items-center gap-3">
-                  {referenceImageSrc ? (
-                    <img
-                      className="size-20 shrink-0 rounded-xl border border-white/12 object-cover"
-                      src={referenceImageSrc}
-                      alt="参考图预览"
-                      loading="lazy"
-                      decoding="async"
-                      width={80}
-                      height={80}
-                    />
-                  ) : (
-                    <div
-                      aria-label="参考图预览"
-                      className="flex size-20 shrink-0 items-center justify-center rounded-xl border border-white/12 bg-black/30 px-2 text-center text-xs text-white/45"
-                      role="img"
-                    >
-                      预览暂不可用
-                    </div>
-                  )}
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-white">{referenceImage.originalFileName}</p>
-                    <p className="mt-1 text-xs text-white/50">
-                      {referenceImage.width ?? "-"} × {referenceImage.height ?? "-"} ·{" "}
-                      {Math.ceil(referenceImage.fileSize / 1024)} KB
-                    </p>
-                  </div>
-                </div>
-              ) : (
-                <label className="focus-ring flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-white/16 px-4 py-5 text-sm text-white/54 transition-colors duration-200 hover:border-mint/60 hover:text-white">
-                  <input
-                    className="sr-only"
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp"
-                    disabled={uploadingReference}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      event.target.value = "";
-                      if (file) void uploadReference(file);
-                    }}
-                  />
-                  {uploadingReference ? "上传中..." : "上传 JPG、PNG 或 WebP 格式图片"}
-                </label>
-              )}
-            </div>
 
             {/* 模型选择下拉 */}
             <label className="block text-sm text-white/70">
@@ -673,7 +603,13 @@ function GenerationProcessingPlaceholder({
             <p className={`mt-1 text-xs leading-5 text-white/56 ${isWideFrame ? "max-w-none" : "max-w-48"}`}>
               AI 正在构图、上色并输出图片
             </p>
-            <div className={isWideFrame ? "mt-3 h-1.5 w-full overflow-hidden rounded-full bg-white/10" : "mt-5 h-1.5 w-28 overflow-hidden rounded-full bg-white/10"}>
+            <div
+              className={
+                isWideFrame
+                  ? "mt-3 h-1.5 w-full overflow-hidden rounded-full bg-white/10"
+                  : "mt-5 h-1.5 w-28 overflow-hidden rounded-full bg-white/10"
+              }
+            >
               <span className="block h-full w-1/2 rounded-full bg-gradient-to-r from-mint via-cyanx to-volt motion-safe:animate-pulse" />
             </div>
           </div>
@@ -691,15 +627,6 @@ function parseAspectRatioValue(value: string): number | null {
     return null;
   }
   return width / height;
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("文件读取失败，请重新选择图片。"));
-    reader.readAsDataURL(file);
-  });
 }
 
 function generationFailureMessage(task: Task): string {
