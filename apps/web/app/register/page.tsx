@@ -29,7 +29,6 @@ function RegisterForm() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const promptParam = searchParams.get("prompt");
   const fromDemo = searchParams.get("from") === "demo";
 
   function handleConfirmPasswordPaste(event: ClipboardEvent<HTMLInputElement>) {
@@ -49,11 +48,7 @@ function RegisterForm() {
     setMessage("");
     try {
       await register(email.trim().toLowerCase(), password);
-      if (promptParam) {
-        router.push(`/generate?prompt=${encodeURIComponent(promptParam)}`);
-      } else {
-        router.push("/generate");
-      }
+      router.push("/generate");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "注册失败，请检查信息后重试。");
     } finally {
@@ -68,10 +63,9 @@ function RegisterForm() {
           返回 Imagora
         </Link>
         <h1 className="mt-6 text-3xl font-semibold">创建账号</h1>
-        {fromDemo && promptParam ? (
+        {fromDemo ? (
           <div className="mt-3 rounded-2xl border border-mint/30 bg-mint/8 px-4 py-3">
-            <p className="text-sm text-white/80">注册后将直接生成你的图片：</p>
-            <p className="mt-1 line-clamp-2 text-sm text-white/60">{promptParam}</p>
+            <p className="text-sm text-white/80">注册后将进入生成工作台，你的当前预设会在本标签页内保留。</p>
           </div>
         ) : (
           <p className="mt-2 text-sm leading-6 text-white/62">

@@ -22,6 +22,12 @@ import {
   type SafetyEvent,
   type Task
 } from "../../lib/api";
+import {
+  buildGeneratePath,
+  buildGenerateTaskPath,
+  consumeGenerationDraft,
+  saveGenerationDraft
+} from "../../lib/generateDrafts";
 
 const qualityOptions = [
   { value: "draft", label: "1K", desc: "512–768px，速度最快" },
@@ -74,6 +80,7 @@ function GenerateExperience() {
   const [appealStatus, setAppealStatus] = useState<SafetyAppeal | null>(null);
   const [appealLoading, setAppealLoading] = useState(false);
   const quoteRequestSequenceRef = useRef(0);
+  const restoringTaskIdRef = useRef<string | null>(null);
   const isGenerationProcessing =
     images.length === 0 && (loading || task?.status === "PENDING" || task?.status === "RUNNING");
   const processingAspectRatio = task ? `${task.width} / ${task.height}` : aspectRatio.replace(":", " / ");
@@ -94,12 +101,16 @@ function GenerateExperience() {
   }, []);
 
   useEffect(() => {
-    const p = searchParams.get("prompt");
+    const draft = consumeGenerationDraft();
+    const taskId = searchParams.get("taskId");
     const ar = searchParams.get("aspectRatio");
     const q = searchParams.get("quality");
     const qty = searchParams.get("quantity");
     const m = searchParams.get("model");
-    if (p) setPrompt(p);
+    if (draft?.prompt) setPrompt(draft.prompt);
+    if (taskId && restoringTaskIdRef.current !== taskId) {
+      void restoreTask(taskId);
+    }
     if (ar && aspectRatioOptions.some((o) => o.value === ar)) setAspectRatio(ar);
     if (q && qualityOptions.some((o) => o.value === q)) setQuality(q);
     if (qty) {
@@ -155,14 +166,14 @@ function GenerateExperience() {
 
   async function ensureLoggedIn(): Promise<void> {
     if (account) return;
-    const params = new URLSearchParams({
-      prompt,
+    saveGenerationDraft(prompt);
+    const generatePath = buildGeneratePath({
       aspectRatio,
       quality,
-      quantity: String(quantity),
+      quantity,
       model
     });
-    router.push(`/login?next=${encodeURIComponent(`/generate?${params.toString()}`)}`);
+    router.push(`/login?next=${encodeURIComponent(generatePath)}`);
     throw new Error("请先登录后再提交生成。");
   }
 
@@ -192,6 +203,78 @@ function GenerateExperience() {
     } catch {
       // 安全事件只用于恢复入口，查询失败不应覆盖主错误提示。
     }
+  }
+
+  async function restoreTask(taskId: string) {
+    restoringTaskIdRef.current = taskId;
+    setLoading(true);
+    setMessage("");
+    setMessageTone("info");
+    setTask(null);
+    setImages([]);
+    setSelectedPreviewImage(null);
+    setAppealEventId(null);
+    setAppealStatus(null);
+    setShowAppealForm(false);
+    setAppealReason("");
+    try {
+      const initialResult = await apiFetch<{ task: Task; images: GeneratedImage[] }>(`/api/generation/tasks/${taskId}`);
+      applyTaskResult(initialResult);
+      applyTaskParameters(initialResult.task);
+      if (isTerminalTaskStatus(initialResult.task.status)) {
+        setMessage(restoreTaskMessage(initialResult.task, initialResult.images));
+        setMessageTone(initialResult.task.status === "SUCCEEDED" ? "success" : "danger");
+        if (initialResult.task.status === "BLOCKED") {
+          await loadLatestSafetyAppeal();
+        }
+        await loadAccount();
+        return;
+      }
+
+      const result = await waitForTask(taskId);
+      applyTaskResult(result);
+      applyTaskParameters(result.task);
+      if (result.task.status === "SUCCEEDED" && result.images.length > 0) {
+        setMessage(generationSuccessMessage(result.task));
+        setMessageTone("success");
+      } else if (isTerminalTaskStatus(result.task.status)) {
+        setMessage(generationFailureMessage(result.task));
+        setMessageTone("danger");
+        if (result.task.status === "BLOCKED") {
+          await loadLatestSafetyAppeal();
+        }
+      }
+      await loadAccount();
+    } catch (error) {
+      if (error instanceof TaskWaitTimeoutError) {
+        if (error.latestResult) {
+          applyTaskResult(error.latestResult);
+          applyTaskParameters(error.latestResult.task);
+        }
+        setMessage(generationWaitTimeoutMessage(error.latestResult?.task ?? null));
+        setMessageTone("info");
+        await loadAccount();
+        return;
+      }
+      setMessage(error instanceof Error ? error.message : "生成任务恢复失败，请到历史记录查看结果。");
+      setMessageTone("danger");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function applyTaskResult(result: { task: Task; images: GeneratedImage[] }) {
+    setTask(result.task);
+    setImages(result.images);
+  }
+
+  function applyTaskParameters(nextTask: Task) {
+    setPrompt(nextTask.prompt);
+    setNegativePrompt(nextTask.negativePrompt ?? "");
+    setAspectRatio(nextTask.aspectRatio);
+    setQuantity(nextTask.quantity);
+    setQuality(nextTask.quality);
+    setModel(resolveSelectableImageModel(nextTask.modelName));
   }
 
   function validateForm(): string | null {
@@ -258,6 +341,8 @@ function GenerateExperience() {
       });
       submittedTask = created.task;
       setTask(created.task);
+      restoringTaskIdRef.current = created.task.id;
+      router.replace(buildGenerateTaskPath(created.task.id), { scroll: false });
       setAccount((value) => (value ? { ...value, balance: created.balanceAfter } : value));
       const result = await waitForTask(created.task.id);
       setTask(result.task);
@@ -523,7 +608,7 @@ function GenerateExperience() {
             <StatusPill>{resultStatus}</StatusPill>
           </div>
           {terminalGenerationFailureMessage ? (
-            <div className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-4" role="alert">
+            <div className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-4">
               <p className="text-sm font-semibold text-ember">生成失败</p>
               <p className="mt-1 text-sm leading-6 text-ember/90">{terminalGenerationFailureMessage}</p>
             </div>
@@ -640,6 +725,17 @@ function generationFailureMessage(task: Task): string {
   }
   const baseMessage = task.failureMessage ?? "生成未成功，请调整提示词或稍后重试。";
   return appendRefundHint(baseMessage, refundedCredits);
+}
+
+function isTerminalTaskStatus(status: Task["status"]): boolean {
+  return status === "SUCCEEDED" || status === "FAILED" || status === "BLOCKED" || status === "CANCELED";
+}
+
+function restoreTaskMessage(task: Task, images: GeneratedImage[]): string {
+  if (task.status === "SUCCEEDED" && images.length > 0) {
+    return "已恢复上一次生成结果。";
+  }
+  return generationFailureMessage(task);
 }
 
 function appendRefundHint(baseMessage: string, refundedCredits: number): string {

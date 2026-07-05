@@ -33,6 +33,7 @@ import {
   IMAGE_MODEL_OPTIONS,
   peekCurrentUser
 } from "../lib/api";
+import { buildGeneratePath, saveGenerationDraft } from "../lib/generateDrafts";
 
 type StyleOption = {
   id: string;
@@ -247,15 +248,13 @@ export default function HomePage() {
     promptMode === "auto" ? activePromptTemplate.slice(0, Math.max(promptLoopLength, 0)) : prompt;
   const effectivePrompt = (promptMode === "auto" ? activePromptTemplate : prompt).trim();
   const generatePath = useMemo(() => {
-    const params = new URLSearchParams({
-      prompt: effectivePrompt,
+    return buildGeneratePath({
       aspectRatio,
       quality: qualityToGenerateValue[quality],
-      quantity: String(quantity),
+      quantity,
       model: selectedModel
     });
-    return `/generate?${params.toString()}`;
-  }, [aspectRatio, effectivePrompt, quality, quantity, selectedModel]);
+  }, [aspectRatio, quality, quantity, selectedModel]);
   const actionHint =
     authCheckState === "checking"
       ? "正在检查登录状态，马上带你进入对应页面。"
@@ -337,6 +336,7 @@ export default function HomePage() {
     }
 
     setEntryNotice(null);
+    saveGenerationDraft(effectivePrompt);
     const cachedUser = peekCurrentUser();
     if (cachedUser !== undefined) {
       setIsLoggedIn(Boolean(cachedUser));
@@ -531,8 +531,8 @@ export default function HomePage() {
             <label className="sr-only" htmlFor="prompt">
               提示词
             </label>
-            <div className="flex flex-col gap-3 md:flex-row">
-              <div className="flex flex-1 flex-col gap-2">
+            <div className="flex flex-col gap-3 md:flex-row md:items-stretch">
+              <div className="flex flex-1 flex-col gap-2 md:min-h-full">
                 <textarea
                   id="prompt"
                   value={promptValue}
@@ -548,7 +548,7 @@ export default function HomePage() {
                     setPrompt(e.target.value);
                     setEntryNotice(null);
                   }}
-                  className="focus-ring min-h-28 resize-none rounded-[1.35rem] border border-white/12 bg-black/34 px-5 py-4 text-base leading-7 text-white placeholder:text-white/40"
+                  className="focus-ring min-h-28 flex-1 resize-none rounded-[1.35rem] border border-white/12 bg-black/34 px-5 py-4 text-base leading-7 text-white placeholder:text-white/40"
                   maxLength={420}
                   placeholder="描述你想生成的图片内容、主体、风格、光线和用途..."
                   spellCheck={false}

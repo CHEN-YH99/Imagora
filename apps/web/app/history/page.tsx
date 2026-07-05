@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowUpRight, Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import {
@@ -14,6 +15,7 @@ import {
   type GeneratedImage,
   type Task
 } from "../../lib/api";
+import { buildGeneratePath, saveGenerationDraft } from "../../lib/generateDrafts";
 
 type TaskDetail = {
   task: Task;
@@ -21,6 +23,7 @@ type TaskDetail = {
 };
 
 export default function HistoryPage() {
+  const router = useRouter();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -118,6 +121,18 @@ export default function HistoryPage() {
     }
   }
 
+  function regenerateTask(task: Task) {
+    saveGenerationDraft(task.prompt);
+    router.push(
+      buildGeneratePath({
+        aspectRatio: task.aspectRatio,
+        quality: task.quality,
+        quantity: task.quantity,
+        model: resolveSelectableImageModel(task.modelName)
+      })
+    );
+  }
+
   return (
     <AppFrame title="生成历史" subtitle="集中管理生成任务、图片资产、下载、收藏和再次生成，方便复用高质量创意结果。">
       {message ? (
@@ -199,13 +214,14 @@ export default function HistoryPage() {
                   <Copy className="size-4" aria-hidden="true" />
                   复制提示词
                 </button>
-                <Link
+                <button
                   className="focus-ring inline-flex items-center gap-2 rounded-full bg-mint px-3 py-2 text-sm font-semibold text-ink hover:bg-volt"
-                  href={`/generate?prompt=${encodeURIComponent(selectedTask.prompt)}&aspectRatio=${encodeURIComponent(selectedTask.aspectRatio)}&quality=${encodeURIComponent(selectedTask.quality)}&quantity=${selectedTask.quantity}&model=${encodeURIComponent(resolveSelectableImageModel(selectedTask.modelName))}`}
+                  onClick={() => regenerateTask(selectedTask)}
+                  type="button"
                 >
                   <RefreshCw className="size-4" aria-hidden="true" />
                   再次生成
-                </Link>
+                </button>
               </div>
               <dl className="mt-4 grid gap-3 text-xs text-white/52 sm:grid-cols-4">
                 <div>

@@ -162,6 +162,9 @@ test("web core pages expose recoverable empty states and confirm destructive act
   assert.match(accountPage, /重新加载账户/);
   assert.match(generatePage, /validateForm/);
   assert.match(generatePage, /quoteRequestSequenceRef/);
+  assert.match(generatePage, /restoreTask\(taskId\)/);
+  assert.match(generatePage, /buildGenerateTaskPath\(created\.task\.id\)/);
+  assert.match(generatePage, /\/api\/generation\/tasks\/\$\{taskId\}/);
   assert.match(generatePage, /setTimeout\(\(\) =>/);
   assert.match(generatePage, /Math\.max\(1, Math\.min\(4, Math\.trunc\(nextValue\)\)\)/);
   assert.match(generatePage, /min-h-52/);
@@ -175,6 +178,29 @@ test("web core pages expose recoverable empty states and confirm destructive act
   assert.match(adminPage, /peekCurrentUser/);
   assert.match(adminPage, /confirmDisabled=\{confirmReason\.trim\(\)\.length < 3\}/);
   assert.match(adminPage, /审计日志/);
+});
+
+test("generate entry flows keep prompt drafts out of URLs", async () => {
+  const detailPage = await readFile(join(root, "apps/web/app/images/[imageId]/page.tsx"), "utf8");
+  const generateDrafts = await readFile(join(root, "apps/web/lib/generateDrafts.ts"), "utf8");
+  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
+  const homePage = await readFile(join(root, "apps/web/app/page.tsx"), "utf8");
+  const registerPage = await readFile(join(root, "apps/web/app/register/page.tsx"), "utf8");
+
+  for (const page of [detailPage, generatePage, historyPage, homePage, registerPage]) {
+    assert.doesNotMatch(page, /prompt=/);
+    assert.doesNotMatch(page, /searchParams\.get\("prompt"\)/);
+  }
+
+  assert.match(generateDrafts, /GENERATION_DRAFT_STORAGE_KEY/);
+  assert.match(generateDrafts, /sessionStorage\.setItem/);
+  assert.match(generateDrafts, /sessionStorage\.getItem/);
+  assert.match(generateDrafts, /sessionStorage\.removeItem/);
+  assert.match(homePage, /saveGenerationDraft/);
+  assert.match(historyPage, /saveGenerationDraft/);
+  assert.match(detailPage, /saveGenerationDraft/);
+  assert.match(generatePage, /consumeGenerationDraft/);
 });
 
 test("admin console exposes enterprise filters, detail drawers, and audit queries", async () => {

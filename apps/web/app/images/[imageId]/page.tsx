@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft, Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../../components/AppFrame";
 import {
@@ -19,6 +19,7 @@ import {
   type GeneratedImage,
   type Task
 } from "../../../lib/api";
+import { buildGeneratePath, saveGenerationDraft } from "../../../lib/generateDrafts";
 
 type TaskDetail = {
   task: Task;
@@ -41,12 +42,21 @@ export default function ImageDetailPage() {
     void loadDetail();
   }, [imageId]);
 
-  const generatedAgainHref = useMemo(() => {
+  function regenerateTask() {
     if (!task) {
-      return "/generate";
+      router.push("/generate");
+      return;
     }
-    return `/generate?prompt=${encodeURIComponent(task.prompt)}&aspectRatio=${encodeURIComponent(task.aspectRatio)}&quality=${encodeURIComponent(task.quality)}&quantity=${task.quantity}&model=${encodeURIComponent(resolveSelectableImageModel(task.modelName))}`;
-  }, [task]);
+    saveGenerationDraft(task.prompt);
+    router.push(
+      buildGeneratePath({
+        aspectRatio: task.aspectRatio,
+        quality: task.quality,
+        quantity: task.quantity,
+        model: resolveSelectableImageModel(task.modelName)
+      })
+    );
+  }
 
   async function loadDetail() {
     setLoading(true);
@@ -221,13 +231,14 @@ export default function ImageDetailPage() {
                 >
                   <Trash2 className="size-4" aria-hidden="true" />
                 </button>
-                <Link
+                <button
                   className="focus-ring ml-auto inline-flex items-center gap-2 rounded-full bg-mint px-3 py-2 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-volt"
-                  href={generatedAgainHref}
+                  onClick={regenerateTask}
+                  type="button"
                 >
                   <RefreshCw className="size-4" aria-hidden="true" />
                   再次生成
-                </Link>
+                </button>
               </div>
               <p className="text-sm leading-6 text-white/76">{task.prompt}</p>
               {task.failureMessage ? (

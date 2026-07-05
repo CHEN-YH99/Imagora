@@ -223,7 +223,11 @@ test("生成任务覆盖创建、轮询、成功和失败状态", async ({ page 
   await expect(page.getByText("生成完成，可进入详情继续下载、收藏或再次生成。")).toBeVisible({
     timeout: 8_000
   });
+  await expect(page).toHaveURL((url) => url.pathname === "/generate" && url.searchParams.get("taskId") === "task-e2e");
   await expect(page.getByAltText("生成图片结果")).toHaveCount(1);
+  await page.reload();
+  await expect(page.getByAltText("生成图片结果")).toHaveCount(1);
+  await expect(page.getByText("已恢复上一次生成结果。")).toBeVisible();
   expect(successState.generationTaskPolls).toBeGreaterThanOrEqual(2);
 
   const failedPage = await page.context().newPage();
@@ -241,8 +245,8 @@ test("历史、收藏、下载、删除和再次生成链路可回归", async ({
   const state = await setupApiMocks(page);
 
   await page.goto("/history");
-  await page.getByRole("link", { name: "再次生成" }).click();
-  await expect(page).toHaveURL(/\/generate\?.*prompt=/);
+  await page.getByRole("button", { name: "再次生成" }).click();
+  await expect(page).toHaveURL((url) => url.pathname === "/generate" && !url.searchParams.has("prompt"));
   await expect(page.getByRole("textbox", { name: "提示词", exact: true })).toHaveValue(/半透明智能相机/);
 
   await page.goto("/history");
