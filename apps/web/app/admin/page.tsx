@@ -1,8 +1,8 @@
 "use client";
 
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, BarChart3, Coins, Eye, EyeOff, Plus, RefreshCw, Save, Shield, X } from "lucide-react";
+import { AlertTriangle, BarChart3, Coins, Eye, EyeOff, Plus, RefreshCw, Save, X } from "lucide-react";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import {
   apiFetch,
@@ -19,6 +19,7 @@ import {
   formatSafetyRuleTerm,
   formatStatusLabel,
   formatStyleLabel,
+  getCurrentUser,
   formatTargetType,
   resolveImageSrc,
   type AuditLog,
@@ -106,6 +107,8 @@ type Notice = {
   text: string;
 };
 
+type AdminAccessState = "checking" | "granted";
+
 // 与后端 ADMIN_CREDIT_ADJUST_THRESHOLD 默认值保持一致：
 // 单次调整绝对值达到该阈值即视为大额，必须走强制二次确认（confirm=true）。
 const LARGE_CREDIT_ADJUST_THRESHOLD = 1000;
@@ -191,6 +194,7 @@ function formatMilliseconds(value: number | null | undefined): string {
 }
 
 export default function AdminPage() {
+  const router = useRouter();
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [operationalMetrics, setOperationalMetrics] = useState<AdminOperationalMetrics | null>(null);
   const [users, setUsers] = useState<User[]>([]);
@@ -228,6 +232,40 @@ export default function AdminPage() {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [confirmReason, setConfirmReason] = useState("");
   const [confirmLoading, setConfirmLoading] = useState(false);
+  const [accessState, setAccessState] = useState<AdminAccessState>("checking");
+
+  useEffect(() => {
+    let active = true;
+
+    getCurrentUser({ force: true })
+      .then((currentUser) => {
+        if (!active) {
+          return;
+        }
+        if (!currentUser) {
+          router.replace("/login?next=%2Fadmin");
+          return;
+        }
+        if (currentUser.role !== "ADMIN") {
+          router.replace("/generate");
+          return;
+        }
+        setAccessState("granted");
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+        setNotice({
+          tone: "danger",
+          text: error instanceof Error ? error.message : "管理员权限校验失败，请稍后重试。"
+        });
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [router]);
 
   // 详情抽屉支持 Escape 关闭：aria-modal 对话框的通用无障碍预期，也避免遮挡后续操作
   useEffect(() => {
@@ -244,8 +282,12 @@ export default function AdminPage() {
   }, [selectedDetail]);
 
   useEffect(() => {
+    if (accessState !== "granted") {
+      return;
+    }
     void load();
   }, [
+    accessState,
     taskStatusFilter,
     orderStatusFilter,
     imageVisibilityFilter,
@@ -794,19 +836,30 @@ export default function AdminPage() {
     }
   }, [confirmState]);
 
+  if (accessState !== "granted") {
+    return (
+      <AppFrame
+        title="管理控制台"
+        subtitle="集中管理用户、生成任务、图片资产、订单、套餐、安全规则和审计记录，重点防止误操作并保留可追踪上下文。"
+      >
+        <Panel className="flex min-h-48 flex-col items-center justify-center gap-4 text-center">
+          <p className="text-sm text-white/64">正在校验管理员权限...</p>
+          {notice ? (
+            <div className="w-full max-w-xl">
+              <InlineNotice tone={notice.tone}>{notice.text}</InlineNotice>
+            </div>
+          ) : null}
+        </Panel>
+      </AppFrame>
+    );
+  }
+
   return (
     <AppFrame
       title="管理控制台"
       subtitle="集中管理用户、生成任务、图片资产、订单、套餐、安全规则和审计记录，重点防止误操作并保留可追踪上下文。"
     >
       <div className="mb-5 flex flex-wrap items-center gap-3">
-        <Link
-          className="focus-ring inline-flex items-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors hover:bg-volt"
-          href="/login"
-        >
-          <Shield className="size-4" aria-hidden="true" />
-          前往登录
-        </Link>
         <button
           className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/12 bg-white/8 px-5 py-3 font-semibold text-white transition-colors hover:border-mint/70 hover:bg-mint/12 disabled:opacity-60"
           disabled={maintenanceRunning}

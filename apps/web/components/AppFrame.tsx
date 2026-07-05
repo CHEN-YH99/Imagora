@@ -4,7 +4,15 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useId, useState } from "react";
 import { LogOut, Sparkles } from "lucide-react";
-import { apiFetch, formatStatusLabel, logout as apiLogout, SESSION_EXPIRED_EVENT, type User } from "../lib/api";
+import {
+  formatStatusLabel,
+  getCurrentUser,
+  logout as apiLogout,
+  peekCurrentUser,
+  SESSION_EXPIRED_EVENT,
+  setCurrentUser,
+  type User
+} from "../lib/api";
 
 const navItems = [
   { href: "/generate", label: "生成" },
@@ -13,8 +21,12 @@ const navItems = [
   { href: "/pricing", label: "套餐" },
   { href: "/account", label: "账户" },
   { href: "/orders", label: "订单" },
-  { href: "/admin", label: "管理" }
+  { href: "/admin", label: "管理", adminOnly: true }
 ];
+
+function isNavItemActive(pathname: string, href: string): boolean {
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
 
 export function AppFrame({
   title,
@@ -25,7 +37,7 @@ export function AppFrame({
   subtitle: string;
   children: React.ReactNode;
 }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUserState] = useState<User | null | undefined>(() => peekCurrentUser());
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [logoutLoading, setLogoutLoading] = useState(false);
   const [logoutMessage, setLogoutMessage] = useState("");
@@ -35,15 +47,30 @@ export function AppFrame({
   const pathname = usePathname();
 
   useEffect(() => {
-    apiFetch<{ user: User }>("/api/auth/me")
-      .then((result) => setUser(result.user))
-      .catch(() => {});
+    let active = true;
+
+    getCurrentUser()
+      .then((currentUser) => {
+        if (active) {
+          setUserState(currentUser);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setUserState(null);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   // 会话过期时统一跳登录并带上回跳地址，避免受保护页只弹红字卡死
   useEffect(() => {
     function handleSessionExpired() {
-      setUser(null);
+      setCurrentUser(null);
+      setUserState(null);
       const next = pathname && pathname !== "/login" ? `?next=${encodeURIComponent(pathname)}` : "";
       router.replace(`/login${next}`);
     }
@@ -88,7 +115,7 @@ export function AppFrame({
     setLogoutMessage("");
     try {
       await apiLogout();
-      setUser(null);
+      setUserState(null);
       setLogoutConfirmOpen(false);
     } catch (error) {
       setLogoutMessage(error instanceof Error ? error.message : "退出失败，请稍后重试。");
@@ -97,31 +124,45 @@ export function AppFrame({
     }
   }
 
+  const visibleNavItems = navItems.filter((item) => !item.adminOnly || user?.role === "ADMIN");
+
   return (
     <main className="min-h-screen bg-ink text-white">
       <header className="sticky top-0 z-40 border-b border-white/10 bg-ink/90 px-4 py-3 backdrop-blur-xl">
-        <nav className="mx-auto flex max-w-7xl flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <Link className="focus-ring flex items-center gap-3 rounded-full" href="/">
+        <nav className="mx-auto grid max-w-7xl gap-3 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
+          <Link className="focus-ring flex items-center gap-3 rounded-full lg:justify-self-start" href="/">
             <span className="flex size-10 items-center justify-center rounded-full bg-white text-ink">
               <Sparkles className="size-5" aria-hidden="true" />
             </span>
             <span className="text-lg font-semibold">Imagora</span>
           </Link>
-          <div className="flex gap-2 overflow-x-auto pb-1 lg:pb-0">
-            {navItems.map((item) => (
-              <Link
-                key={item.href}
-                className="focus-ring shrink-0 rounded-full border border-white/10 px-4 py-2 text-sm text-white/70 transition-colors duration-200 hover:bg-white/10 hover:text-white"
-                href={item.href}
-              >
-                {item.label}
-              </Link>
-            ))}
+          <div className="flex gap-2 overflow-x-auto pb-1 lg:justify-self-center lg:pb-0">
+            {visibleNavItems.map((item) => {
+              const active = isNavItemActive(pathname, item.href);
+              return (
+                <Link
+                  key={item.href}
+                  className={`focus-ring shrink-0 rounded-full border px-4 py-2 text-sm transition-colors duration-200 ${
+                    active
+                      ? "border-mint/40 bg-mint/12 text-white"
+                      : "border-white/10 text-white/70 hover:bg-white/10 hover:text-white"
+                  }`}
+                  href={item.href}
+                >
+                  {item.label}
+                </Link>
+               );
+            })}
           </div>
-          <div className="flex items-center gap-3 text-sm text-white/64">
-            {user ? (
+          <div className="flex min-h-10 items-center gap-3 text-sm text-white/64 lg:min-w-[15rem] lg:justify-self-end">
+            {user === undefined ? (
+              <div
+                aria-hidden="true"
+                className="h-10 w-full rounded-full border border-white/10 bg-white/[0.06] motion-safe:animate-pulse"
+              />
+            ) : user ? (
               <>
-                <span className="truncate">{user.email}</span>
+                <span className="min-w-0 truncate">{user.email}</span>
                 <button
                   type="button"
                   onClick={requestLogout}
@@ -133,7 +174,7 @@ export function AppFrame({
               </>
             ) : (
               <Link
-                className="focus-ring rounded-full bg-white px-4 py-2 font-semibold text-ink transition-colors duration-200 hover:bg-mint"
+                className="focus-ring ml-auto rounded-full bg-white px-4 py-2 font-semibold text-ink transition-colors duration-200 hover:bg-mint"
                 href="/login"
               >
                 登录

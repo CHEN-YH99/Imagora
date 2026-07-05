@@ -12,6 +12,9 @@ export const IMAGE_MODEL_OPTIONS = [{ value: DEFAULT_IMAGE_MODEL_ID, label: "GPT
 // 登录/注册/找回/重置/验证码等 auth 接口的 401 属于业务性失败，不应触发全局跳转。
 export const SESSION_EXPIRED_EVENT = "imagora:session-expired";
 
+let currentUserCache: User | null | undefined;
+let currentUserPromise: Promise<User | null> | null = null;
+
 export function normalizeImageModel(modelName?: string | null): string {
   const normalized = modelName?.trim();
   if (!normalized) {
@@ -63,6 +66,43 @@ export type User = {
   createdAt: string;
   lastLoginAt: string | null;
 };
+
+export function peekCurrentUser(): User | null | undefined {
+  return currentUserCache;
+}
+
+export function setCurrentUser(user: User | null): void {
+  currentUserCache = user;
+  currentUserPromise = null;
+}
+
+export async function getCurrentUser(options: { force?: boolean } = {}): Promise<User | null> {
+  if (!options.force && currentUserCache !== undefined) {
+    return currentUserCache;
+  }
+
+  if (!options.force && currentUserPromise) {
+    return currentUserPromise;
+  }
+
+  currentUserPromise = apiFetch<{ user: User }>("/api/auth/me")
+    .then((result) => {
+      currentUserCache = result.user;
+      return result.user;
+    })
+    .catch((error) => {
+      if (error instanceof ApiRequestError && (error.status === 401 || error.status === 403)) {
+        currentUserCache = null;
+        return null;
+      }
+      throw error;
+    })
+    .finally(() => {
+      currentUserPromise = null;
+    });
+
+  return currentUserPromise;
+}
 
 export type CaptchaChallenge = {
   captchaId: string;
@@ -467,17 +507,21 @@ export async function login(
   password: string,
   captchaVerificationIds: string[]
 ): Promise<{ user: User }> {
-  return apiFetch<{ user: User }>("/api/auth/login", {
+  const result = await apiFetch<{ user: User }>("/api/auth/login", {
     method: "POST",
     body: { email, password, captchaVerificationIds }
   });
+  setCurrentUser(result.user);
+  return result;
 }
 
 export async function register(email: string, password: string): Promise<{ user: User }> {
-  return apiFetch<{ user: User }>("/api/auth/register", {
+  const result = await apiFetch<{ user: User }>("/api/auth/register", {
     method: "POST",
     body: { email, password }
   });
+  setCurrentUser(result.user);
+  return result;
 }
 
 export async function loginDemo(): Promise<{ user: User }> {
@@ -508,6 +552,7 @@ export async function logout(): Promise<void> {
   await apiFetch<{ ok: boolean }>("/api/auth/logout", {
     method: "POST"
   });
+  setCurrentUser(null);
 }
 
 export async function submitSafetyAppeal(safetyEventId: string, reason: string): Promise<{ appeal: SafetyAppeal }> {

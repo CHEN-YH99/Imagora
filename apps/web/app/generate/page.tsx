@@ -642,6 +642,9 @@ function GenerationProcessingPlaceholder({
   index: number;
   processingAspectRatio: string;
 }) {
+  const aspectRatioValue = parseAspectRatioValue(processingAspectRatio);
+  const isWideFrame = (aspectRatioValue ?? 1) >= 1.5;
+
   return (
     <div
       aria-label={`第 ${index + 1} 张图片正在生成`}
@@ -653,19 +656,41 @@ function GenerationProcessingPlaceholder({
       <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_30%_24%,rgba(217,248,91,0.18),transparent_32%),radial-gradient(circle_at_72%_68%,rgba(37,216,255,0.16),transparent_38%)] motion-safe:animate-pulse motion-reduce:opacity-70" />
       <span className="pointer-events-none absolute inset-3 rounded-[1.25rem] border border-white/10 bg-ink/72 backdrop-blur-md" />
       <span className="pointer-events-none absolute inset-x-5 top-5 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent motion-safe:animate-pulse motion-reduce:opacity-60" />
-      <div className="relative flex h-full flex-col items-center justify-center px-5 text-center">
-        <span className="relative inline-flex size-14 items-center justify-center rounded-full border border-mint/36 bg-mint/10 text-mint shadow-glow">
-          <span className="absolute inset-0 rounded-full border border-mint/40 motion-safe:animate-ping motion-reduce:hidden" />
-          <Sparkles className="size-6" aria-hidden="true" />
-        </span>
-        <p className="mt-4 text-sm font-semibold text-white">正在生成</p>
-        <p className="mt-1 max-w-48 text-xs leading-5 text-white/56">AI 正在构图、上色并输出图片</p>
-        <div className="mt-5 h-1.5 w-28 overflow-hidden rounded-full bg-white/10">
-          <span className="block h-full w-1/2 rounded-full bg-gradient-to-r from-mint via-cyanx to-volt motion-safe:animate-pulse" />
+      <div
+        className={`relative flex h-full justify-center ${isWideFrame ? "items-center px-4 py-4" : "items-center px-5 text-center"}`}
+      >
+        <div
+          className={`flex ${isWideFrame ? "w-full max-w-[17rem] items-center gap-3 rounded-[1.15rem] border border-white/10 bg-black/14 px-3 py-3 text-left" : "flex-col items-center"}`}
+        >
+          <span
+            className={`relative inline-flex items-center justify-center rounded-full border border-mint/36 bg-mint/10 text-mint shadow-glow ${isWideFrame ? "size-11 shrink-0" : "size-14"}`}
+          >
+            <span className="absolute inset-0 rounded-full border border-mint/40 motion-safe:animate-ping motion-reduce:hidden" />
+            <Sparkles className={isWideFrame ? "size-5" : "size-6"} aria-hidden="true" />
+          </span>
+          <div className={`min-w-0 ${isWideFrame ? "flex-1" : "mt-4"}`}>
+            <p className="text-sm font-semibold text-white">正在生成</p>
+            <p className={`mt-1 text-xs leading-5 text-white/56 ${isWideFrame ? "max-w-none" : "max-w-48"}`}>
+              AI 正在构图、上色并输出图片
+            </p>
+            <div className={isWideFrame ? "mt-3 h-1.5 w-full overflow-hidden rounded-full bg-white/10" : "mt-5 h-1.5 w-28 overflow-hidden rounded-full bg-white/10"}>
+              <span className="block h-full w-1/2 rounded-full bg-gradient-to-r from-mint via-cyanx to-volt motion-safe:animate-pulse" />
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
+}
+
+function parseAspectRatioValue(value: string): number | null {
+  const [widthText, heightText] = value.split("/").map((segment) => segment.trim());
+  const width = Number(widthText);
+  const height = Number(heightText);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0) {
+    return null;
+  }
+  return width / height;
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {
