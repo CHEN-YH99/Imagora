@@ -13,6 +13,7 @@ import {
   apiFetch,
   formatCredits,
   getSafetyAppeals,
+  resolveImageSrc,
   resolveSelectableImageModel,
   submitSafetyAppeal,
   waitForTask,
@@ -82,10 +83,14 @@ function GenerateExperience() {
   const terminalGenerationFailureMessage =
     images.length === 0 &&
     task &&
-    (task.status === "FAILED" || task.status === "BLOCKED" || task.status === "CANCELED" || Boolean(task?.failureMessage))
+    (task.status === "FAILED" ||
+      task.status === "BLOCKED" ||
+      task.status === "CANCELED" ||
+      Boolean(task?.failureMessage))
       ? generationFailureMessage(task)
       : "";
   const resultStatus = isGenerationProcessing ? (task?.status ?? "RUNNING") : (task?.status ?? "IDLE");
+  const referenceImageSrc = referenceImage ? resolveImageSrc(referenceImage.publicUrl) : null;
 
   useEffect(() => {
     loadAccount();
@@ -348,15 +353,25 @@ function GenerateExperience() {
               </div>
               {referenceImage ? (
                 <div className="flex items-center gap-3">
-                  <img
-                    className="size-20 shrink-0 rounded-xl border border-white/12 object-cover"
-                    src={referenceImage.publicUrl}
-                    alt="参考图预览"
-                    loading="lazy"
-                    decoding="async"
-                    width={80}
-                    height={80}
-                  />
+                  {referenceImageSrc ? (
+                    <img
+                      className="size-20 shrink-0 rounded-xl border border-white/12 object-cover"
+                      src={referenceImageSrc}
+                      alt="参考图预览"
+                      loading="lazy"
+                      decoding="async"
+                      width={80}
+                      height={80}
+                    />
+                  ) : (
+                    <div
+                      aria-label="参考图预览"
+                      className="flex size-20 shrink-0 items-center justify-center rounded-xl border border-white/12 bg-black/30 px-2 text-center text-xs text-white/45"
+                      role="img"
+                    >
+                      预览暂不可用
+                    </div>
+                  )}
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-white">{referenceImage.originalFileName}</p>
                     <p className="mt-1 text-xs text-white/50">

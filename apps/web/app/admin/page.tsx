@@ -20,6 +20,7 @@ import {
   formatStatusLabel,
   formatStyleLabel,
   formatTargetType,
+  resolveImageSrc,
   type AuditLog,
   type AdminMetrics,
   type AdminOperationalMetrics,
@@ -1228,15 +1229,7 @@ export default function AdminPage() {
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             {visibleImages.map((image) => (
               <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/20">
-                <img
-                  className="aspect-square w-full object-cover"
-                  src={image.thumbnailUrl}
-                  alt="后台图片预览"
-                  loading="lazy"
-                  decoding="async"
-                  width={image.width}
-                  height={image.height}
-                />
+                <AdminImagePreview image={image} alt="后台图片预览" className="aspect-square w-full object-cover" />
                 <div className="space-y-2 p-3">
                   <StatusPill>{image.visibility}</StatusPill>
                   <button
@@ -1807,14 +1800,10 @@ export default function AdminPage() {
                           key={image.id}
                           className="overflow-hidden rounded-xl border border-white/10 bg-white/5"
                         >
-                          <img
-                            src={image.thumbnailUrl}
+                          <AdminImagePreview
+                            image={image}
                             alt="任务图片"
                             className="aspect-square w-full object-cover"
-                            loading="lazy"
-                            decoding="async"
-                            width={image.width}
-                            height={image.height}
                           />
                           <div className="space-y-1 p-3 text-xs text-white/60">
                             <p>{image.visibility}</p>
@@ -1831,14 +1820,10 @@ export default function AdminPage() {
             ) : selectedDetail.kind === "image" ? (
               <div className="space-y-4 text-sm">
                 <div className="overflow-hidden rounded-2xl border border-white/10 bg-white/5">
-                  <img
-                    src={selectedDetail.data.image.thumbnailUrl}
+                  <AdminImagePreview
+                    image={selectedDetail.data.image}
                     alt="图片详情预览"
                     className="w-full object-cover"
-                    loading="lazy"
-                    decoding="async"
-                    width={selectedDetail.data.image.width}
-                    height={selectedDetail.data.image.height}
                   />
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
@@ -1925,6 +1910,35 @@ export default function AdminPage() {
         </div>
       ) : null}
     </AppFrame>
+  );
+}
+
+function AdminImagePreview({ image, alt, className }: { image: GeneratedImage; alt: string; className: string }) {
+  const imageSrc = resolveImageSrc(image.thumbnailUrl, image.publicUrl);
+
+  if (!imageSrc) {
+    return (
+      <div
+        aria-label={alt}
+        className={`flex min-h-24 items-center justify-center bg-black/30 px-3 text-center text-xs text-white/45 ${className}`}
+        role="img"
+        style={{ aspectRatio: `${image.width} / ${image.height}` }}
+      >
+        预览暂不可用
+      </div>
+    );
+  }
+
+  return (
+    <img
+      alt={alt}
+      className={className}
+      decoding="async"
+      height={image.height}
+      loading="lazy"
+      src={imageSrc}
+      width={image.width}
+    />
   );
 }
 

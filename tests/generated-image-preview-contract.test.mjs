@@ -16,10 +16,12 @@ const listPreviewConsumerFiles = [
 ];
 const previewWithDetailLinkFiles = ["apps/web/app/favorites/page.tsx", "apps/web/app/history/page.tsx"];
 
-test("shared preview button uses thumbnailUrl with hover CTA and ratio badge", async () => {
+test("shared preview button guards empty image sources with hover CTA and ratio badge", async () => {
   const content = await readFile(sharedPreviewFile, "utf8");
 
-  assert.match(content, /src=\{image\.thumbnailUrl\}/);
+  assert.match(content, /const thumbnailSrc = resolveImageSrc\(image\.thumbnailUrl, image\.publicUrl\);/);
+  assert.match(content, /thumbnailSrc \? \(/);
+  assert.match(content, /src=\{thumbnailSrc\}/);
   assert.match(content, /loading="lazy"/);
   assert.match(content, /decoding="async"/);
   assert.match(content, /Sparkles/);
@@ -28,15 +30,32 @@ test("shared preview button uses thumbnailUrl with hover CTA and ratio badge", a
   assert.match(content, /style=\{\{ aspectRatio: `\$\{image\.width\} \/ \$\{image\.height\}` \}\}/);
 });
 
-test("shared lightbox uses publicUrl and renders proportional dialog metadata", async () => {
+test("shared lightbox falls back from publicUrl and renders proportional dialog metadata", async () => {
   const content = await readFile(sharedPreviewFile, "utf8");
 
   assert.match(content, /role="dialog"/);
   assert.match(content, /aria-modal="true"/);
-  assert.match(content, /src=\{image\.publicUrl\}/);
+  assert.match(
+    content,
+    /const lightboxSrc = image \? resolveImageSrc\(image\.publicUrl, image\.thumbnailUrl\) : null;/
+  );
+  assert.match(content, /src=\{lightboxSrc\}/);
   assert.match(content, /object-contain/);
   assert.match(content, /\{image\.width\} × \{image\.height\}/);
   assert.match(content, /比例 \{formatImageAspectRatio\(image\.width, image\.height\)\}/);
+});
+
+test("web image elements do not bind potentially empty API URLs directly to src", async () => {
+  const unsafeBindings = [
+    [sharedPreviewFile, /src=\{image\.(thumbnailUrl|publicUrl)\}/],
+    ["apps/web/app/admin/page.tsx", /src=\{(?:image|selectedDetail\.data\.image)\.thumbnailUrl\}/],
+    ["apps/web/app/generate/page.tsx", /src=\{referenceImage\.publicUrl\}/]
+  ];
+
+  for (const [file, pattern] of unsafeBindings) {
+    const content = await readFile(file, "utf8");
+    assert.doesNotMatch(content, pattern, `${file} should sanitize image URLs before rendering img src`);
+  }
 });
 
 test("user-facing pages wire the shared lightbox into generated image surfaces", async () => {

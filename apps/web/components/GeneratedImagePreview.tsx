@@ -2,7 +2,7 @@
 
 import { Sparkles, X } from "lucide-react";
 import { useEffect } from "react";
-import type { GeneratedImage } from "../lib/api";
+import { resolveImageSrc, type GeneratedImage } from "../lib/api";
 
 export function GeneratedImagePreviewButton({
   image,
@@ -19,31 +19,48 @@ export function GeneratedImagePreviewButton({
   className?: string;
   imageClassName?: string;
 }) {
+  const thumbnailSrc = resolveImageSrc(image.thumbnailUrl, image.publicUrl);
+
   return (
     <button
       aria-haspopup="dialog"
       aria-label={ariaLabel}
       className={`focus-ring group relative w-full cursor-zoom-in overflow-hidden rounded-2xl border border-white/12 bg-black/28 text-left motion-reduce:transform-none motion-reduce:transition-none transition duration-200 hover:-translate-y-0.5 hover:border-mint/60 hover:shadow-glow ${className}`}
-      onClick={onOpen}
+      disabled={!thumbnailSrc}
+      onClick={thumbnailSrc ? onOpen : undefined}
       style={{ aspectRatio: `${image.width} / ${image.height}` }}
       type="button"
     >
-      <img
-        alt={alt}
-        className={`h-full w-full motion-reduce:transform-none motion-reduce:transition-none transition duration-300 group-hover:scale-[1.025] ${imageClassName}`}
-        decoding="async"
-        height={image.height}
-        loading="lazy"
-        src={image.thumbnailUrl}
-        width={image.width}
-      />
-      <span className="pointer-events-none absolute inset-0 bg-gradient-to-t from-ink/84 via-ink/24 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-visible:opacity-100" />
-      <span className="pointer-events-none absolute inset-x-0 top-1/2 flex -translate-y-1/2 justify-center px-4 opacity-0 transition duration-200 group-hover:opacity-100 group-focus-visible:opacity-100">
-        <span className="inline-flex items-center gap-2 rounded-full border border-cyanx/32 bg-ink/78 px-3 py-2 text-sm font-medium text-white shadow-glow backdrop-blur-md">
-          <Sparkles className="size-4 text-mint" aria-hidden="true" />
-          查看原图
+      {thumbnailSrc ? (
+        <img
+          alt={alt}
+          className={`h-full w-full motion-reduce:transform-none motion-reduce:transition-none transition duration-300 group-hover:scale-[1.025] ${imageClassName}`}
+          decoding="async"
+          height={image.height}
+          loading="lazy"
+          src={thumbnailSrc}
+          width={image.width}
+        />
+      ) : (
+        <span
+          aria-label={alt}
+          className="flex h-full w-full items-center justify-center bg-black/30 px-4 text-center text-sm text-white/45"
+          role="img"
+        >
+          预览暂不可用
         </span>
-      </span>
+      )}
+      {thumbnailSrc ? (
+        <>
+          <span className="pointer-events-none absolute inset-0 bg-gradient-to-t from-ink/84 via-ink/24 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-visible:opacity-100" />
+          <span className="pointer-events-none absolute inset-x-0 top-1/2 flex -translate-y-1/2 justify-center px-4 opacity-0 transition duration-200 group-hover:opacity-100 group-focus-visible:opacity-100">
+            <span className="inline-flex items-center gap-2 rounded-full border border-cyanx/32 bg-ink/78 px-3 py-2 text-sm font-medium text-white shadow-glow backdrop-blur-md">
+              <Sparkles className="size-4 text-mint" aria-hidden="true" />
+              查看原图
+            </span>
+          </span>
+        </>
+      ) : null}
       <span className="pointer-events-none absolute bottom-3 left-3 rounded-full border border-white/12 bg-ink/78 px-2.5 py-1 text-[11px] font-medium text-white/74 backdrop-blur-md">
         比例 {formatImageAspectRatio(image.width, image.height)}
       </span>
@@ -62,8 +79,10 @@ export function GeneratedImageLightbox({
   ariaLabel?: string;
   onClose: () => void;
 }) {
+  const lightboxSrc = image ? resolveImageSrc(image.publicUrl, image.thumbnailUrl) : null;
+
   useEffect(() => {
-    if (!image) {
+    if (!lightboxSrc) {
       return;
     }
 
@@ -81,9 +100,9 @@ export function GeneratedImageLightbox({
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [image, onClose]);
+  }, [lightboxSrc, onClose]);
 
-  if (!image) {
+  if (!image || !lightboxSrc) {
     return null;
   }
 
@@ -112,7 +131,7 @@ export function GeneratedImageLightbox({
           className="max-h-[82vh] max-w-full rounded-2xl border border-white/16 bg-black/30 object-contain shadow-glow"
           decoding="async"
           height={image.height}
-          src={image.publicUrl}
+          src={lightboxSrc}
           style={{ aspectRatio: `${image.width} / ${image.height}` }}
           width={image.width}
         />

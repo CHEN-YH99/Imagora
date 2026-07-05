@@ -31,6 +31,16 @@ export function resolveSelectableImageModel(modelName?: string | null): string {
   return IMAGE_MODEL_OPTIONS.some((option) => option.value === normalized) ? normalized : DEFAULT_IMAGE_MODEL_ID;
 }
 
+export function resolveImageSrc(...candidates: Array<string | null | undefined>): string | null {
+  for (const candidate of candidates) {
+    const normalized = candidate?.trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return null;
+}
+
 function isAuthEndpoint(path: string): boolean {
   return path.startsWith("/api/auth/");
 }
