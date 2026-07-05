@@ -1,7 +1,16 @@
+import type { GeneratedImage, Task } from "./api";
+
 export const GENERATION_DRAFT_STORAGE_KEY = "imagora:generation-draft";
+export const GENERATION_TASK_SNAPSHOTS_STORAGE_KEY = "imagora:generation-task-snapshots";
 
 export type GenerationDraft = {
   prompt: string;
+};
+
+export type GenerationTaskSnapshot = {
+  task: Task;
+  images: GeneratedImage[];
+  savedAt: string;
 };
 
 export type GeneratePathParams = {
@@ -48,5 +57,44 @@ export function consumeGenerationDraft(): GenerationDraft | null {
     return typeof parsed.prompt === "string" && parsed.prompt.trim() ? { prompt: parsed.prompt.trim() } : null;
   } catch {
     return null;
+  }
+}
+
+export function saveGenerationTaskSnapshot(task: Task, images: GeneratedImage[]): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const snapshots = readGenerationTaskSnapshots();
+  snapshots[task.id] = {
+    task,
+    images,
+    savedAt: new Date().toISOString()
+  };
+  const trimmedSnapshots = Object.fromEntries(
+    Object.entries(snapshots)
+      .sort(([, left], [, right]) => Date.parse(right.savedAt) - Date.parse(left.savedAt))
+      .slice(0, 12)
+  );
+  sessionStorage.setItem(GENERATION_TASK_SNAPSHOTS_STORAGE_KEY, JSON.stringify(trimmedSnapshots));
+}
+
+export function readGenerationTaskSnapshot(taskId: string): GenerationTaskSnapshot | null {
+  if (!taskId || typeof window === "undefined") {
+    return null;
+  }
+  const snapshots = readGenerationTaskSnapshots();
+  return snapshots[taskId] ?? null;
+}
+
+function readGenerationTaskSnapshots(): Record<string, GenerationTaskSnapshot> {
+  const rawSnapshots = sessionStorage.getItem(GENERATION_TASK_SNAPSHOTS_STORAGE_KEY);
+  if (!rawSnapshots) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(rawSnapshots) as Record<string, GenerationTaskSnapshot>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
   }
 }

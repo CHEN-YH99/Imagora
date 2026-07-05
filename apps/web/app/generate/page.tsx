@@ -26,8 +26,16 @@ import {
   buildGeneratePath,
   buildGenerateTaskPath,
   consumeGenerationDraft,
-  saveGenerationDraft
+  readGenerationTaskSnapshot,
+  saveGenerationDraft,
+  saveGenerationTaskSnapshot
 } from "../../lib/generateDrafts";
+
+const DEFAULT_PROMPT = "半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节";
+const DEFAULT_NEGATIVE_PROMPT = "低质量、模糊、水印、变形";
+const DEFAULT_ASPECT_RATIO = "1:1";
+const DEFAULT_QUANTITY = 2;
+const DEFAULT_QUALITY = "standard";
 
 const qualityOptions = [
   { value: "draft", label: "1K", desc: "512–768px，速度最快" },
@@ -60,16 +68,41 @@ export default function GeneratePage() {
 function GenerateExperience() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [prompt, setPrompt] = useState("半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节");
-  const [negativePrompt, setNegativePrompt] = useState("低质量、模糊、水印、变形");
-  const [aspectRatio, setAspectRatio] = useState("1:1");
-  const [quantity, setQuantity] = useState(2);
-  const [quality, setQuality] = useState("standard");
-  const [model, setModel] = useState(DEFAULT_IMAGE_MODEL_ID);
+  const initialTaskId = searchParams.get("taskId");
+  const initialRouteStateRef = useRef<{
+    draft: ReturnType<typeof consumeGenerationDraft>;
+    taskSnapshot: ReturnType<typeof readGenerationTaskSnapshot>;
+  } | null>(null);
+  if (!initialRouteStateRef.current) {
+    initialRouteStateRef.current = {
+      draft: consumeGenerationDraft(),
+      taskSnapshot: initialTaskId ? readGenerationTaskSnapshot(initialTaskId) : null
+    };
+  }
+  const initialDraft = initialRouteStateRef.current.draft;
+  const initialTaskSnapshot = initialRouteStateRef.current.taskSnapshot;
+  const [prompt, setPrompt] = useState(
+    initialTaskSnapshot?.task.prompt ?? initialDraft?.prompt ?? DEFAULT_PROMPT
+  );
+  const [negativePrompt, setNegativePrompt] = useState(
+    initialTaskSnapshot?.task.negativePrompt ?? DEFAULT_NEGATIVE_PROMPT
+  );
+  const [aspectRatio, setAspectRatio] = useState(
+    initialTaskSnapshot?.task.aspectRatio ?? resolveInitialAspectRatio(searchParams.get("aspectRatio"))
+  );
+  const [quantity, setQuantity] = useState(
+    initialTaskSnapshot?.task.quantity ?? resolveInitialQuantity(searchParams.get("quantity"))
+  );
+  const [quality, setQuality] = useState(
+    initialTaskSnapshot?.task.quality ?? resolveInitialQuality(searchParams.get("quality"))
+  );
+  const [model, setModel] = useState(
+    initialTaskSnapshot?.task.modelName ?? resolveInitialModel(searchParams.get("model"))
+  );
   const [quote, setQuote] = useState(0);
   const [account, setAccount] = useState<CreditAccount | null>(null);
-  const [task, setTask] = useState<Task | null>(null);
-  const [images, setImages] = useState<GeneratedImage[]>([]);
+  const [task, setTask] = useState<Task | null>(initialTaskSnapshot?.task ?? null);
+  const [images, setImages] = useState<GeneratedImage[]>(initialTaskSnapshot?.images ?? []);
   const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState<"info" | "success" | "danger">("danger");
@@ -79,6 +112,7 @@ function GenerateExperience() {
   const [appealReason, setAppealReason] = useState("");
   const [appealStatus, setAppealStatus] = useState<SafetyAppeal | null>(null);
   const [appealLoading, setAppealLoading] = useState(false);
+  const [restoringTaskView, setRestoringTaskView] = useState(Boolean(initialTaskId && !initialTaskSnapshot));
   const quoteRequestSequenceRef = useRef(0);
   const restoringTaskIdRef = useRef<string | null>(null);
   const isGenerationProcessing =
@@ -101,15 +135,27 @@ function GenerateExperience() {
   }, []);
 
   useEffect(() => {
-    const draft = consumeGenerationDraft();
     const taskId = searchParams.get("taskId");
     const ar = searchParams.get("aspectRatio");
     const q = searchParams.get("quality");
     const qty = searchParams.get("quantity");
     const m = searchParams.get("model");
-    if (draft?.prompt) setPrompt(draft.prompt);
     if (taskId && restoringTaskIdRef.current !== taskId) {
+      const cachedSnapshot = readGenerationTaskSnapshot(taskId);
+      if (cachedSnapshot) {
+        applyTaskResult(cachedSnapshot);
+        applyTaskParameters(cachedSnapshot.task);
+        setRestoringTaskView(false);
+        void restoreTask(taskId, { preserveVisibleState: true });
+        return;
+      }
+      setRestoringTaskView(true);
       void restoreTask(taskId);
+      return;
+    }
+    if (!taskId) {
+      restoringTaskIdRef.current = null;
+      setRestoringTaskView(false);
     }
     if (ar && aspectRatioOptions.some((o) => o.value === ar)) setAspectRatio(ar);
     if (q && qualityOptions.some((o) => o.value === q)) setQuality(q);
@@ -121,6 +167,13 @@ function GenerateExperience() {
       setModel(resolveSelectableImageModel(m));
     }
   }, [searchParams]);
+
+  useEffect(() => {
+    if (!task) {
+      return;
+    }
+    saveGenerationTaskSnapshot(task, images);
+  }, [images, task]);
 
   useEffect(() => {
     if (!hasPrompt) {
@@ -205,14 +258,16 @@ function GenerateExperience() {
     }
   }
 
-  async function restoreTask(taskId: string) {
+  async function restoreTask(taskId: string, options?: { preserveVisibleState?: boolean }) {
     restoringTaskIdRef.current = taskId;
     setLoading(true);
     setMessage("");
     setMessageTone("info");
-    setTask(null);
-    setImages([]);
-    setSelectedPreviewImage(null);
+    if (!options?.preserveVisibleState) {
+      setTask(null);
+      setImages([]);
+      setSelectedPreviewImage(null);
+    }
     setAppealEventId(null);
     setAppealStatus(null);
     setShowAppealForm(false);
@@ -259,6 +314,7 @@ function GenerateExperience() {
       setMessage(error instanceof Error ? error.message : "生成任务恢复失败，请到历史记录查看结果。");
       setMessageTone("danger");
     } finally {
+      setRestoringTaskView(false);
       setLoading(false);
     }
   }
@@ -391,263 +447,326 @@ function GenerateExperience() {
   return (
     <AppFrame title="图片生成" subtitle="输入提示词，选择模型、比例和画质，提交前确认积分消耗。">
       <div className="grid gap-5 lg:grid-cols-[0.95fr_1.05fr]">
-        <Panel>
-          <div className="space-y-5">
-            {/* 提示词 */}
-            <label className="block text-sm text-white/70">
-              提示词
-              <textarea
-                className="focus-ring mt-2 min-h-52 w-full resize-none rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-              />
-            </label>
-
-            {/* 负向提示词 */}
-            <label className="block text-sm text-white/70">
-              负向提示词
-              <input
-                className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                value={negativePrompt}
-                onChange={(event) => setNegativePrompt(event.target.value)}
-              />
-            </label>
-
-            {/* 模型选择下拉 */}
-            <label className="block text-sm text-white/70">
-              模型
-              <select
-                className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
-                value={model}
-                onChange={(event) => setModel(event.target.value)}
-              >
-                {IMAGE_MODEL_OPTIONS.map((item) => (
-                  <option key={item.value} value={item.value}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              {/* 画面比例下拉 */}
-              <label className="block text-sm text-white/70">
-                画面比例
-                <select
-                  className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
-                  value={aspectRatio}
-                  onChange={(event) => setAspectRatio(event.target.value)}
-                >
-                  {aspectRatioOptions.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              {/* 生成数量 */}
-              <label className="block text-sm text-white/70">
-                生成数量
-                <input
-                  className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                  type="number"
-                  min={1}
-                  max={4}
-                  value={quantity}
-                  onChange={(event) => {
-                    const rawValue = event.target.value.trim();
-                    if (!rawValue) {
-                      setQuantity(1);
-                      return;
-                    }
-                    const nextValue = Number(rawValue);
-                    if (!Number.isFinite(nextValue)) {
-                      return;
-                    }
-                    setQuantity(Math.max(1, Math.min(4, Math.trunc(nextValue))));
-                  }}
-                />
-              </label>
-            </div>
-
-            {/* 画质选择 */}
-            <fieldset>
-              <legend className="mb-2 text-sm text-white/70">画质</legend>
-              <div className="grid grid-cols-3 gap-2">
-                {qualityOptions.map((item) => (
-                  <button
-                    key={item.value}
-                    type="button"
-                    onClick={() => setQuality(item.value)}
-                    className={`focus-ring rounded-2xl border px-3 py-3 text-center transition-colors duration-200 ${
-                      quality === item.value
-                        ? "border-mint/70 bg-mint/10 text-white"
-                        : "border-white/12 bg-black/28 text-white/70 hover:bg-white/8"
-                    }`}
-                  >
-                    <p className="text-base font-bold">{item.label}</p>
-                    <p className="mt-0.5 text-xs opacity-60">{item.desc}</p>
-                  </button>
-                ))}
-              </div>
-            </fieldset>
-
-            {/* 积分预估 */}
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/12 bg-black/24 p-4">
-              <span className="inline-flex items-center gap-2 text-sm text-white/72">
-                <Coins className="size-4 text-volt" aria-hidden="true" />
-                预计消耗：{quote ? formatCredits(quote) : "登录后计算"}
-              </span>
-              <span className="text-sm text-white/72">
-                当前余额：{account ? formatCredits(account.balance) : "未登录"}
-              </span>
-            </div>
-
-            {message ? (
-              <InlineNotice tone={messageTone}>
-                {message}
-                {messageTone === "danger" ? (
-                  <>
-                    {" "}
-                    <button className="underline underline-offset-4" onClick={() => void submit()} type="button">
-                      重试提交
-                    </button>
-                    {" 或 "}
-                    <button
-                      className="underline underline-offset-4"
-                      onClick={() => router.push("/history")}
-                      type="button"
-                    >
-                      去历史查看
-                    </button>
-                  </>
-                ) : null}
-              </InlineNotice>
-            ) : null}
-
-            {/* 申诉入口：仅在任务被内容拦截且存在对应安全事件时显示 */}
-            {appealEventId && !appealStatus ? (
-              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/8 p-4">
-                <p className="mb-3 text-sm text-amber-300">如认为是误判，可提交申诉，管理员将在审核后回复。</p>
-                {showAppealForm ? (
-                  <div className="space-y-3">
-                    <label className="block text-sm text-white/70">
-                      申诉理由（至少 10 字）
-                      <textarea
-                        className="focus-ring mt-2 min-h-24 w-full resize-none rounded-xl border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                        value={appealReason}
-                        onChange={(event) => setAppealReason(event.target.value)}
-                        placeholder="请说明为什么认为此次拦截是误判，或提供更多背景信息..."
-                        maxLength={1000}
-                      />
-                    </label>
-                    <div className="flex gap-2">
-                      <button
-                        className="focus-ring rounded-full bg-amber-500/80 px-4 py-2 text-sm font-semibold text-ink transition-colors hover:bg-amber-400 disabled:opacity-50"
-                        type="button"
-                        disabled={appealLoading || appealReason.trim().length < 10}
-                        onClick={() => void handleAppeal()}
-                      >
-                        {appealLoading ? "提交中..." : "提交申诉"}
-                      </button>
-                      <button
-                        className="focus-ring rounded-full border border-white/20 px-4 py-2 text-sm text-white/60 hover:text-white"
-                        type="button"
-                        onClick={() => setShowAppealForm(false)}
-                      >
-                        取消
-                      </button>
-                    </div>
+        {restoringTaskView ? (
+          <>
+            <Panel>
+              <div className="space-y-5">
+                <div>
+                  <div className="h-4 w-20 rounded-full bg-white/10" />
+                  <div className="mt-3 min-h-52 rounded-2xl border border-white/12 bg-black/28 p-4">
+                    <div className="h-5 w-40 rounded-full bg-white/10" />
+                    <div className="mt-3 h-4 w-full rounded-full bg-white/10" />
+                    <div className="mt-2 h-4 w-5/6 rounded-full bg-white/10" />
+                    <div className="mt-2 h-4 w-3/4 rounded-full bg-white/10" />
                   </div>
-                ) : (
-                  <button
-                    className="focus-ring rounded-full bg-amber-500/20 px-4 py-2 text-sm text-amber-300 transition-colors hover:bg-amber-500/30"
-                    type="button"
-                    onClick={() => setShowAppealForm(true)}
-                  >
-                    发起申诉
-                  </button>
-                )}
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="h-14 rounded-2xl border border-white/12 bg-black/28" />
+                  <div className="h-14 rounded-2xl border border-white/12 bg-black/28" />
+                </div>
+                <div className="h-24 rounded-2xl border border-white/12 bg-black/24" />
+                <InlineNotice tone="info">正在恢复生成结果，马上回来，别急着怀疑人生。</InlineNotice>
               </div>
-            ) : null}
-
-            {appealStatus ? (
-              <div className="rounded-2xl border border-white/12 bg-white/4 p-4">
-                <p className="text-sm text-white/70">
-                  申诉状态：
-                  <span
-                    className={`font-medium ${appealStatus.status === "APPROVED" ? "text-mint" : appealStatus.status === "REJECTED" ? "text-ember" : "text-amber-300"}`}
-                  >
-                    {appealStatus.status === "PENDING"
-                      ? "待审核"
-                      : appealStatus.status === "APPROVED"
-                        ? "已通过"
-                        : "已驳回"}
-                  </span>
-                  {appealStatus.adminNote ? `，备注：${appealStatus.adminNote}` : ""}
-                </p>
+            </Panel>
+            <Panel>
+              <div className="mb-5 flex items-center justify-between gap-3">
+                <h2 className="text-xl font-semibold">生成结果</h2>
+                <StatusPill>RESTORING</StatusPill>
               </div>
-            ) : null}
-
-            <button
-              className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
-              type="button"
-              disabled={loading || !prompt.trim()}
-              onClick={submit}
-            >
-              <Wand2 className="size-4" aria-hidden="true" />
-              {loading ? "生成中..." : "提交生成"}
-            </button>
-          </div>
-        </Panel>
-
-        <Panel>
-          <div className="mb-5 flex items-center justify-between gap-3">
-            <h2 className="text-xl font-semibold">生成结果</h2>
-            <StatusPill>{resultStatus}</StatusPill>
-          </div>
-          {terminalGenerationFailureMessage ? (
-            <div className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-4">
-              <p className="text-sm font-semibold text-ember">生成失败</p>
-              <p className="mt-1 text-sm leading-6 text-ember/90">{terminalGenerationFailureMessage}</p>
-            </div>
-          ) : null}
-          <div className="grid gap-3 sm:grid-cols-2">
-            {isGenerationProcessing
-              ? Array.from({ length: Math.max(1, quantity) }).map((_, index) => (
-                  <GenerationProcessingPlaceholder
-                    key={`生成占位-${index}`}
-                    index={index}
-                    processingAspectRatio={processingAspectRatio}
+              <div className="rounded-3xl border border-white/12 bg-black/24 p-4">
+                <div
+                  className="flex items-center justify-center rounded-[1.75rem] border border-dashed border-white/14 bg-black/32"
+                  style={{ aspectRatio: "1 / 1" }}
+                >
+                  <div className="flex flex-col items-center gap-3 py-14 text-center">
+                    <Sparkles className="size-8 animate-pulse text-mint" aria-hidden="true" />
+                    <p className="text-sm text-white/72">正在恢复上一次生成结果...</p>
+                  </div>
+                </div>
+              </div>
+            </Panel>
+          </>
+        ) : (
+          <>
+            <Panel>
+              <div className="space-y-5">
+                {/* 提示词 */}
+                <label className="block text-sm text-white/70">
+                  提示词
+                  <textarea
+                    className="focus-ring mt-2 min-h-52 w-full resize-none rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+                    value={prompt}
+                    onChange={(event) => setPrompt(event.target.value)}
                   />
-                ))
-              : null}
-            {images.map((image, index) => (
-              <GeneratedImagePreviewButton
-                key={image.id}
-                alt="生成图片结果"
-                ariaLabel={`预览第 ${index + 1} 张生成图片`}
-                image={image}
-                onOpen={() => setSelectedPreviewImage(image)}
-              />
-            ))}
-            {!terminalGenerationFailureMessage && !isGenerationProcessing && images.length === 0 ? (
-              <div className="sm:col-span-2">
-                <EmptyState
-                  title="生成结果会显示在这里"
-                  description="填写提示词并提交生成后，图片会按固定比例展示，成功后可进入详情、下载或再次生成。"
-                  actionLabel="提交生成"
-                  onAction={() => void submit()}
-                />
+                </label>
+
+                {/* 负向提示词 */}
+                <label className="block text-sm text-white/70">
+                  负向提示词
+                  <input
+                    className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+                    value={negativePrompt}
+                    onChange={(event) => setNegativePrompt(event.target.value)}
+                  />
+                </label>
+
+                {/* 模型选择下拉 */}
+                <label className="block text-sm text-white/70">
+                  模型
+                  <select
+                    className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                    value={model}
+                    onChange={(event) => setModel(event.target.value)}
+                  >
+                    {IMAGE_MODEL_OPTIONS.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {/* 画面比例下拉 */}
+                  <label className="block text-sm text-white/70">
+                    画面比例
+                    <select
+                      className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                      value={aspectRatio}
+                      onChange={(event) => setAspectRatio(event.target.value)}
+                    >
+                      {aspectRatioOptions.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {/* 生成数量 */}
+                  <label className="block text-sm text-white/70">
+                    生成数量
+                    <input
+                      className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+                      type="number"
+                      min={1}
+                      max={4}
+                      value={quantity}
+                      onChange={(event) => {
+                        const rawValue = event.target.value.trim();
+                        if (!rawValue) {
+                          setQuantity(1);
+                          return;
+                        }
+                        const nextValue = Number(rawValue);
+                        if (!Number.isFinite(nextValue)) {
+                          return;
+                        }
+                        setQuantity(Math.max(1, Math.min(4, Math.trunc(nextValue))));
+                      }}
+                    />
+                  </label>
+                </div>
+
+                {/* 画质选择 */}
+                <fieldset>
+                  <legend className="mb-2 text-sm text-white/70">画质</legend>
+                  <div className="grid grid-cols-3 gap-2">
+                    {qualityOptions.map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        onClick={() => setQuality(item.value)}
+                        className={`focus-ring rounded-2xl border px-3 py-3 text-center transition-colors duration-200 ${
+                          quality === item.value
+                            ? "border-mint/70 bg-mint/10 text-white"
+                            : "border-white/12 bg-black/28 text-white/70 hover:bg-white/8"
+                        }`}
+                      >
+                        <p className="text-base font-bold">{item.label}</p>
+                        <p className="mt-0.5 text-xs opacity-60">{item.desc}</p>
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+
+                {/* 积分预估 */}
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/12 bg-black/24 p-4">
+                  <span className="inline-flex items-center gap-2 text-sm text-white/72">
+                    <Coins className="size-4 text-volt" aria-hidden="true" />
+                    预计消耗：{quote ? formatCredits(quote) : "登录后计算"}
+                  </span>
+                  <span className="text-sm text-white/72">
+                    当前余额：{account ? formatCredits(account.balance) : "未登录"}
+                  </span>
+                </div>
+
+                {message ? (
+                  <InlineNotice tone={messageTone}>
+                    {message}
+                    {messageTone === "danger" ? (
+                      <>
+                        {" "}
+                        <button className="underline underline-offset-4" onClick={() => void submit()} type="button">
+                          重试提交
+                        </button>
+                        {" 或 "}
+                        <button
+                          className="underline underline-offset-4"
+                          onClick={() => router.push("/history")}
+                          type="button"
+                        >
+                          去历史查看
+                        </button>
+                      </>
+                    ) : null}
+                  </InlineNotice>
+                ) : null}
+
+                {/* 申诉入口：仅在任务被内容拦截且存在对应安全事件时显示 */}
+                {appealEventId && !appealStatus ? (
+                  <div className="rounded-2xl border border-amber-500/30 bg-amber-500/8 p-4">
+                    <p className="mb-3 text-sm text-amber-300">如认为是误判，可提交申诉，管理员将在审核后回复。</p>
+                    {showAppealForm ? (
+                      <div className="space-y-3">
+                        <label className="block text-sm text-white/70">
+                          申诉理由（至少 10 字）
+                          <textarea
+                            className="focus-ring mt-2 min-h-24 w-full resize-none rounded-xl border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                            value={appealReason}
+                            onChange={(event) => setAppealReason(event.target.value)}
+                            placeholder="请说明为什么认为此次拦截是误判，或提供更多背景信息..."
+                            maxLength={1000}
+                          />
+                        </label>
+                        <div className="flex gap-2">
+                          <button
+                            className="focus-ring rounded-full bg-amber-500/80 px-4 py-2 text-sm font-semibold text-ink transition-colors hover:bg-amber-400 disabled:opacity-50"
+                            type="button"
+                            disabled={appealLoading || appealReason.trim().length < 10}
+                            onClick={() => void handleAppeal()}
+                          >
+                            {appealLoading ? "提交中..." : "提交申诉"}
+                          </button>
+                          <button
+                            className="focus-ring rounded-full border border-white/20 px-4 py-2 text-sm text-white/60 hover:text-white"
+                            type="button"
+                            onClick={() => setShowAppealForm(false)}
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        className="focus-ring rounded-full bg-amber-500/20 px-4 py-2 text-sm text-amber-300 transition-colors hover:bg-amber-500/30"
+                        type="button"
+                        onClick={() => setShowAppealForm(true)}
+                      >
+                        发起申诉
+                      </button>
+                    )}
+                  </div>
+                ) : null}
+
+                {appealStatus ? (
+                  <div className="rounded-2xl border border-white/12 bg-white/4 p-4">
+                    <p className="text-sm text-white/70">
+                      申诉状态：
+                      <span
+                        className={`font-medium ${appealStatus.status === "APPROVED" ? "text-mint" : appealStatus.status === "REJECTED" ? "text-ember" : "text-amber-300"}`}
+                      >
+                        {appealStatus.status === "PENDING"
+                          ? "待审核"
+                          : appealStatus.status === "APPROVED"
+                            ? "已通过"
+                            : "已驳回"}
+                      </span>
+                      {appealStatus.adminNote ? `，备注：${appealStatus.adminNote}` : ""}
+                    </p>
+                  </div>
+                ) : null}
+
+                <button
+                  className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
+                  type="button"
+                  disabled={loading || !prompt.trim()}
+                  onClick={submit}
+                >
+                  <Wand2 className="size-4" aria-hidden="true" />
+                  {loading ? "生成中..." : "提交生成"}
+                </button>
               </div>
-            ) : null}
-          </div>
-        </Panel>
+            </Panel>
+
+            <Panel>
+              <div className="mb-5 flex items-center justify-between gap-3">
+                <h2 className="text-xl font-semibold">生成结果</h2>
+                <StatusPill>{resultStatus}</StatusPill>
+              </div>
+              {terminalGenerationFailureMessage ? (
+                <div className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-4">
+                  <p className="text-sm font-semibold text-ember">生成失败</p>
+                  <p className="mt-1 text-sm leading-6 text-ember/90">{terminalGenerationFailureMessage}</p>
+                </div>
+              ) : null}
+              <div className="grid gap-3 sm:grid-cols-2">
+                {isGenerationProcessing
+                  ? Array.from({ length: Math.max(1, quantity) }).map((_, index) => (
+                      <GenerationProcessingPlaceholder
+                        key={`生成占位-${index}`}
+                        index={index}
+                        processingAspectRatio={processingAspectRatio}
+                      />
+                    ))
+                  : null}
+                {images.map((image, index) => (
+                  <GeneratedImagePreviewButton
+                    key={image.id}
+                    alt="生成图片结果"
+                    ariaLabel={`预览第 ${index + 1} 张生成图片`}
+                    image={image}
+                    onOpen={() => setSelectedPreviewImage(image)}
+                  />
+                ))}
+                {!terminalGenerationFailureMessage && !isGenerationProcessing && images.length === 0 ? (
+                  <div className="sm:col-span-2">
+                    <EmptyState
+                      title="生成结果会显示在这里"
+                      description="填写提示词并提交生成后，图片会按固定比例展示，成功后可进入详情、下载或再次生成。"
+                      actionLabel="提交生成"
+                      onAction={() => void submit()}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </Panel>
+          </>
+        )}
       </div>
       <GeneratedImageLightbox image={selectedPreviewImage} onClose={() => setSelectedPreviewImage(null)} />
     </AppFrame>
   );
+}
+
+function resolveInitialAspectRatio(value: string | null): string {
+  return value && aspectRatioOptions.some((item) => item.value === value) ? value : DEFAULT_ASPECT_RATIO;
+}
+
+function resolveInitialQuality(value: string | null): string {
+  return value && qualityOptions.some((item) => item.value === value) ? value : DEFAULT_QUALITY;
+}
+
+function resolveInitialQuantity(value: string | null): number {
+  if (!value) {
+    return DEFAULT_QUANTITY;
+  }
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 4 ? parsed : DEFAULT_QUANTITY;
+}
+
+function resolveInitialModel(value: string | null): string {
+  return value ? resolveSelectableImageModel(value) : DEFAULT_IMAGE_MODEL_ID;
 }
 
 function GenerationProcessingPlaceholder({

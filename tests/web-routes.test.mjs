@@ -166,6 +166,9 @@ test("web core pages expose recoverable empty states and confirm destructive act
   assert.match(generatePage, /buildGenerateTaskPath\(created\.task\.id\)/);
   assert.match(generatePage, /\/api\/generation\/tasks\/\$\{taskId\}/);
   assert.match(generatePage, /setTimeout\(\(\) =>/);
+  assert.match(generatePage, /readGenerationTaskSnapshot/);
+  assert.match(generatePage, /saveGenerationTaskSnapshot/);
+  assert.match(generatePage, /restoringTaskView/);
   assert.match(generatePage, /Math\.max\(1, Math\.min\(4, Math\.trunc\(nextValue\)\)\)/);
   assert.match(generatePage, /min-h-52/);
   assert.doesNotMatch(generatePage, /参考图/);
@@ -309,6 +312,7 @@ test("generation failures reconcile refunds and surface refunded credit copy", a
 
 test("generate page shows animated processing placeholders before results arrive", async () => {
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const draftsFile = await readFile(join(root, "apps/web/lib/generateDrafts.ts"), "utf8");
 
   assert.match(generatePage, /function GenerationProcessingPlaceholder/);
   assert.match(generatePage, /isGenerationProcessing/);
@@ -324,4 +328,8 @@ test("generate page shows animated processing placeholders before results arrive
   assert.match(generatePage, /生成失败/);
   assert.match(generatePage, /!terminalGenerationFailureMessage && !isGenerationProcessing && images\.length === 0/);
   assert.match(generatePage, /task\?\.failureMessage/);
+  assert.match(generatePage, /正在恢复上一次生成结果/);
+  assert.match(draftsFile, /GENERATION_TASK_SNAPSHOTS_STORAGE_KEY/);
+  assert.match(draftsFile, /saveGenerationTaskSnapshot/);
+  assert.match(draftsFile, /readGenerationTaskSnapshot/);
 });
