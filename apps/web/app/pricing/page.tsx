@@ -145,14 +145,14 @@ function PricingView() {
               {(() => {
                 const isBuying = buyingPlanId === plan.id;
                 return (
-              <button
-                className="focus-ring w-full rounded-full bg-white px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-mint disabled:cursor-not-allowed disabled:bg-white/70 disabled:text-ink/70"
-                disabled={Boolean(buyingPlanId)}
-                type="button"
-                onClick={() => buy(plan.id)}
-              >
-                {isBuying ? "处理中..." : "购买积分"}
-              </button>
+                  <button
+                    className="focus-ring w-full rounded-full bg-white px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-mint disabled:cursor-not-allowed disabled:bg-white/70 disabled:text-ink/70"
+                    disabled={Boolean(buyingPlanId)}
+                    type="button"
+                    onClick={() => buy(plan.id)}
+                  >
+                    {isBuying ? "处理中..." : "购买积分"}
+                  </button>
                 );
               })()}
             </div>

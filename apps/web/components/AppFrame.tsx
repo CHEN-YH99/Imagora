@@ -151,7 +151,7 @@ export function AppFrame({
                 >
                   {item.label}
                 </Link>
-               );
+              );
             })}
           </div>
           <div className="flex min-h-10 items-center gap-3 text-sm text-white/64 lg:min-w-[15rem] lg:justify-self-end">
@@ -259,13 +259,7 @@ export function Panel({ children, className = "" }: { children: React.ReactNode;
   );
 }
 
-export function StatusPill({
-  children,
-  className = ""
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
+export function StatusPill({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   const rawValue = typeof children === "string" ? children : null;
   const label = rawValue ? formatStatusLabel(rawValue) : children;
   return (
@@ -294,7 +288,11 @@ function statusPillToneClass(value: string | null): string {
     return "border-volt/35 bg-volt/10 text-volt";
   }
 
-  if (["FAILED", "BLOCKED", "CANCELED", "CLOSED", "SUSPENDED", "DELETED", "REJECTED", "HIDDEN", "critical"].includes(value)) {
+  if (
+    ["FAILED", "BLOCKED", "CANCELED", "CLOSED", "SUSPENDED", "DELETED", "REJECTED", "HIDDEN", "critical"].includes(
+      value
+    )
+  ) {
     return "border-ember/35 bg-ember/10 text-ember";
   }
 

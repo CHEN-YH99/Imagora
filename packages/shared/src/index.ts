@@ -603,11 +603,7 @@ export function runGenerationMaintenance(
     if (task.status === "PENDING" && isOlderThan(task.createdAt, nowMs, pendingTimeoutMs)) {
       markTaskFailed(task, "QUEUE_TIMEOUT", "生成任务排队超时，已自动返还本次扣除的积分。", now);
       result.failedPendingTasks += 1;
-    } else if (
-      task.status === "RUNNING" &&
-      task.startedAt &&
-      isOlderThan(task.startedAt, nowMs, runningTimeoutMs)
-    ) {
+    } else if (task.status === "RUNNING" && task.startedAt && isOlderThan(task.startedAt, nowMs, runningTimeoutMs)) {
       markTaskFailed(task, "WORKER_TIMEOUT", "生成处理超时，已自动返还本次扣除的积分。", now);
       result.failedRunningTasks += 1;
     }

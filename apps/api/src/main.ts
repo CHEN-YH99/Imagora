@@ -995,9 +995,7 @@ app.post("/api/orders", async (request, reply) => {
   assertPaymentProviderEnabled(input.paymentProvider);
   return store.update(async (data) => {
     runOrderMaintenance(data);
-    const duplicate = input.clientRequestId
-      ? findOrderByClientRequestId(data, user.id, input.clientRequestId)
-      : null;
+    const duplicate = input.clientRequestId ? findOrderByClientRequestId(data, user.id, input.clientRequestId) : null;
     if (duplicate) {
       if (duplicate.planId !== input.planId || duplicate.paymentProvider !== input.paymentProvider) {
         throw new AppError("CONFLICT", "clientRequestId has already been used for another order", 409);
@@ -1006,7 +1004,11 @@ app.post("/api/orders", async (request, reply) => {
       if (!duplicatePlan) {
         throw new AppError("PLAN_UNAVAILABLE", "Plan is not available", 404);
       }
-      return envelope(request, { order: duplicate, plan: duplicatePlan, checkoutUrl: findCheckoutUrl(data, duplicate) });
+      return envelope(request, {
+        order: duplicate,
+        plan: duplicatePlan,
+        checkoutUrl: findCheckoutUrl(data, duplicate)
+      });
     }
     const plan = data.plans.find((item) => item.id === input.planId && item.status === "ACTIVE");
     if (!plan) {

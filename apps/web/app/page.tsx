@@ -244,8 +244,7 @@ export default function HomePage() {
 
   const creditCost = useMemo(() => Math.ceil(8 * qualityMultiplier[quality] * quantity), [quality, quantity]);
   const activePromptTemplate = promptExamples[promptLoopIndex] ?? promptExamples[0] ?? "";
-  const promptValue =
-    promptMode === "auto" ? activePromptTemplate.slice(0, Math.max(promptLoopLength, 0)) : prompt;
+  const promptValue = promptMode === "auto" ? activePromptTemplate.slice(0, Math.max(promptLoopLength, 0)) : prompt;
   const effectivePrompt = (promptMode === "auto" ? activePromptTemplate : prompt).trim();
   const generatePath = useMemo(() => {
     return buildGeneratePath({
@@ -557,7 +556,9 @@ export default function HomePage() {
                   <div className="inline-flex items-center gap-2 text-xs text-white/48">
                     <span
                       className={`h-2.5 w-2.5 rounded-full ${
-                        promptMode === "auto" ? "bg-cyanx shadow-[0_0_0_4px_rgba(37,216,255,0.12)]" : "bg-mint shadow-[0_0_0_4px_rgba(88,240,182,0.12)]"
+                        promptMode === "auto"
+                          ? "bg-cyanx shadow-[0_0_0_4px_rgba(37,216,255,0.12)]"
+                          : "bg-mint shadow-[0_0_0_4px_rgba(88,240,182,0.12)]"
                       }`}
                       aria-hidden="true"
                     />
@@ -673,7 +674,8 @@ export default function HomePage() {
                   <p className="text-sm font-medium text-white">进入路径</p>
                   <p className="mt-2 text-sm leading-6 text-white/70">{actionHint}</p>
                   <p className="mt-2 text-xs leading-5 text-white/48">
-                    当前会带入 {aspectRatio} 比例、{quantity} 张、{quality.toUpperCase()} 画质和已选模型，省得你进去再点一轮。
+                    当前会带入 {aspectRatio} 比例、{quantity} 张、{quality.toUpperCase()}{" "}
+                    画质和已选模型，省得你进去再点一轮。
                   </p>
                 </div>
                 <div className="rounded-[1.05rem] border border-white/10 bg-white/6 p-3">

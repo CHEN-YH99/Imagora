@@ -40,7 +40,12 @@ function needsClientGeneration() {
   const clientSchemaPath = resolve("generated", "client", "schema.prisma");
   const clientEnginePath = resolve("generated", "client", "query_engine-windows.dll.node");
 
-  if (!existsSync(clientEntryPath) || !existsSync(clientTypesPath) || !existsSync(clientSchemaPath) || !existsSync(clientEnginePath)) {
+  if (
+    !existsSync(clientEntryPath) ||
+    !existsSync(clientTypesPath) ||
+    !existsSync(clientSchemaPath) ||
+    !existsSync(clientEnginePath)
+  ) {
     return true;
   }
 

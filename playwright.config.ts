@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 const port = 3100;
 const baseURL = `http://127.0.0.1:${port}`;
+const skipManagedWebServer = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === "1";
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -17,10 +18,12 @@ export default defineConfig({
     baseURL,
     trace: "on-first-retry"
   },
-  webServer: {
-    command: "npm --workspace apps/web run dev -- --webpack",
-    url: baseURL,
-    reuseExistingServer: true,
-    timeout: 120_000
-  }
+  webServer: skipManagedWebServer
+    ? undefined
+    : {
+        command: "node infra/scripts/e2e-web-server.mjs",
+        url: baseURL,
+        reuseExistingServer: true,
+        timeout: 120_000
+      }
 });

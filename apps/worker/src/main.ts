@@ -138,7 +138,8 @@ async function claimTask(selectTask: (data: StoreData) => GenerationTask | undef
     return {
       task: { ...task },
       referenceImageUrl: task.referenceImageId
-        ? data.referenceImages.find((image) => image.id === task.referenceImageId && !image.deletedAt)?.publicUrl ?? null
+        ? (data.referenceImages.find((image) => image.id === task.referenceImageId && !image.deletedAt)?.publicUrl ??
+          null)
         : null
     };
   });

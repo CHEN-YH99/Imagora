@@ -69,41 +69,17 @@ function GenerateExperience() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialTaskId = searchParams.get("taskId");
-  const initialRouteStateRef = useRef<{
-    draft: ReturnType<typeof consumeGenerationDraft>;
-    taskSnapshot: ReturnType<typeof readGenerationTaskSnapshot>;
-  } | null>(null);
-  if (!initialRouteStateRef.current) {
-    initialRouteStateRef.current = {
-      draft: consumeGenerationDraft(),
-      taskSnapshot: initialTaskId ? readGenerationTaskSnapshot(initialTaskId) : null
-    };
-  }
-  const initialDraft = initialRouteStateRef.current.draft;
-  const initialTaskSnapshot = initialRouteStateRef.current.taskSnapshot;
-  const [prompt, setPrompt] = useState(
-    initialTaskSnapshot?.task.prompt ?? initialDraft?.prompt ?? DEFAULT_PROMPT
-  );
-  const [negativePrompt, setNegativePrompt] = useState(
-    initialTaskSnapshot?.task.negativePrompt ?? DEFAULT_NEGATIVE_PROMPT
-  );
-  const [aspectRatio, setAspectRatio] = useState(
-    initialTaskSnapshot?.task.aspectRatio ?? resolveInitialAspectRatio(searchParams.get("aspectRatio"))
-  );
-  const [quantity, setQuantity] = useState(
-    initialTaskSnapshot?.task.quantity ?? resolveInitialQuantity(searchParams.get("quantity"))
-  );
+  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [negativePrompt, setNegativePrompt] = useState(DEFAULT_NEGATIVE_PROMPT);
+  const [aspectRatio, setAspectRatio] = useState(resolveInitialAspectRatio(searchParams.get("aspectRatio")));
+  const [quantity, setQuantity] = useState(resolveInitialQuantity(searchParams.get("quantity")));
   const [quantityInput, setQuantityInput] = useState(String(quantity));
-  const [quality, setQuality] = useState(
-    initialTaskSnapshot?.task.quality ?? resolveInitialQuality(searchParams.get("quality"))
-  );
-  const [model, setModel] = useState(
-    initialTaskSnapshot?.task.modelName ?? resolveInitialModel(searchParams.get("model"))
-  );
+  const [quality, setQuality] = useState(resolveInitialQuality(searchParams.get("quality")));
+  const [model, setModel] = useState(resolveInitialModel(searchParams.get("model")));
   const [quote, setQuote] = useState(0);
   const [account, setAccount] = useState<CreditAccount | null>(null);
-  const [task, setTask] = useState<Task | null>(initialTaskSnapshot?.task ?? null);
-  const [images, setImages] = useState<GeneratedImage[]>(initialTaskSnapshot?.images ?? []);
+  const [task, setTask] = useState<Task | null>(null);
+  const [images, setImages] = useState<GeneratedImage[]>([]);
   const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState<"info" | "success" | "danger">("danger");
@@ -113,7 +89,8 @@ function GenerateExperience() {
   const [appealReason, setAppealReason] = useState("");
   const [appealStatus, setAppealStatus] = useState<SafetyAppeal | null>(null);
   const [appealLoading, setAppealLoading] = useState(false);
-  const [restoringTaskView, setRestoringTaskView] = useState(Boolean(initialTaskId && !initialTaskSnapshot));
+  const [restoringTaskView, setRestoringTaskView] = useState(Boolean(initialTaskId));
+  const browserStorageRestoredRef = useRef(false);
   const quoteRequestSequenceRef = useRef(0);
   const restoringTaskIdRef = useRef<string | null>(null);
   const isGenerationProcessing =
@@ -130,6 +107,17 @@ function GenerateExperience() {
       ? generationFailureMessage(task)
       : "";
   const resultStatus = isGenerationProcessing ? (task?.status ?? "RUNNING") : (task?.status ?? "IDLE");
+
+  useEffect(() => {
+    if (browserStorageRestoredRef.current || initialTaskId) {
+      return;
+    }
+    browserStorageRestoredRef.current = true;
+    const draft = consumeGenerationDraft();
+    if (draft) {
+      setPrompt(draft.prompt);
+    }
+  }, [initialTaskId]);
 
   useEffect(() => {
     loadAccount();

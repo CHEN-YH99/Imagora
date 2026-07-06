@@ -206,6 +206,21 @@ test("generate entry flows keep prompt drafts out of URLs", async () => {
   assert.match(generatePage, /consumeGenerationDraft/);
 });
 
+test("generate page restores browser storage state after hydration", async () => {
+  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const componentStart = generatePage.indexOf("function GenerateExperience()");
+  const firstEffect = generatePage.indexOf("useEffect(() => {", componentStart);
+  const preEffectBody = generatePage.slice(componentStart, firstEffect);
+  const hydratedBody = generatePage.slice(firstEffect);
+
+  assert.ok(componentStart >= 0, "GenerateExperience component should exist");
+  assert.ok(firstEffect > componentStart, "GenerateExperience should use effects for browser-only state");
+  assert.doesNotMatch(preEffectBody, /\bconsumeGenerationDraft\(/);
+  assert.doesNotMatch(preEffectBody, /\breadGenerationTaskSnapshot\(/);
+  assert.match(hydratedBody, /\bconsumeGenerationDraft\(/);
+  assert.match(hydratedBody, /\breadGenerationTaskSnapshot\(/);
+});
+
 test("admin console exposes enterprise filters, detail drawers, and audit queries", async () => {
   const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
   const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
