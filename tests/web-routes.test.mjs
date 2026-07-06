@@ -169,6 +169,11 @@ test("web core pages expose recoverable empty states and confirm destructive act
   assert.match(generatePage, /readGenerationTaskSnapshot/);
   assert.match(generatePage, /saveGenerationTaskSnapshot/);
   assert.match(generatePage, /restoringTaskView/);
+  assert.match(generatePage, /activeGenerationTaskId/);
+  assert.match(generatePage, /submittedTaskIdRef/);
+  assert.match(generatePage, /taskSyncSequenceRef/);
+  assert.match(generatePage, /pollActiveGenerationTask/);
+  assert.match(generatePage, /generationTaskSyncErrorMessage/);
   assert.match(generatePage, /Math\.max\(1, Math\.min\(4, Math\.trunc\(nextValue\)\)\)/);
   assert.match(generatePage, /min-h-52/);
   assert.doesNotMatch(generatePage, /参考图/);
@@ -313,10 +318,10 @@ test("generation failures reconcile refunds and surface refunded credit copy", a
   assert.match(apiMain, /GENERATION_MAINTENANCE_INTERVAL_MS/);
   assert.match(apiMain, /\/api\/admin\/maintenance\/reconcile-generation/);
   assert.match(apiClient, /refundedCredits\?: number/);
-  assert.match(apiClient, /TaskWaitTimeoutError/);
-  assert.match(apiClient, /defaultTaskWaitTimeoutMs = 5 \* 60_000/);
   assert.match(generatePage, /generationFailureMessage/);
-  assert.match(generatePage, /generationWaitTimeoutMessage/);
+  assert.match(generatePage, /generationTaskSyncErrorMessage/);
+  assert.match(generatePage, /页面会继续自动刷新结果/);
+  assert.match(generatePage, /setActiveGenerationTaskId\(created\.task\.id\)/);
   assert.match(generatePage, /setMessageTone\("info"\)/);
   assert.match(generatePage, /已自动返还/);
   assert.match(workerMain, /refundTaskCredits/);

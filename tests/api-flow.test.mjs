@@ -53,6 +53,49 @@ test("api rejects bearer session auth in production config", async () => {
   assert.match(result.stderr, /bearer session auth must be disabled/);
 });
 
+test("api rejects production config without any alert channel", async () => {
+  const env = {
+    ...process.env,
+    NODE_ENV: "production",
+    WEB_ORIGIN: "https://imagora.example",
+    DATABASE_URL: "postgresql://imagora:imagora@db.example:5432/imagora",
+    REDIS_URL: "redis://redis.example:6379",
+    OPENAI_API_KEY: "sk-test",
+    S3_ENDPOINT: "https://s3.example",
+    S3_BUCKET: "imagora",
+    S3_ACCESS_KEY_ID: "test-access-key",
+    S3_SECRET_ACCESS_KEY: "test-secret-key",
+    S3_PUBLIC_BASE_URL: "https://cdn.example",
+    STRIPE_SECRET_KEY: "sk_test",
+    STRIPE_WEBHOOK_SECRET: "whsec_test",
+    STRIPE_SUCCESS_URL: "https://imagora.example/payment/success",
+    STRIPE_CANCEL_URL: "https://imagora.example/payment/cancel",
+    MAILER_PROVIDER: "smtp",
+    SMTP_HOST: "smtp.example",
+    SMTP_USER: "imagora",
+    SMTP_PASSWORD: "smtp-secret",
+    SMTP_FROM: "noreply@imagora.example",
+    SAFETY_PROVIDER: "http",
+    SAFETY_TEXT_ENDPOINT: "https://safety.example/text",
+    SAFETY_IMAGE_ENDPOINT: "https://safety.example/image",
+    DATA_STORE: "prisma",
+    QUEUE_PROVIDER: "bullmq",
+    IMAGE_PROVIDER_DEFAULT: "openai",
+    IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
+    STORAGE_PROVIDER: "s3",
+    PAYMENT_PROVIDER: "stripe",
+    RATE_LIMIT_PROVIDER: "redis",
+    SESSION_COOKIE_SECURE: "true",
+    ALLOW_BEARER_SESSION_AUTH: "false"
+  };
+  delete env.ALERT_WEBHOOK_URL;
+  delete env.ALERT_EMAIL_TO;
+
+  const result = await runProcess(process.execPath, ["apps/api/dist/main.js"], env);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /at least one alert channel is required/);
+});
+
 test("auth remains usable in local development when prisma database is unavailable", async () => {
   const dir = await mkdtemp(join(tmpdir(), "imagora-auth-fallback-"));
   const port = await reserveUnusedPort();

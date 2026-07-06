@@ -93,6 +93,8 @@ jobs:
           SMTP_USER: ci-release-drill
           SMTP_PASSWORD: ci-release-drill-password
           SMTP_FROM: noreply@imagora.example.com
+          ALERT_WEBHOOK_URL: https://alerts.imagora.example.com/webhook
+          ALERT_EMAIL_TO: ops@imagora.example.com
         run: npm run release:drill
 
   smoke:

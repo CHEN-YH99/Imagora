@@ -11,6 +11,7 @@ import {
 } from "@imagora/ai-providers";
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
 import { buildVerificationEmail, createMailer } from "@imagora/mailer";
+import { createAlertNotifier } from "@imagora/notifier";
 import { createPaymentProvider, type VerifiedPaymentEvent } from "@imagora/payments";
 import { createGenerationQueue } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
@@ -18,6 +19,9 @@ import { createObjectStorage } from "@imagora/storage";
 import {
   AppError,
   type AdminAuditLog,
+  type AlertNotification,
+  type AlertNotificationPayload,
+  type AlertNotificationStatus,
   type ApiEnvelope,
   type AspectRatio,
   aspectRatioDimensions,
@@ -56,6 +60,7 @@ validateProductionConfig();
 
 const store = createStore();
 const mailer = createMailer();
+const alertNotifier = createAlertNotifier({ mailer });
 const safetyProvider = createSafetyProvider();
 const paymentProvider = createPaymentProvider();
 const generationQueue = createGenerationQueue();
@@ -1208,7 +1213,7 @@ app.get("/api/admin/metrics", async (request) => {
     const http = httpMetricsSnapshot();
     const domain = domainMetricsSnapshot(data);
     const alerts = operationalAlertsSnapshot(data, http);
-    recordAlertNotifications(data, alerts);
+    recordLocalAlertNotifications(data, alerts);
     return envelope(request, {
       service: {
         uptimeSeconds: Math.floor((Date.now() - serviceStartedAt) / 1000),
@@ -1709,6 +1714,7 @@ app.patch("/api/admin/safety-appeals/:appealId", async (request) => {
 });
 
 startBackgroundGenerationMaintenance();
+startBackgroundAlertEvaluation();
 
 const port = Number(process.env.API_PORT ?? 4100);
 const host = process.env.API_HOST ?? "127.0.0.1";
@@ -3444,6 +3450,11 @@ function validateProductionConfig(): void {
   if (!envBool("SESSION_COOKIE_SECURE", false)) {
     throw new Error("Unsafe production config: SESSION_COOKIE_SECURE must be true");
   }
+  if (!process.env.ALERT_WEBHOOK_URL?.trim() && !process.env.ALERT_EMAIL_TO?.trim()) {
+    throw new Error(
+      "Unsafe production config: at least one alert channel is required (set ALERT_WEBHOOK_URL or ALERT_EMAIL_TO)"
+    );
+  }
 }
 
 function requireProductionValue(name: string): string {
@@ -3797,22 +3808,90 @@ function recordOperationalIncident(data: StoreData, input: OperationalIncidentIn
     .slice(0, envNumber("INCIDENT_RETENTION_MAX", 100));
 }
 
-function recordAlertNotifications(data: StoreData, alerts: OperationalAlert[]): void {
+function alertCooldownMs(): number {
+  return envNumber("ALERT_COOLDOWN_MS", 30 * 60 * 1000);
+}
+
+/**
+ * 冷却窗口桶：同一 (channel, alert) 在同一窗口内只发一次，跨窗口可再发。
+ * 修掉旧逻辑 `local:${id}` 永久去重导致告警只发一次的 bug。
+ */
+function alertDedupeKey(channel: string, alertId: string, at: number): string {
+  const cooldown = alertCooldownMs();
+  const bucket = cooldown > 0 ? Math.floor(at / cooldown) : at;
+  return `${channel}:${alertId}:${bucket}`;
+}
+
+function alertToPayload(alert: OperationalAlert): AlertNotificationPayload {
+  return {
+    id: alert.id,
+    severity: alert.severity,
+    area: alert.area,
+    metric: alert.metric,
+    value: alert.value,
+    threshold: alert.threshold,
+    message: alert.message,
+    runbook: alert.runbook
+  };
+}
+
+/**
+ * 计算本轮每条告警还需要向哪些通道投递（跳过冷却窗口内已成功发送的通道）。
+ * 返回的决策供事务外真正发送使用，避免网络 IO 占用 store 的 advisory lock。
+ */
+function planAlertDeliveries(
+  data: StoreData,
+  alerts: OperationalAlert[],
+  channels: string[],
+  at: number
+): Array<{ alert: OperationalAlert; channel: string; dedupeKey: string }> {
+  data.alertNotifications ??= [];
+  const plan: Array<{ alert: OperationalAlert; channel: string; dedupeKey: string }> = [];
+  for (const alert of alerts) {
+    for (const channel of channels) {
+      const dedupeKey = alertDedupeKey(channel, alert.id, at);
+      const existing = data.alertNotifications.find((notification) => notification.dedupeKey === dedupeKey);
+      // 冷却窗口内已成功发送 → 跳过；FAILED 记录允许重试。
+      if (existing && existing.status === "SENT") {
+        continue;
+      }
+      plan.push({ alert, channel, dedupeKey });
+    }
+  }
+  return plan;
+}
+
+/**
+ * 把一批投递结果 upsert 进 alertNotifications（dedupeKey 唯一，schema 层有 unique 约束）。
+ * 已存在同 dedupeKey 记录则原地更新 status/message，否则新增。
+ */
+function recordAlertDeliveries(
+  data: StoreData,
+  deliveries: Array<{ alert: OperationalAlert; channel: string; dedupeKey: string; status: AlertNotificationStatus; error?: string }>
+): void {
   data.alertNotifications ??= [];
   const now = new Date().toISOString();
-  for (const alert of alerts) {
-    const dedupeKey = `local:${alert.id}`;
-    if (data.alertNotifications.some((notification) => notification.dedupeKey === dedupeKey)) {
+  for (const delivery of deliveries) {
+    const message =
+      delivery.status === "FAILED" && delivery.error
+        ? `${delivery.alert.message} | delivery failed: ${delivery.error}`.slice(0, 500)
+        : delivery.alert.message;
+    const existing = data.alertNotifications.find((notification) => notification.dedupeKey === delivery.dedupeKey);
+    if (existing) {
+      existing.status = delivery.status;
+      existing.severity = delivery.alert.severity;
+      existing.message = message;
+      existing.sentAt = now;
       continue;
     }
     data.alertNotifications.push({
       id: randomUUID(),
-      alertId: alert.id,
-      channel: "local",
-      status: "SENT",
-      severity: alert.severity,
-      dedupeKey,
-      message: alert.message,
+      alertId: delivery.alert.id,
+      channel: delivery.channel as AlertNotification["channel"],
+      status: delivery.status,
+      severity: delivery.alert.severity,
+      dedupeKey: delivery.dedupeKey,
+      message,
       createdAt: now,
       sentAt: now
     });
@@ -3820,6 +3899,108 @@ function recordAlertNotifications(data: StoreData, alerts: OperationalAlert[]): 
   data.alertNotifications = data.alertNotifications
     .sort(descCreated)
     .slice(0, envNumber("ALERT_NOTIFICATION_RETENTION_MAX", 100));
+}
+
+/**
+ * 记录 local 审计轨迹：检测到告警即落库（channel="local"），纯 store 操作、无网络 IO。
+ * 与 email/webhook 的真实外发分层——local 是"发现了什么"的审计，外发是"通知了谁"。
+ * 供 metrics 端点访问时同步调用，不拖慢请求（无 IO）。
+ */
+function recordLocalAlertNotifications(data: StoreData, alerts: OperationalAlert[]): void {
+  const at = Date.now();
+  recordAlertDeliveries(
+    data,
+    alerts.map((alert) => ({
+      alert,
+      channel: "local",
+      dedupeKey: alertDedupeKey("local", alert.id, at),
+      status: "SENT" as AlertNotificationStatus
+    }))
+  );
+}
+
+/**
+ * 主动评估告警并外发：定时器与手动触发共用。
+ * 流程：读快照算告警 → 事务内规划待投递(不做 IO) → 事务外并发发送 → 事务内 upsert 结果。
+ */
+async function evaluateAndDispatchAlerts(): Promise<{ alerts: number; dispatched: number; failed: number }> {
+  if (!alertNotifier.hasChannels()) {
+    return { alerts: 0, dispatched: 0, failed: 0 };
+  }
+  const snapshot = await store.read();
+  const http = httpMetricsSnapshot();
+  const alerts = operationalAlertsSnapshot(snapshot, http);
+  if (!alerts.length) {
+    return { alerts: 0, dispatched: 0, failed: 0 };
+  }
+
+  const at = Date.now();
+  const channels = alertNotifier.channelNames;
+  let plan: Array<{ alert: OperationalAlert; channel: string; dedupeKey: string }> = [];
+  await store.update((data) => {
+    plan = planAlertDeliveries(data, alerts, channels, at);
+  });
+  if (!plan.length) {
+    return { alerts: alerts.length, dispatched: 0, failed: 0 };
+  }
+
+  // 事务外发送：按告警分组，一次 dispatch 覆盖该告警需要的所有通道。
+  const byAlert = new Map<string, { alert: OperationalAlert; channels: string[] }>();
+  for (const item of plan) {
+    const entry = byAlert.get(item.alert.id) ?? { alert: item.alert, channels: [] };
+    entry.channels.push(item.channel);
+    byAlert.set(item.alert.id, entry);
+  }
+
+  const deliveries: Array<{
+    alert: OperationalAlert;
+    channel: string;
+    dedupeKey: string;
+    status: AlertNotificationStatus;
+    error?: string;
+  }> = [];
+  let dispatched = 0;
+  let failed = 0;
+  for (const { alert, channels: alertChannels } of byAlert.values()) {
+    const results = await alertNotifier.dispatch(alertToPayload(alert), { channels: alertChannels });
+    for (const result of results) {
+      const dedupeKey = alertDedupeKey(result.channel, alert.id, at);
+      if (result.ok) {
+        dispatched += 1;
+        deliveries.push({ alert, channel: result.channel, dedupeKey, status: "SENT" });
+      } else {
+        failed += 1;
+        deliveries.push({ alert, channel: result.channel, dedupeKey, status: "FAILED", error: result.error });
+      }
+    }
+  }
+
+  await store.update((data) => {
+    recordAlertDeliveries(data, deliveries);
+  });
+
+  if (failed) {
+    logger.error({ alerts: alerts.length, dispatched, failed }, "alert dispatch had channel failures");
+  } else {
+    logger.warn({ alerts: alerts.length, dispatched }, "alert dispatched to channels");
+  }
+  return { alerts: alerts.length, dispatched, failed };
+}
+
+/**
+ * 后台定时评估告警并外发。补上"告警只在有人打开 metrics 时被动触发"的观测盲区。
+ */
+function startBackgroundAlertEvaluation(): void {
+  const intervalMs = envNumber("ALERT_EVALUATION_INTERVAL_MS", 60_000);
+  if (intervalMs <= 0 || !alertNotifier.hasChannels()) {
+    return;
+  }
+  const timer = setInterval(() => {
+    evaluateAndDispatchAlerts().catch((error) => {
+      logger.error({ err: error }, "background alert evaluation failed");
+    });
+  }, intervalMs);
+  timer.unref();
 }
 
 function routeLabel(request: FastifyRequest): string {

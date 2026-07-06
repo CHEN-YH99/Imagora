@@ -165,7 +165,8 @@ function productionReadyEnv() {
     S3_ACCESS_KEY_ID: "r2-access-key",
     S3_SECRET_ACCESS_KEY: "r2-secret-key",
     STRIPE_SECRET_KEY: "sk_live_production_shaped",
-    STRIPE_WEBHOOK_SECRET: "whsec_production_shaped"
+    STRIPE_WEBHOOK_SECRET: "whsec_production_shaped",
+    ALERT_WEBHOOK_URL: "https://alerts.imagora.example/webhook"
   };
 }
 
@@ -199,7 +200,9 @@ function productionEnvNames() {
     "S3_ACCESS_KEY_ID",
     "S3_SECRET_ACCESS_KEY",
     "STRIPE_SECRET_KEY",
-    "STRIPE_WEBHOOK_SECRET"
+    "STRIPE_WEBHOOK_SECRET",
+    "ALERT_WEBHOOK_URL",
+    "ALERT_EMAIL_TO"
   ];
 }
 

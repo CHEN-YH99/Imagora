@@ -9,13 +9,11 @@ import {
   ApiRequestError,
   DEFAULT_IMAGE_MODEL_ID,
   IMAGE_MODEL_OPTIONS,
-  TaskWaitTimeoutError,
   apiFetch,
   formatCredits,
   getSafetyAppeals,
   resolveSelectableImageModel,
   submitSafetyAppeal,
-  waitForTask,
   type CreditAccount,
   type GeneratedImage,
   type SafetyAppeal,
@@ -36,6 +34,7 @@ const DEFAULT_NEGATIVE_PROMPT = "低质量、模糊、水印、变形";
 const DEFAULT_ASPECT_RATIO = "1:1";
 const DEFAULT_QUANTITY = 2;
 const DEFAULT_QUALITY = "standard";
+const taskSyncPollIntervalMs = 2_000;
 
 const qualityOptions = [
   { value: "draft", label: "1K", desc: "512–768px，速度最快" },
@@ -84,6 +83,7 @@ function GenerateExperience() {
   const [message, setMessage] = useState("");
   const [messageTone, setMessageTone] = useState<"info" | "success" | "danger">("danger");
   const [loading, setLoading] = useState(false);
+  const [activeGenerationTaskId, setActiveGenerationTaskId] = useState<string | null>(initialTaskId);
   const [appealEventId, setAppealEventId] = useState<string | null>(null);
   const [showAppealForm, setShowAppealForm] = useState(false);
   const [appealReason, setAppealReason] = useState("");
@@ -93,6 +93,8 @@ function GenerateExperience() {
   const browserStorageRestoredRef = useRef(false);
   const quoteRequestSequenceRef = useRef(0);
   const restoringTaskIdRef = useRef<string | null>(null);
+  const submittedTaskIdRef = useRef<string | null>(null);
+  const taskSyncSequenceRef = useRef(0);
   const isGenerationProcessing =
     images.length === 0 && (loading || task?.status === "PENDING" || task?.status === "RUNNING");
   const processingAspectRatio = task ? `${task.width} / ${task.height}` : aspectRatio.replace(":", " / ");
@@ -129,6 +131,11 @@ function GenerateExperience() {
     const q = searchParams.get("quality");
     const qty = searchParams.get("quantity");
     const m = searchParams.get("model");
+    if (taskId && (task?.id === taskId || submittedTaskIdRef.current === taskId)) {
+      setActiveGenerationTaskId(taskId);
+      setRestoringTaskView(false);
+      return;
+    }
     if (taskId && restoringTaskIdRef.current !== taskId) {
       const cachedSnapshot = readGenerationTaskSnapshot(taskId);
       if (cachedSnapshot) {
@@ -143,7 +150,13 @@ function GenerateExperience() {
       return;
     }
     if (!taskId) {
-      restoringTaskIdRef.current = null;
+      if (task && isTerminalTaskStatus(task.status) && submittedTaskIdRef.current === task.id) {
+        submittedTaskIdRef.current = null;
+      }
+      if (!task || isTerminalTaskStatus(task.status)) {
+        setActiveGenerationTaskId(null);
+        restoringTaskIdRef.current = null;
+      }
       setRestoringTaskView(false);
     }
     if (ar && aspectRatioOptions.some((o) => o.value === ar)) setAspectRatio(ar);
@@ -155,7 +168,7 @@ function GenerateExperience() {
     if (m) {
       setModel(resolveSelectableImageModel(m));
     }
-  }, [searchParams]);
+  }, [searchParams, task?.id, task?.status]);
 
   useEffect(() => {
     if (!task) {
@@ -163,6 +176,23 @@ function GenerateExperience() {
     }
     saveGenerationTaskSnapshot(task, images);
   }, [images, task]);
+
+  useEffect(() => {
+    if (!activeGenerationTaskId) {
+      return;
+    }
+    if (task?.id === activeGenerationTaskId && isTerminalTaskStatus(task.status)) {
+      return;
+    }
+    const taskId = activeGenerationTaskId;
+    const syncSequence = taskSyncSequenceRef.current + 1;
+    taskSyncSequenceRef.current = syncSequence;
+    let canceled = false;
+    void pollActiveGenerationTask(taskId, syncSequence, () => canceled);
+    return () => {
+      canceled = true;
+    };
+  }, [activeGenerationTaskId, task?.id, task?.status]);
 
   useEffect(() => {
     if (!hasPrompt) {
@@ -249,6 +279,7 @@ function GenerateExperience() {
 
   async function restoreTask(taskId: string, options?: { preserveVisibleState?: boolean }) {
     restoringTaskIdRef.current = taskId;
+    setActiveGenerationTaskId(taskId);
     setLoading(true);
     setMessage("");
     setMessageTone("info");
@@ -268,38 +299,15 @@ function GenerateExperience() {
       if (isTerminalTaskStatus(initialResult.task.status)) {
         setMessage(restoreTaskMessage(initialResult.task, initialResult.images));
         setMessageTone(initialResult.task.status === "SUCCEEDED" ? "success" : "danger");
+        setActiveGenerationTaskId(null);
         if (initialResult.task.status === "BLOCKED") {
           await loadLatestSafetyAppeal();
         }
         await loadAccount();
         return;
       }
-
-      const result = await waitForTask(taskId);
-      applyTaskResult(result);
-      applyTaskParameters(result.task);
-      if (result.task.status === "SUCCEEDED" && result.images.length > 0) {
-        setMessage(generationSuccessMessage(result.task));
-        setMessageTone("success");
-      } else if (isTerminalTaskStatus(result.task.status)) {
-        setMessage(generationFailureMessage(result.task));
-        setMessageTone("danger");
-        if (result.task.status === "BLOCKED") {
-          await loadLatestSafetyAppeal();
-        }
-      }
       await loadAccount();
     } catch (error) {
-      if (error instanceof TaskWaitTimeoutError) {
-        if (error.latestResult) {
-          applyTaskResult(error.latestResult);
-          applyTaskParameters(error.latestResult.task);
-        }
-        setMessage(generationWaitTimeoutMessage(error.latestResult?.task ?? null));
-        setMessageTone("info");
-        await loadAccount();
-        return;
-      }
       setMessage(error instanceof Error ? error.message : "生成任务恢复失败，请到历史记录查看结果。");
       setMessageTone("danger");
     } finally {
@@ -320,6 +328,59 @@ function GenerateExperience() {
     setClampedQuantity(nextTask.quantity);
     setQuality(nextTask.quality);
     setModel(resolveSelectableImageModel(nextTask.modelName));
+  }
+
+  async function pollActiveGenerationTask(
+    taskId: string,
+    syncSequence: number,
+    isCanceled: () => boolean
+  ): Promise<void> {
+    while (!isCanceled() && taskSyncSequenceRef.current === syncSequence) {
+      try {
+        const result = await apiFetch<{ task: Task; images: GeneratedImage[] }>(`/api/generation/tasks/${taskId}`);
+        if (isCanceled() || taskSyncSequenceRef.current !== syncSequence) {
+          return;
+        }
+        applyTaskResult(result);
+        applyTaskParameters(result.task);
+        setRestoringTaskView(false);
+        setLoading(false);
+        if (isTerminalTaskStatus(result.task.status)) {
+          await handleTerminalTaskResult(result);
+          if (submittedTaskIdRef.current === result.task.id) {
+            submittedTaskIdRef.current = null;
+          }
+          if (activeGenerationTaskId === result.task.id) {
+            setActiveGenerationTaskId(null);
+          }
+          return;
+        }
+      } catch (error) {
+        if (isCanceled() || taskSyncSequenceRef.current !== syncSequence) {
+          return;
+        }
+        if (task?.id === taskId) {
+          setLoading(false);
+        }
+        setMessage(generationTaskSyncErrorMessage(error));
+        setMessageTone("info");
+      }
+      await sleep(taskSyncPollIntervalMs);
+    }
+  }
+
+  async function handleTerminalTaskResult(result: { task: Task; images: GeneratedImage[] }) {
+    if (result.task.status === "SUCCEEDED" && result.images.length > 0) {
+      setMessage(generationSuccessMessage(result.task));
+      setMessageTone("success");
+    } else if (isTerminalTaskStatus(result.task.status)) {
+      setMessage(generationFailureMessage(result.task));
+      setMessageTone("danger");
+      if (result.task.status === "BLOCKED") {
+        await loadLatestSafetyAppeal();
+      }
+    }
+    await loadAccount();
   }
 
   function setClampedQuantity(nextValue: number) {
@@ -387,7 +448,6 @@ function GenerateExperience() {
     setAppealStatus(null);
     setShowAppealForm(false);
     setAppealReason("");
-    let submittedTask: Task | null = null;
     try {
       await ensureLoggedIn();
       const created = await apiFetch<{ task: Task; balanceAfter: number }>("/api/generation/tasks", {
@@ -403,42 +463,13 @@ function GenerateExperience() {
           model
         }
       });
-      submittedTask = created.task;
-      setTask(created.task);
       restoringTaskIdRef.current = created.task.id;
+      submittedTaskIdRef.current = created.task.id;
+      setActiveGenerationTaskId(created.task.id);
+      setTask(created.task);
       router.replace(buildGenerateTaskPath(created.task.id), { scroll: false });
       setAccount((value) => (value ? { ...value, balance: created.balanceAfter } : value));
-      const result = await waitForTask(created.task.id);
-      setTask(result.task);
-      setImages(result.images);
-      if (result.task.status === "SUCCEEDED" && result.images.length > 0) {
-        setMessage(generationSuccessMessage(result.task));
-        setMessageTone("success");
-      } else if (
-        result.task.status === "FAILED" ||
-        result.task.status === "BLOCKED" ||
-        result.task.status === "CANCELED"
-      ) {
-        setMessage(generationFailureMessage(result.task));
-        setMessageTone("danger");
-        if (result.task.status === "BLOCKED") {
-          await loadLatestSafetyAppeal();
-        }
-      }
-      await loadAccount();
     } catch (error) {
-      if (error instanceof TaskWaitTimeoutError) {
-        if (error.latestResult) {
-          setTask(error.latestResult.task);
-          setImages(error.latestResult.images);
-        } else if (submittedTask) {
-          setTask(submittedTask);
-        }
-        setMessage(generationWaitTimeoutMessage(error.latestResult?.task ?? submittedTask));
-        setMessageTone("info");
-        await loadAccount();
-        return;
-      }
       if (
         error instanceof ApiRequestError &&
         (error.code === "CONTENT_BLOCKED" || error.code === "CONTENT_REVIEW_REQUIRED")
@@ -689,11 +720,11 @@ function GenerateExperience() {
                 <button
                   className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
                   type="button"
-                  disabled={loading || !prompt.trim()}
+                  disabled={loading || isGenerationProcessing || !prompt.trim()}
                   onClick={submit}
                 >
                   <Wand2 className="size-4" aria-hidden="true" />
-                  {loading ? "生成中..." : "提交生成"}
+                  {isGenerationProcessing ? "生成中..." : "提交生成"}
                 </button>
               </div>
             </Panel>
@@ -874,16 +905,6 @@ function extractProviderRequestId(message: string | null | undefined): string | 
   return match?.[1] ?? null;
 }
 
-function generationWaitTimeoutMessage(task: Task | null): string {
-  if (task?.status === "PENDING") {
-    return "任务已提交，但当前仍在排队。系统会继续处理，若队列超时会自动返还积分，可稍后到历史记录查看结果。";
-  }
-  if (task?.status === "RUNNING") {
-    return "任务已提交，模型仍在生成中。真实生图可能需要数分钟，完成后会出现在历史记录里。";
-  }
-  return "任务已提交，生成仍在处理中。稍后可到历史记录查看结果，系统失败会自动返还积分。";
-}
-
 function generationSuccessMessage(task: Task): string {
   const refundedCredits = task.refundedCredits ?? 0;
   if (refundedCredits > 0) {
@@ -903,4 +924,17 @@ function generationSubmitErrorMessage(error: unknown): string {
       : "图像供应商鉴权失败，请检查 OPENAI_API_KEY 与 OPENAI_BASE_URL。";
   }
   return error instanceof Error ? error.message : "生成失败，请稍后重试。";
+}
+
+function generationTaskSyncErrorMessage(error: unknown): string {
+  if (error instanceof ApiRequestError && error.status === 404) {
+    return "生成任务暂时无法读取，请到历史记录查看结果。";
+  }
+  return "生成状态同步暂时中断，页面会继续自动刷新结果。";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

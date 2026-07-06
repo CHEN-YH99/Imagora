@@ -264,16 +264,34 @@ export interface OperationalIncident {
   resolvedAt: string | null;
 }
 
+export type AlertChannel = "local" | "email" | "webhook";
+export type AlertNotificationStatus = "SENT" | "FAILED" | "SKIPPED";
+
 export interface AlertNotification {
   id: string;
   alertId: string;
-  channel: "local";
-  status: "SENT";
+  channel: AlertChannel;
+  status: AlertNotificationStatus;
   severity: OperationalSeverity;
   dedupeKey: string;
   message: string;
   createdAt: string;
   sentAt: string;
+}
+
+/**
+ * 告警外发载荷。由 API 侧根据运营告警构造，交给 notifier 各通道渲染发送。
+ * 独立于内部 OperationalAlert，保持 notifier 包不依赖 API 内部类型。
+ */
+export interface AlertNotificationPayload {
+  id: string;
+  severity: OperationalSeverity;
+  area: OperationalArea;
+  metric: string;
+  value: number;
+  threshold: number;
+  message: string;
+  runbook: string;
 }
 
 export interface StoreData {

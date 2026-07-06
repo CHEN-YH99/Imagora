@@ -10,7 +10,7 @@ const fullSizeImageUrl = `data:image/svg+xml,${encodeURIComponent(
 const captchaSvg =
   '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="130"><rect width="180" height="130" fill="#f8fafc"/><rect x="66" y="42" width="48" height="48" rx="8" fill="#10b981"/></svg>';
 
-type GenerationOutcome = "success" | "failed";
+type GenerationOutcome = "success" | "failed" | "recoverAfterPollingError";
 
 type MockOptions = {
   generationOutcome?: GenerationOutcome;
@@ -241,6 +241,20 @@ test("生成任务覆盖创建、轮询、成功和失败状态", async ({ page 
   await failedPage.close();
 });
 
+test("生成任务轮询短暂失败后无需刷新也会继续显示结果", async ({ page }) => {
+  const state = await setupApiMocks(page, { generationOutcome: "recoverAfterPollingError" });
+
+  await page.goto("/generate");
+  await page.getByRole("textbox", { name: "提示词", exact: true }).fill("电影感茶杯广告图，薄荷色轮廓光");
+  await page.getByRole("button", { name: "提交生成" }).first().click();
+  await expect(page.getByRole("status", { name: "第 1 张图片正在生成" })).toBeVisible();
+
+  await expect.poll(() => state.generationTaskPolls).toBeGreaterThanOrEqual(2);
+  await expect(page.getByAltText("生成图片结果")).toHaveCount(1, { timeout: 10_000 });
+  await expect(page.getByText("生成完成，可进入详情继续下载、收藏或再次生成。")).toBeVisible();
+  await expect(page.getByRole("status", { name: "第 1 张图片正在生成" })).toBeHidden();
+});
+
 test("历史、收藏、下载、删除和再次生成链路可回归", async ({ page }) => {
   const state = await setupApiMocks(page);
 
@@ -449,6 +463,10 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
     if (method === "GET" && /^\/api\/generation\/tasks\/[^/]+$/.test(path)) {
       state.generationTaskPolls += 1;
       const taskId = path.split("/").at(-1) ?? "task-e2e";
+      if (taskId === "task-e2e" && generationOutcome === "recoverAfterPollingError" && state.generationTaskPolls === 1) {
+        await fulfillError(route, "Temporary task polling failure", 503);
+        return;
+      }
       if (taskId === "task-failed" || generationOutcome === "failed") {
         const failed = {
           ...createTask(taskId, "触发失败场景的广告图", state.generationTaskPolls > 1 ? "FAILED" : "RUNNING"),
@@ -472,7 +490,8 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
         "电影感茶杯广告图，薄荷色轮廓光",
         state.generationTaskPolls > 1 ? "SUCCEEDED" : "RUNNING"
       );
-      const images = state.generationTaskPolls > 1 ? state.images : [];
+      const images =
+        state.generationTaskPolls > 1 ? state.images.filter((image) => image.taskId === taskId) : [];
       await fulfillData(route, { task, images });
       return;
     }
@@ -752,6 +771,19 @@ function createMockState(): MockState {
         favorite: false,
         deletedAt: null,
         createdAt: now
+      },
+      {
+        id: "image-e2e",
+        taskId: "task-e2e",
+        userId: creatorUser.id,
+        thumbnailUrl,
+        publicUrl: "",
+        width: 1024,
+        height: 1024,
+        visibility: "PRIVATE",
+        favorite: false,
+        deletedAt: null,
+        createdAt: now
       }
     ],
     orders: [
@@ -845,9 +877,9 @@ async function fulfillData(route: Route, data: unknown): Promise<void> {
   });
 }
 
-async function fulfillError(route: Route, message: string): Promise<void> {
+async function fulfillError(route: Route, message: string, status = 404): Promise<void> {
   await route.fulfill({
-    status: 404,
+    status,
     contentType: "application/json",
     body: JSON.stringify({ error: { code: "NOT_FOUND", message } })
   });
