@@ -112,11 +112,12 @@ docker compose -f infra/docker-compose.yml up -d
 | `IMAGE_PROVIDER_DEFAULT` | 默认图片 Provider（`mock` / `openai`） | 自动：有 `OPENAI_API_KEY` 则 `openai`，否则 `mock` |
 | `IMAGE_MODEL_DEFAULT` | 默认图片模型（如 `openai:gpt-image-2`） | Provider 内置默认 |
 | `OPENAI_API_KEY` | OpenAI API Key | - |
-| `STORAGE_PROVIDER` | 存储 Provider（`inline` / `s3`） | `inline` |
+| `STORAGE_PROVIDER` | 存储 Provider（`inline` / `s3` / `r2`） | `inline` |
 | `PAYMENT_PROVIDER` | 支付 Provider（`mock` / `stripe`） | `mock` |
 | `DATA_STORE` | 数据存储方式（`json` / `prisma`） | `json` |
 | `QUEUE_PROVIDER` | 队列 Provider（`inline` / `bullmq`） | `inline` |
-| `SAFETY_PROVIDER` | 安全审核 Provider（`local` / 外部） | `local` |
+| `MAILER_PROVIDER` | 邮件 Provider（`console` / `smtp`） | `console` |
+| `SAFETY_PROVIDER` | 安全审核 Provider（`local` / `http`） | `local` |
 
 兼容说明：旧字段 `AI_PROVIDER`、`OPENAI_IMAGE_MODEL` 仍可识别，但新配置统一建议使用 `IMAGE_PROVIDER_DEFAULT`、`IMAGE_MODEL_DEFAULT`。本地开发如果只填写 `OPENAI_API_KEY`，系统会自动切到 `openai`；不填则默认走 `mock`。
 
@@ -127,10 +128,11 @@ docker compose -f infra/docker-compose.yml up -d
 核心业务模块均采用 Provider 抽象，通过环境变量切换实现：
 
 - **AI Provider**：`mock`（开发用）/ `openai`（生产用），模型通过 `IMAGE_MODEL_DEFAULT` 选择；如果未显式指定 Provider，本地会在检测到 `OPENAI_API_KEY` 时自动切到 `openai`
-- **Storage Provider**：`inline`（本地文件）/ `s3`（S3 兼容存储）
+- **Storage Provider**：`inline`（本地文件）/ `s3`、`r2`（S3 兼容存储）
 - **Payment Provider**：`mock`（模拟支付）/ `stripe`（Stripe 真实支付）
 - **Queue Provider**：`inline`（内存队列）/ `bullmq`（Redis 队列）
-- **Safety Provider**：`local`（本地规则）/ 外部服务
+- **Mailer Provider**：`console`（开发输出）/ `smtp`（真实邮件投递）
+- **Safety Provider**：`local`（本地规则）/ `http`（第三方审核服务）
 
 ### 请求流程
 
@@ -180,8 +182,10 @@ docker compose -f infra/docker-compose.prod.yml build
 - `REDIS_URL`：指向生产 Redis
 - `IMAGE_PROVIDER_DEFAULT=openai` + `OPENAI_API_KEY`
 - 可选：`IMAGE_MODEL_DEFAULT=openai:gpt-image-2`
-- `STORAGE_PROVIDER=s3` + S3 相关配置
+- `STORAGE_PROVIDER=s3` 或 `STORAGE_PROVIDER=r2` + S3 兼容存储配置
 - `PAYMENT_PROVIDER=stripe` + Stripe 相关配置
+- `MAILER_PROVIDER=smtp` + `SMTP_HOST` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM`
+- `SAFETY_PROVIDER=http` + `SAFETY_TEXT_ENDPOINT` / `SAFETY_IMAGE_ENDPOINT`
 - `SESSION_COOKIE_SECURE=true`
 
 ## 测试

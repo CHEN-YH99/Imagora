@@ -44,7 +44,9 @@ For a real production environment, replace mock providers before accepting paid 
 ```text
 IMAGE_PROVIDER_DEFAULT=openai
 PAYMENT_PROVIDER=stripe
-STORAGE_PROVIDER=s3
+STORAGE_PROVIDER=s3 # or r2
+MAILER_PROVIDER=smtp
+SAFETY_PROVIDER=http
 ```
 
 Required provider settings:
@@ -59,13 +61,19 @@ S3_ACCESS_KEY_ID=...
 S3_SECRET_ACCESS_KEY=...
 STRIPE_SECRET_KEY=sk_...
 STRIPE_WEBHOOK_SECRET=whsec_...
+SMTP_HOST=smtp.example.com
+SMTP_USER=...
+SMTP_PASSWORD=...
+SMTP_FROM=noreply@example.com
+SAFETY_TEXT_ENDPOINT=https://safety.example.com/text
+SAFETY_IMAGE_ENDPOINT=https://safety.example.com/image
 SESSION_COOKIE_SECURE=true
 NEXT_PUBLIC_PAYMENT_PROVIDER=stripe
 ```
 
 Legacy compatibility remains for `AI_PROVIDER` and `OPENAI_IMAGE_MODEL`, but new deployments should use `IMAGE_PROVIDER_DEFAULT` and `IMAGE_MODEL_DEFAULT`.
 
-`mock`, `inline`, and JSON store are only acceptable for local demos and smoke checks. Do not accept paid traffic until OpenAI or another real AI provider, S3/R2-compatible object storage, Stripe webhook signature verification, Prisma/PostgreSQL, and secure cookies are configured.
+`mock`, `inline`, `console`, `local`, and JSON store are only acceptable for local demos and smoke checks. Do not accept paid traffic until OpenAI or another real AI provider, S3/R2-compatible object storage, Stripe webhook signature verification, SMTP delivery, third-party HTTP safety review, Prisma/PostgreSQL, and secure cookies are configured.
 
 ## Runtime Checks
 
