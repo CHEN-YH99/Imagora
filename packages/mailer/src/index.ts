@@ -65,7 +65,7 @@ export class ConsoleMailer implements Mailer {
 }
 
 /**
- * SmtpMailer - SMTP 邮件发送（骨架占位）
+ * SmtpMailer - SMTP 邮件发送
  *
  * 使用前需要配置环境变量：
  * - SMTP_HOST: SMTP 服务器地址
@@ -140,13 +140,10 @@ export class SmtpMailer implements Mailer {
 }
 
 /**
- * AliyunMailer - 阿里云邮件推送（骨架占位）
+ * 预留扩展接口：阿里云邮件推送
  *
- * 使用前需要配置环境变量：
- * - ALIYUN_ACCESS_KEY_ID: 阿里云 Access Key ID
- * - ALIYUN_ACCESS_KEY_SECRET: 阿里云 Access Key Secret
- * - ALIYUN_MAIL_REGION: 邮件推送区域（默认 cn-hangzhou）
- * - ALIYUN_MAIL_FROM: 发件人地址
+ * 当前发行路线只交付 console / smtp。
+ * 这个类不会由 createMailer 返回，直接启用前必须先补齐实现与测试。
  */
 export class AliyunMailer implements Mailer {
   private readonly accessKeyId: string;
@@ -185,7 +182,6 @@ export class AliyunMailer implements Mailer {
  * 根据环境变量 MAILER_PROVIDER 选择实现：
  * - "console" (默认): ConsoleMailer - 开发环境，输出到控制台
  * - "smtp": SmtpMailer - 使用 SMTP 发送
- * - "aliyun": AliyunMailer - 使用阿里云邮件推送
  */
 export function createMailer(): Mailer {
   const provider = process.env.MAILER_PROVIDER ?? "console";
@@ -195,10 +191,8 @@ export function createMailer(): Mailer {
       return new ConsoleMailer();
     case "smtp":
       return new SmtpMailer();
-    case "aliyun":
-      return new AliyunMailer();
     default:
-      throw new Error(`Unknown MAILER_PROVIDER: ${provider}. Valid options: console, smtp, aliyun`);
+      throw new Error(`Unknown MAILER_PROVIDER: ${provider}. Implemented providers: console, smtp`);
   }
 }
 

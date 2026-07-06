@@ -18,9 +18,10 @@ import {
   resolveProviderModel
 } from "../packages/ai-providers/dist/index.js";
 import { createInitialData, JsonStore, verifyPassword } from "../packages/database/dist/index.js";
-import { SmtpMailer } from "../packages/mailer/dist/index.js";
-import { StripePaymentProvider } from "../packages/payments/dist/index.js";
+import { SmtpMailer, createMailer } from "../packages/mailer/dist/index.js";
+import { StripePaymentProvider, createPaymentProvider } from "../packages/payments/dist/index.js";
 import { HttpSafetyProvider, createSafetyProvider } from "../packages/safety/dist/index.js";
+import { createObjectStorage } from "../packages/storage/dist/index.js";
 import { checkPromptSafety } from "../packages/shared/dist/index.js";
 
 const onePixelPngBase64 =
@@ -747,6 +748,35 @@ test("createSafetyProvider resolves configured http third-party provider", () =>
     const provider = createSafetyProvider("http");
 
     assert.equal(provider.name, "http-safety");
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
+test("provider factories reject unfinished production adapters", () => {
+  assert.throws(
+    () => createObjectStorage("aliyun-oss"),
+    /Unsupported storage provider: aliyun-oss\. Implemented providers: inline, s3, r2/
+  );
+  assert.throws(
+    () => createPaymentProvider("wechat"),
+    /Unsupported payment provider: wechat\. Implemented providers: mock, stripe/
+  );
+  assert.throws(
+    () => createSafetyProvider("aliyun"),
+    /Unsupported safety provider: aliyun\. Implemented providers: local, http/
+  );
+});
+
+test("mailer factory keeps production route on smtp only", () => {
+  const previous = snapshotEnv(["MAILER_PROVIDER"]);
+  try {
+    process.env.MAILER_PROVIDER = "aliyun";
+
+    assert.throws(
+      () => createMailer(),
+      /Unknown MAILER_PROVIDER: aliyun\. Implemented providers: console, smtp/
+    );
   } finally {
     restoreEnv(previous);
   }

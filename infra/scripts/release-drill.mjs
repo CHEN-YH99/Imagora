@@ -33,8 +33,22 @@ async function checkProductionConfig() {
     ["QUEUE_PROVIDER", ["bullmq"]],
     ["STORAGE_PROVIDER", ["s3", "r2"]],
     ["PAYMENT_PROVIDER", ["stripe"]],
+    ["MAILER_PROVIDER", ["smtp"]],
+    ["SAFETY_PROVIDER", ["http"]],
     ["RATE_LIMIT_PROVIDER", ["redis"]],
     ["SESSION_COOKIE_SECURE", ["true"]]
+  ];
+  const requiredValues = [
+    "WEB_ORIGIN",
+    "S3_PUBLIC_BASE_URL",
+    "STRIPE_SUCCESS_URL",
+    "STRIPE_CANCEL_URL",
+    "SAFETY_TEXT_ENDPOINT",
+    "SAFETY_IMAGE_ENDPOINT",
+    "SMTP_HOST",
+    "SMTP_USER",
+    "SMTP_PASSWORD",
+    "SMTP_FROM"
   ];
   const secrets = [
     "DATABASE_URL",
@@ -58,6 +72,11 @@ async function checkProductionConfig() {
   const imageProvider = readConfiguredImageProvider();
   if (imageProvider !== "openai") {
     problems.push("IMAGE_PROVIDER_DEFAULT (or legacy AI_PROVIDER) must be openai");
+  }
+  for (const name of requiredValues) {
+    if (isMissingOrPlaceholder(process.env[name])) {
+      problems.push(`${name} is missing or placeholder`);
+    }
   }
   for (const name of secrets) {
     if (isMissingOrPlaceholder(process.env[name])) {

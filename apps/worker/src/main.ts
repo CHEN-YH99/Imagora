@@ -586,11 +586,14 @@ function validateProductionConfig(): void {
   requireProductionValue("S3_ACCESS_KEY_ID");
   requireProductionValue("S3_SECRET_ACCESS_KEY");
   requireProductionValue("S3_PUBLIC_BASE_URL");
+  requireProductionValue("SAFETY_TEXT_ENDPOINT");
+  requireProductionValue("SAFETY_IMAGE_ENDPOINT");
   requireProductionSetting("DATA_STORE", "prisma");
   requireProductionSetting("QUEUE_PROVIDER", "bullmq");
   requireProductionImageProvider("openai");
   requireProductionImageModel();
   requireProductionSetting("STORAGE_PROVIDER", "s3", "r2");
+  requireProductionSetting("SAFETY_PROVIDER", "http");
 }
 
 function requireProductionValue(name: string): string {

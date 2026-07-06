@@ -139,14 +139,10 @@ export class StripePaymentProvider implements PaymentProvider {
 }
 
 /**
- * 微信支付 Provider - 骨架占位
+ * 预留扩展接口：微信支付
  *
- * 使用前需要配置环境变量：
- * - WECHAT_PAY_APP_ID: 微信公众号/小程序 AppID
- * - WECHAT_PAY_MCH_ID: 商户号
- * - WECHAT_PAY_API_KEY: API 密钥（v2）或证书序列号（v3）
- * - WECHAT_PAY_API_VERSION: API 版本（默认 v3）
- * - WECHAT_PAY_NOTIFY_URL: 支付结果通知地址
+ * 当前发行路线只交付 mock / stripe。
+ * 这个类不会由 createPaymentProvider 返回，直接启用前必须先补齐实现与测试。
  */
 export class WechatPayProvider implements PaymentProvider {
   readonly name = "wechat";
@@ -178,15 +174,10 @@ export class WechatPayProvider implements PaymentProvider {
 }
 
 /**
- * 支付宝 Provider - 骨架占位
+ * 预留扩展接口：支付宝
  *
- * 使用前需要配置环境变量：
- * - ALIPAY_APP_ID: 应用 APPID
- * - ALIPAY_PRIVATE_KEY: 应用私钥（RSA2）
- * - ALIPAY_PUBLIC_KEY: 支付宝公钥
- * - ALIPAY_GATEWAY: 支付宝网关地址（默认 https://openapi.alipay.com/gateway.do）
- * - ALIPAY_NOTIFY_URL: 异步通知地址
- * - ALIPAY_RETURN_URL: 同步跳转地址
+ * 当前发行路线只交付 mock / stripe。
+ * 这个类不会由 createPaymentProvider 返回，直接启用前必须先补齐实现与测试。
  */
 export class AlipayProvider implements PaymentProvider {
   readonly name = "alipay";
@@ -225,12 +216,8 @@ export function createPaymentProvider(name = process.env.PAYMENT_PROVIDER ?? "mo
       return new MockPaymentProvider();
     case "stripe":
       return new StripePaymentProvider();
-    case "wechat":
-      return new WechatPayProvider();
-    case "alipay":
-      return new AlipayProvider();
     default:
-      throw new Error(`Unsupported payment provider: ${name}`);
+      throw new Error(`Unsupported payment provider: ${name}. Implemented providers: mock, stripe`);
   }
 }
 

@@ -167,14 +167,10 @@ export class S3CompatibleObjectStorage implements ObjectStorage {
 }
 
 /**
- * 阿里云 OSS Provider - 骨架占位
+ * 预留扩展接口：阿里云 OSS
  *
- * 使用前需要配置环境变量：
- * - ALIYUN_OSS_ACCESS_KEY_ID: 阿里云 Access Key ID
- * - ALIYUN_OSS_ACCESS_KEY_SECRET: 阿里云 Access Key Secret
- * - ALIYUN_OSS_REGION: OSS 区域（如 oss-cn-hangzhou）
- * - ALIYUN_OSS_BUCKET: OSS Bucket 名称
- * - ALIYUN_OSS_ENDPOINT: OSS 端点（可选，默认根据 region 生成）
+ * 当前发行路线只交付 inline / s3 / r2。
+ * 这个类不会由 createObjectStorage 返回，直接启用前必须先补齐实现与测试。
  */
 export class AliyunOssStorage implements ObjectStorage {
   readonly name = "aliyun-oss";
@@ -214,13 +210,10 @@ export class AliyunOssStorage implements ObjectStorage {
 }
 
 /**
- * 腾讯云 COS Provider - 骨架占位
+ * 预留扩展接口：腾讯云 COS
  *
- * 使用前需要配置环境变量：
- * - TENCENT_COS_SECRET_ID: 腾讯云 SecretId
- * - TENCENT_COS_SECRET_KEY: 腾讯云 SecretKey
- * - TENCENT_COS_REGION: COS 区域（如 ap-guangzhou）
- * - TENCENT_COS_BUCKET: COS Bucket 名称（格式：bucket-appid）
+ * 当前发行路线只交付 inline / s3 / r2。
+ * 这个类不会由 createObjectStorage 返回，直接启用前必须先补齐实现与测试。
  */
 export class TencentCosStorage implements ObjectStorage {
   readonly name = "tencent-cos";
@@ -265,12 +258,8 @@ export function createObjectStorage(name = process.env.STORAGE_PROVIDER ?? "inli
     case "s3":
     case "r2":
       return new S3CompatibleObjectStorage();
-    case "aliyun-oss":
-      return new AliyunOssStorage();
-    case "tencent-cos":
-      return new TencentCosStorage();
     default:
-      throw new Error(`Unsupported storage provider: ${name}`);
+      throw new Error(`Unsupported storage provider: ${name}. Implemented providers: inline, s3, r2`);
   }
 }
 

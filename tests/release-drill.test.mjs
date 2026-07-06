@@ -47,6 +47,12 @@ test("release drill reports external configuration gaps without printing secret 
   const summary = JSON.parse(result.stdout);
   assert.equal(summary.passed, true);
   assert.match(result.stdout, /production-config/);
+  const productionConfig = summary.checks.find((check) => check.name === "production-config");
+  assert.equal(productionConfig.status, "warn");
+  assert.match(productionConfig.details.join("\n"), /SAFETY_PROVIDER must be http/);
+  assert.match(productionConfig.details.join("\n"), /MAILER_PROVIDER must be smtp/);
+  assert.match(productionConfig.details.join("\n"), /SAFETY_TEXT_ENDPOINT is missing or placeholder/);
+  assert.match(productionConfig.details.join("\n"), /SMTP_HOST is missing or placeholder/);
   assert.doesNotMatch(result.stdout, /sk_live_|whsec_|OPENAI_API_KEY=/);
 });
 

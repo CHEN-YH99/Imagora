@@ -164,13 +164,10 @@ export class HttpSafetyProvider implements SafetyProvider {
 }
 
 /**
- * 阿里云内容安全 Provider - 骨架占位
+ * 预留扩展接口：阿里云内容安全
  *
- * 使用前需要配置环境变量：
- * - ALIYUN_ACCESS_KEY_ID: 阿里云 Access Key ID
- * - ALIYUN_ACCESS_KEY_SECRET: 阿里云 Access Key Secret
- * - ALIYUN_CONTENT_SAFETY_ENDPOINT: 内容安全 API 端点（默认 green-cip.cn-shanghai.aliyuncs.com）
- * - ALIYUN_CONTENT_SAFETY_REGION: 区域（默认 cn-shanghai）
+ * 当前发行路线只交付 local / http。
+ * 这个类不会由 createSafetyProvider 返回，直接启用前必须先补齐实现与测试。
  */
 export class AliyunContentSafetyProvider implements SafetyProvider {
   readonly name = "aliyun";
@@ -201,13 +198,10 @@ export class AliyunContentSafetyProvider implements SafetyProvider {
 }
 
 /**
- * 腾讯云天御内容安全 Provider - 骨架占位
+ * 预留扩展接口：腾讯云天御内容安全
  *
- * 使用前需要配置环境变量：
- * - TENCENT_SECRET_ID: 腾讯云 SecretId
- * - TENCENT_SECRET_KEY: 腾讯云 SecretKey
- * - TENCENT_CONTENT_SAFETY_REGION: 区域（默认 ap-guangzhou）
- * - TENCENT_CONTENT_SAFETY_ENDPOINT: API 端点（默认 ims.tencentcloudapi.com）
+ * 当前发行路线只交付 local / http。
+ * 这个类不会由 createSafetyProvider 返回，直接启用前必须先补齐实现与测试。
  */
 export class TencentContentSafetyProvider implements SafetyProvider {
   readonly name = "tencent";
@@ -288,13 +282,8 @@ export function createSafetyProvider(name = process.env.SAFETY_PROVIDER ?? "loca
     case "local":
       return new LocalSafetyProvider();
     case "http":
-    case "external":
       return new HttpSafetyProvider();
-    case "aliyun":
-      return new AliyunContentSafetyProvider();
-    case "tencent":
-      return new TencentContentSafetyProvider();
     default:
-      throw new Error(`Unsupported safety provider: ${name}`);
+      throw new Error(`Unsupported safety provider: ${name}. Implemented providers: local, http`);
   }
 }

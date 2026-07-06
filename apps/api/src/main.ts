@@ -3423,12 +3423,20 @@ function validateProductionConfig(): void {
   requireProductionValue("STRIPE_WEBHOOK_SECRET");
   requireProductionValue("STRIPE_SUCCESS_URL");
   requireProductionValue("STRIPE_CANCEL_URL");
+  requireProductionValue("SAFETY_TEXT_ENDPOINT");
+  requireProductionValue("SAFETY_IMAGE_ENDPOINT");
+  requireProductionValue("SMTP_HOST");
+  requireProductionValue("SMTP_USER");
+  requireProductionValue("SMTP_PASSWORD");
+  requireProductionValue("SMTP_FROM");
   requireProductionSetting("DATA_STORE", "prisma");
   requireProductionSetting("QUEUE_PROVIDER", "bullmq");
   requireProductionImageProvider("openai");
   requireProductionImageModel();
   requireProductionSetting("STORAGE_PROVIDER", "s3", "r2");
   requireProductionSetting("PAYMENT_PROVIDER", "stripe");
+  requireProductionSetting("MAILER_PROVIDER", "smtp");
+  requireProductionSetting("SAFETY_PROVIDER", "http");
   requireProductionSetting("RATE_LIMIT_PROVIDER", "redis");
   if (allowBearerSessionAuth()) {
     throw new Error("Unsafe production config: bearer session auth must be disabled");
