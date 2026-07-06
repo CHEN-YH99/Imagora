@@ -28,6 +28,8 @@
     "restore:json": "node infra/scripts/restore-json-store.mjs",
     "deploy:local-prod": "node infra/scripts/deploy-local-prod.mjs",
     "release:drill": "node infra/scripts/release-drill.mjs",
+    "p0:check": "node infra/scripts/p0-readiness.mjs",
+    "p0:check:strict": "node infra/scripts/p0-readiness.mjs",
     "reconcile:credits": "node infra/scripts/reconcile-credits.mjs",
     "start": "npm --workspace apps/web run start",
     "start:api": "npm --workspace apps/api run start",

@@ -95,6 +95,7 @@ docker compose -f infra/docker-compose.yml up -d
 | `npm run format` | Prettier 格式化 |
 | `npm run format:check` | Prettier 检查 |
 | `npm run smoke` | 冒烟测试 |
+| `npm run p0:check` | P0 生产就绪检查 |
 | `npm run start` | 生产模式启动前端 |
 | `npm run start:api` | 生产模式启动 API |
 | `npm run start:worker` | 生产模式启动 Worker |
@@ -187,6 +188,16 @@ docker compose -f infra/docker-compose.prod.yml build
 - `MAILER_PROVIDER=smtp` + `SMTP_HOST` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM`
 - `SAFETY_PROVIDER=http` + `SAFETY_TEXT_ENDPOINT` / `SAFETY_IMAGE_ENDPOINT`
 - `SESSION_COOKIE_SECURE=true`
+
+### P0 生产就绪检查
+
+仓库内 P0 收口命令：
+
+```bash
+npm run p0:check
+```
+
+它会强制执行生产配置、构建产物、备份恢复和灰度清单检查。真实 OpenAI、S3/R2、Stripe、SMTP、第三方安全审核必须在灰度环境拿真实账号与密钥再做 smoke，不能用本地 mock 结果冒充。
 
 ## 测试
 

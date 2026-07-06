@@ -84,6 +84,7 @@ npm run typecheck
 npm test
 npm run build
 npm run release:drill
+npm run p0:check
 npm audit --omit=dev
 git diff --check
 ```
@@ -104,6 +105,21 @@ LOAD_TARGETS=/health,/api/features LOAD_P95_MS=1000 LOAD_FAILURE_RATE_MAX=0 npm 
 ```
 
 `npm run release:drill` performs a local gray-release rehearsal without deploying: it verifies the production configuration checklist, build artifacts, JSON backup/restore hashing, and rollback checklist. Missing real provider credentials are warnings by default because local development cannot invent external accounts; set `RELEASE_DRILL_STRICT=1` before an actual gray release to fail on those gaps.
+
+`npm run p0:check` 是 P0 生产就绪入口。它会以严格模式运行 `release:drill`，并明确标出外部 Provider smoke 的边界：没有灰度环境时，`external-provider-smoke` 只能是 manual，因为真实 OpenAI、S3/R2、Stripe、SMTP、第三方安全审核不能靠本地 mock 结果验收。
+
+最终灰度 P0 签收前，先对已部署的灰度环境运行 smoke 和 load 检查：
+
+```bash
+API_BASE_URL=https://<gray-api> WEB_BASE_URL=https://<gray-web> SMOKE_MANAGE_SERVICES=0 npm run smoke
+API_BASE_URL=https://<gray-api> LOAD_MANAGE_API=0 LOAD_FAILURE_RATE_MAX=0 npm run load:smoke
+```
+
+然后强制要求外部联调证据：
+
+```bash
+P0_REQUIRE_EXTERNAL_SMOKE=1 P0_EXTERNAL_SMOKE_PASSED=1 P0_EXTERNAL_SMOKE_EVIDENCE=<run-id-or-url> npm run p0:check
+```
 
 The API health probe is:
 
