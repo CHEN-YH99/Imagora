@@ -773,10 +773,7 @@ test("mailer factory keeps production route on smtp only", () => {
   try {
     process.env.MAILER_PROVIDER = "aliyun";
 
-    assert.throws(
-      () => createMailer(),
-      /Unknown MAILER_PROVIDER: aliyun\. Implemented providers: console, smtp/
-    );
+    assert.throws(() => createMailer(), /Unknown MAILER_PROVIDER: aliyun\. Implemented providers: console, smtp/);
   } finally {
     restoreEnv(previous);
   }

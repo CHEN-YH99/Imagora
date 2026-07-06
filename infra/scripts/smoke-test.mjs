@@ -255,7 +255,7 @@ async function ensureWebService() {
   );
 
   const url = new URL(webBaseUrl);
-  const nextBin = resolve(rootDir, "node_modules", "next", "dist", "bin", "next");
+  const nextBin = await resolveNextCli();
   await assertReadable(nextBin, "Next.js CLI is missing. Run `npm install` first.");
 
   const child = spawn(
@@ -435,6 +435,22 @@ async function assertReadable(path, message) {
   } catch {
     throw new Error(message);
   }
+}
+
+async function resolveNextCli() {
+  const candidates = [
+    resolve(rootDir, "apps", "web", "node_modules", "next", "dist", "bin", "next"),
+    resolve(rootDir, "node_modules", "next", "dist", "bin", "next")
+  ];
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return candidates[0];
 }
 
 async function getJson(url, options = {}) {

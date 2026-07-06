@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,12 +7,15 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const serverScript = resolve(root, "infra/scripts/e2e-web-server.mjs");
 const playwrightCli = resolve(root, "node_modules/@playwright/test/cli.js");
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:3100";
+const baseUrl = process.env.PLAYWRIGHT_BASE_URL ?? (await defaultBaseUrl());
 const args = process.argv.slice(2);
 
 const server = spawn(process.execPath, [serverScript], {
   cwd: root,
-  env: process.env,
+  env: {
+    ...process.env,
+    PLAYWRIGHT_BASE_URL: baseUrl
+  },
   stdio: "inherit",
   windowsHide: true
 });
@@ -61,7 +65,8 @@ function runPlaywright() {
       cwd: root,
       env: {
         ...process.env,
-        PLAYWRIGHT_SKIP_WEB_SERVER: "1"
+        PLAYWRIGHT_SKIP_WEB_SERVER: "1",
+        PLAYWRIGHT_BASE_URL: baseUrl
       },
       stdio: "inherit",
       windowsHide: true
@@ -87,5 +92,49 @@ async function stopServer() {
   ]);
   if (!stopped && !server.killed) {
     server.kill("SIGKILL");
+  }
+}
+
+async function defaultBaseUrl() {
+  const defaultUrl = "http://127.0.0.1:3100";
+  if (await isPortFree(3100, "127.0.0.1")) {
+    return defaultUrl;
+  }
+  const port = await findAvailablePort("127.0.0.1");
+  return `http://127.0.0.1:${port}`;
+}
+
+async function isPortFree(port, host) {
+  const server = createServer();
+  try {
+    await new Promise((resolveOpen, rejectOpen) => {
+      server.once("error", rejectOpen);
+      server.listen(port, host, resolveOpen);
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (server.listening) {
+      await new Promise((resolveClose) => server.close(resolveClose));
+    }
+  }
+}
+
+async function findAvailablePort(host) {
+  const server = createServer();
+  try {
+    const address = await new Promise((resolveAddress, rejectAddress) => {
+      server.once("error", rejectAddress);
+      server.listen(0, host, () => resolveAddress(server.address()));
+    });
+    if (!address || typeof address === "string") {
+      throw new Error("Unable to reserve an available E2E port.");
+    }
+    return address.port;
+  } finally {
+    if (server.listening) {
+      await new Promise((resolveClose) => server.close(resolveClose));
+    }
   }
 }

@@ -41,3 +41,109 @@ jobs:
 
       - name: Audit dependencies
         run: npm audit --audit-level=moderate
+
+  release-drill:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run strict release drill
+        env:
+          RELEASE_DRILL_STRICT: "1"
+          DATA_STORE: prisma
+          QUEUE_PROVIDER: bullmq
+          STORAGE_PROVIDER: r2
+          PAYMENT_PROVIDER: stripe
+          MAILER_PROVIDER: smtp
+          SAFETY_PROVIDER: http
+          RATE_LIMIT_PROVIDER: redis
+          SESSION_COOKIE_SECURE: "true"
+          IMAGE_PROVIDER_DEFAULT: openai
+          IMAGE_MODEL_DEFAULT: openai:gpt-image-2
+          WEB_ORIGIN: https://imagora.example.com
+          DATABASE_URL: postgresql://imagora:ci-release-drill-password@localhost:5432/imagora
+          REDIS_URL: redis://localhost:6379
+          OPENAI_API_KEY: sk-ci-release-drill
+          S3_ENDPOINT: https://r2.imagora.example.com
+          S3_BUCKET: imagora-production
+          S3_ACCESS_KEY_ID: ci-release-drill
+          S3_SECRET_ACCESS_KEY: ci-release-drill-secret
+          S3_PUBLIC_BASE_URL: https://images.imagora.example.com
+          STRIPE_SECRET_KEY: sk_live_ci_release_drill
+          STRIPE_WEBHOOK_SECRET: whsec_ci_release_drill
+          STRIPE_SUCCESS_URL: https://imagora.example.com/orders?paid=1
+          STRIPE_CANCEL_URL: https://imagora.example.com/pricing?canceled=1
+          SAFETY_TEXT_ENDPOINT: https://safety.imagora.example.com/text
+          SAFETY_IMAGE_ENDPOINT: https://safety.imagora.example.com/image
+          SMTP_HOST: smtp.imagora.example.com
+          SMTP_USER: ci-release-drill
+          SMTP_PASSWORD: ci-release-drill-password
+          SMTP_FROM: noreply@imagora.example.com
+        run: npm run release:drill
+
+  smoke:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run smoke test
+        env:
+          CI: "true"
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run smoke
+
+  e2e:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run end-to-end tests
+        env:
+          CI: "true"
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run test:e2e

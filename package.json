@@ -21,7 +21,8 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "smoke": "node --env-file=.env infra/scripts/smoke-test.mjs",
+    "smoke": "node infra/scripts/smoke-test.mjs",
+    "smoke:env": "node --env-file=.env infra/scripts/smoke-test.mjs",
     "load:smoke": "node infra/scripts/load-smoke.mjs",
     "backup:json": "node infra/scripts/backup-json-store.mjs",
     "restore:json": "node infra/scripts/restore-json-store.mjs",
@@ -35,9 +36,20 @@
   "dependencies": {
     "uipro-cli": "^2.2.3"
   },
+  "overrides": {
+    "esbuild": "0.28.1",
+    "postcss": "8.5.15",
+    "next": {
+      "postcss": "8.5.15"
+    },
+    "tsx": {
+      "esbuild": "0.28.1"
+    }
+  },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
     "@playwright/test": "^1.61.1",
+    "esbuild": "0.28.1",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^9.1.2",
     "prettier": "^3.8.4",
