@@ -23,8 +23,11 @@ import {
 import {
   buildGeneratePath,
   buildGenerateTaskPath,
+  clearActiveGenerationTaskId,
   consumeGenerationDraft,
+  readActiveGenerationTaskId,
   readGenerationTaskSnapshot,
+  saveActiveGenerationTaskId,
   saveGenerationDraft,
   saveGenerationTaskSnapshot
 } from "../../lib/generateDrafts";
@@ -154,6 +157,14 @@ function GenerateExperience() {
         submittedTaskIdRef.current = null;
       }
       if (!task || isTerminalTaskStatus(task.status)) {
+        // URL 丢失 taskId（如通过导航切走再回来）时，用活跃任务指针兜底恢复正在进行的任务，
+        // 避免正在生成的任务在界面上"消失"。指针只在任务进行中存在，终态时已被清除。
+        const activeTaskId = readActiveGenerationTaskId();
+        if (activeTaskId && restoringTaskIdRef.current !== activeTaskId) {
+          setRestoringTaskView(true);
+          void restoreTask(activeTaskId);
+          return;
+        }
         setActiveGenerationTaskId(null);
         restoringTaskIdRef.current = null;
       }
@@ -300,6 +311,7 @@ function GenerateExperience() {
         setMessage(restoreTaskMessage(initialResult.task, initialResult.images));
         setMessageTone(initialResult.task.status === "SUCCEEDED" ? "success" : "danger");
         setActiveGenerationTaskId(null);
+        clearActiveGenerationTaskId();
         if (initialResult.task.status === "BLOCKED") {
           await loadLatestSafetyAppeal();
         }
@@ -370,6 +382,7 @@ function GenerateExperience() {
   }
 
   async function handleTerminalTaskResult(result: { task: Task; images: GeneratedImage[] }) {
+    clearActiveGenerationTaskId();
     if (result.task.status === "SUCCEEDED" && result.images.length > 0) {
       setMessage(generationSuccessMessage(result.task));
       setMessageTone("success");
@@ -466,6 +479,7 @@ function GenerateExperience() {
       restoringTaskIdRef.current = created.task.id;
       submittedTaskIdRef.current = created.task.id;
       setActiveGenerationTaskId(created.task.id);
+      saveActiveGenerationTaskId(created.task.id);
       setTask(created.task);
       router.replace(buildGenerateTaskPath(created.task.id), { scroll: false });
       setAccount((value) => (value ? { ...value, balance: created.balanceAfter } : value));

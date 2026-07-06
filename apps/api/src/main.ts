@@ -2433,7 +2433,7 @@ function runOrderMaintenance(data: StoreData): OrderMaintenanceResult {
 function generationMaintenanceOptions() {
   return {
     pendingTimeoutMs: envNumber("GENERATION_PENDING_TIMEOUT_MS", 5 * 60 * 1000),
-    runningTimeoutMs: envNumber("GENERATION_RUNNING_TIMEOUT_MS", 10 * 60 * 1000)
+    runningTimeoutMs: envNumber("GENERATION_RUNNING_TIMEOUT_MS", 15 * 60 * 1000)
   };
 }
 

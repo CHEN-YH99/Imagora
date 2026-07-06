@@ -22,6 +22,8 @@ type TaskDetail = {
   images: GeneratedImage[];
 };
 
+const historyTaskPollIntervalMs = 2_000;
+
 export default function HistoryPage() {
   const router = useRouter();
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -41,18 +43,55 @@ export default function HistoryPage() {
     if (!selectedTaskId) {
       return;
     }
-    apiFetch<TaskDetail>(`/api/generation/tasks/${selectedTaskId}`)
-      .then((result) => setDetail(result))
-      .catch((error) => setMessage(error instanceof Error ? error.message : "任务详情加载失败，请稍后重试。"));
+    let canceled = false;
+    void loadTaskDetail(selectedTaskId, { isCanceled: () => canceled });
+    return () => {
+      canceled = true;
+    };
   }, [selectedTaskId]);
 
   const selectedTask = useMemo(
     () => detail?.task ?? tasks.find((task) => task.id === selectedTaskId) ?? tasks[0] ?? null,
     [detail?.task, selectedTaskId, tasks]
   );
+  const activeTaskIds = useMemo(
+    () => tasks.filter((task) => isActiveTaskStatus(task.status)).map((task) => task.id),
+    [tasks]
+  );
+  const activeTaskIdsKey = activeTaskIds.join("|");
 
-  async function loadHistory() {
-    setMessage("");
+  useEffect(() => {
+    const activeSelectedTaskId =
+      selectedTask && isActiveTaskStatus(selectedTask.status) ? selectedTask.id : null;
+    const activeBackgroundTaskIds = activeTaskIds.filter((taskId) => taskId !== activeSelectedTaskId);
+    if (!activeSelectedTaskId && activeBackgroundTaskIds.length === 0) {
+      return;
+    }
+
+    let canceled = false;
+    const refreshActiveTasks = async () => {
+      if (activeSelectedTaskId) {
+        await loadTaskDetail(activeSelectedTaskId, { quiet: true, isCanceled: () => canceled });
+      }
+      if (!canceled && activeBackgroundTaskIds.length > 0) {
+        await loadHistory({ quiet: true });
+      }
+    };
+    void refreshActiveTasks();
+    const intervalId = window.setInterval(() => {
+      void refreshActiveTasks();
+    }, historyTaskPollIntervalMs);
+
+    return () => {
+      canceled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeTaskIdsKey, selectedTask?.id, selectedTask?.status]);
+
+  async function loadHistory(options: { quiet?: boolean } = {}) {
+    if (!options.quiet) {
+      setMessage("");
+    }
     try {
       const [taskResult, imageResult] = await Promise.all([
         apiFetch<{ tasks: Task[] }>("/api/generation/tasks?limit=50"),
@@ -62,7 +101,30 @@ export default function HistoryPage() {
       setImages(imageResult.images);
       setSelectedTaskId((value) => value ?? taskResult.tasks[0]?.id ?? null);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "生成历史加载失败，请稍后重试。");
+      if (!options.quiet) {
+        setMessage(error instanceof Error ? error.message : "生成历史加载失败，请稍后重试。");
+      }
+    }
+  }
+
+  async function loadTaskDetail(
+    taskId: string,
+    options: { quiet?: boolean; isCanceled?: () => boolean } = {}
+  ): Promise<TaskDetail | null> {
+    try {
+      const result = await apiFetch<TaskDetail>(`/api/generation/tasks/${taskId}`);
+      if (options.isCanceled?.()) {
+        return null;
+      }
+      setDetail(result);
+      setTasks((items) => mergeTaskIntoList(items, result.task));
+      setImages((items) => mergeImagesIntoList(items, result.images));
+      return result;
+    } catch (error) {
+      if (!options.quiet && !options.isCanceled?.()) {
+        setMessage(error instanceof Error ? error.message : "任务详情加载失败，请稍后重试。");
+      }
+      return null;
     }
   }
 
@@ -309,4 +371,23 @@ export default function HistoryPage() {
       <GeneratedImageLightbox image={selectedPreviewImage} onClose={() => setSelectedPreviewImage(null)} />
     </AppFrame>
   );
+}
+
+function isActiveTaskStatus(status: Task["status"]): boolean {
+  return status === "PENDING" || status === "RUNNING";
+}
+
+function mergeTaskIntoList(tasks: Task[], task: Task): Task[] {
+  if (!tasks.some((item) => item.id === task.id)) {
+    return [task, ...tasks];
+  }
+  return tasks.map((item) => (item.id === task.id ? task : item));
+}
+
+function mergeImagesIntoList(images: GeneratedImage[], nextImages: GeneratedImage[]): GeneratedImage[] {
+  if (nextImages.length === 0) {
+    return images;
+  }
+  const nextImageIds = new Set(nextImages.map((image) => image.id));
+  return [...nextImages, ...images.filter((image) => !nextImageIds.has(image.id))];
 }

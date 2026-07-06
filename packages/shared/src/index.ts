@@ -543,7 +543,8 @@ export interface GenerationMaintenanceResult {
 }
 
 const defaultPendingTaskTimeoutMs = 5 * 60 * 1000;
-const defaultRunningTaskTimeoutMs = 10 * 60 * 1000;
+// 第三方 OpenAI 代理单次生成常需数分钟，10 分钟窗口易误杀慢请求，放宽到 15 分钟。
+const defaultRunningTaskTimeoutMs = 15 * 60 * 1000;
 
 export function refundTaskCredits(
   data: StoreData,

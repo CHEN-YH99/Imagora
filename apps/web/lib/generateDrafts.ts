@@ -2,6 +2,7 @@ import type { GeneratedImage, Task } from "./api";
 
 export const GENERATION_DRAFT_STORAGE_KEY = "imagora:generation-draft";
 export const GENERATION_TASK_SNAPSHOTS_STORAGE_KEY = "imagora:generation-task-snapshots";
+export const ACTIVE_GENERATION_TASK_STORAGE_KEY = "imagora:active-generation-task";
 
 export type GenerationDraft = {
   prompt: string;
@@ -97,4 +98,30 @@ function readGenerationTaskSnapshots(): Record<string, GenerationTaskSnapshot> {
   } catch {
     return {};
   }
+}
+
+/**
+ * 活跃生成任务指针：独立于 URL 持久化"当前正在跑的任务 id"。
+ * 用于在用户切走再回到生成页、且 URL 丢失 taskId 时兜底恢复正在进行的任务。
+ */
+export function saveActiveGenerationTaskId(taskId: string): void {
+  if (!taskId || typeof window === "undefined") {
+    return;
+  }
+  sessionStorage.setItem(ACTIVE_GENERATION_TASK_STORAGE_KEY, taskId);
+}
+
+export function readActiveGenerationTaskId(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const value = sessionStorage.getItem(ACTIVE_GENERATION_TASK_STORAGE_KEY);
+  return value && value.trim() ? value : null;
+}
+
+export function clearActiveGenerationTaskId(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  sessionStorage.removeItem(ACTIVE_GENERATION_TASK_STORAGE_KEY);
 }
