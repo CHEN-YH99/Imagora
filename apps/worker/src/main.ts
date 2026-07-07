@@ -2,9 +2,11 @@ import { randomUUID } from "node:crypto";
 import pino from "pino";
 import sharp from "sharp";
 import {
+  assertProductionOpenAiGenerationConfig,
   createImageGenerationProvider,
   isProviderError,
   quoteImageGeneration,
+  readOpenAiGenerationRuntimeConfig,
   resolveDefaultImageModel,
   resolveDefaultImageProvider
 } from "@imagora/ai-providers";
@@ -13,7 +15,10 @@ import { startGenerationWorker, type GenerationQueueJob } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
 import { createObjectStorage } from "@imagora/storage";
 import {
+  DEFAULT_PENDING_TASK_TIMEOUT_MS,
+  DEFAULT_RUNNING_TASK_TIMEOUT_MS,
   expireCredits,
+  maxQuantity,
   refundTaskCredits,
   runGenerationMaintenance,
   type GeneratedImage,
@@ -440,8 +445,8 @@ function runWorkerMaintenance(data: StoreData): void {
 
 function generationMaintenanceOptions() {
   return {
-    pendingTimeoutMs: envNumber("GENERATION_PENDING_TIMEOUT_MS", 5 * 60 * 1000),
-    runningTimeoutMs: envNumber("GENERATION_RUNNING_TIMEOUT_MS", 15 * 60 * 1000)
+    pendingTimeoutMs: envNumber("GENERATION_PENDING_TIMEOUT_MS", DEFAULT_PENDING_TASK_TIMEOUT_MS),
+    runningTimeoutMs: envNumber("GENERATION_RUNNING_TIMEOUT_MS", DEFAULT_RUNNING_TASK_TIMEOUT_MS)
   };
 }
 
@@ -581,6 +586,8 @@ function validateProductionConfig(): void {
   requireProductionValue("DATABASE_URL");
   requireProductionValue("REDIS_URL");
   requireProductionValue("OPENAI_API_KEY");
+  requireProductionValue("OPENAI_TIMEOUT_MS");
+  requireProductionValue("OPENAI_MAX_RETRIES");
   requireProductionValue("S3_ENDPOINT");
   requireProductionValue("S3_BUCKET");
   requireProductionValue("S3_ACCESS_KEY_ID");
@@ -588,10 +595,13 @@ function validateProductionConfig(): void {
   requireProductionValue("S3_PUBLIC_BASE_URL");
   requireProductionValue("SAFETY_TEXT_ENDPOINT");
   requireProductionValue("SAFETY_IMAGE_ENDPOINT");
+  requireProductionValue("GENERATION_RUNNING_TIMEOUT_MS");
   requireProductionSetting("DATA_STORE", "prisma");
   requireProductionSetting("QUEUE_PROVIDER", "bullmq");
   requireProductionImageProvider("openai");
   requireProductionImageModel();
+  assertProductionOpenAiGenerationConfig();
+  requireProductionGenerationRunningTimeout();
   requireProductionSetting("STORAGE_PROVIDER", "s3", "r2");
   requireProductionSetting("SAFETY_PROVIDER", "http");
 }
@@ -609,6 +619,14 @@ function requireProductionSetting(name: string, ...allowedValues: string[]): voi
   if (!allowedValues.includes(value)) {
     throw new Error(`Unsafe production config: ${name} must be ${allowedValues.join(" or ")}`);
   }
+}
+
+function requireProductionNumber(name: string): number {
+  const value = Number(requireProductionValue(name));
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`Unsafe production config: ${name} must be a positive number`);
+  }
+  return value;
 }
 
 function requireProductionImageProvider(...allowedValues: string[]): void {
@@ -633,6 +651,17 @@ function requireProductionImageModel(): void {
   } catch (error) {
     throw new Error(
       `Unsafe production config: ${error instanceof Error ? error.message : "image model is not configured"}`
+    );
+  }
+}
+
+function requireProductionGenerationRunningTimeout(): void {
+  const runningTimeoutMs = requireProductionNumber("GENERATION_RUNNING_TIMEOUT_MS");
+  const openAiTimeoutMs = readOpenAiGenerationRuntimeConfig().timeoutMs;
+  const minimum = openAiTimeoutMs * maxQuantity + 5 * 60 * 1000;
+  if (runningTimeoutMs < minimum) {
+    throw new Error(
+      `Unsafe production config: GENERATION_RUNNING_TIMEOUT_MS must be at least ${minimum} when OPENAI_TIMEOUT_MS=${openAiTimeoutMs} and max quantity is ${maxQuantity}`
     );
   }
 }

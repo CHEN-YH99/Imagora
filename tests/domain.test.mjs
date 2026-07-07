@@ -7,12 +7,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  assertProductionOpenAiGenerationConfig,
+  DEFAULT_OPENAI_MAX_RETRIES,
+  DEFAULT_OPENAI_TIMEOUT_MS,
+  MAX_PRODUCTION_OPENAI_MAX_RETRIES,
   getActiveProviderMetadata,
+  MIN_PRODUCTION_OPENAI_TIMEOUT_MS,
   MockImageGenerationProvider,
   OpenAiImageGenerationProvider,
   ProviderError,
   isProviderError,
   quoteImageGeneration,
+  readOpenAiGenerationRuntimeConfig,
   resolveDefaultImageModel,
   resolveDefaultImageProvider,
   resolveProviderModel
@@ -213,6 +219,238 @@ test("openai provider retries once on rate limit and returns images", async () =
   }
 });
 
+test("openai generation runtime defaults favor long-running jobs without aggressive retries", () => {
+  const previous = snapshotEnv(["OPENAI_TIMEOUT_MS", "OPENAI_MAX_RETRIES", "OPENAI_RETRY_BASE_MS"]);
+  try {
+    delete process.env.OPENAI_TIMEOUT_MS;
+    delete process.env.OPENAI_MAX_RETRIES;
+    delete process.env.OPENAI_RETRY_BASE_MS;
+
+    const config = readOpenAiGenerationRuntimeConfig();
+
+    assert.equal(config.timeoutMs, DEFAULT_OPENAI_TIMEOUT_MS);
+    assert.equal(config.maxRetries, DEFAULT_OPENAI_MAX_RETRIES);
+    assert.equal(config.initialBackoffMs, 600);
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
+test("openai provider does not auto-retry timed out image requests", async () => {
+  const server = createFakeOpenAiServer([
+    {
+      status: 200,
+      body: {
+        id: "req_timeout_no_retry",
+        data: [{ b64_json: onePixelPngBase64 }]
+      },
+      delayMs: 120
+    }
+  ]);
+  const previous = snapshotEnv([
+    "IMAGE_PROVIDER_DEFAULT",
+    "IMAGE_MODEL_DEFAULT",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_TIMEOUT_MS",
+    "OPENAI_MAX_RETRIES",
+    "OPENAI_RETRY_BASE_MS",
+    "OPENAI_IMAGE_MODEL"
+  ]);
+
+  await server.listen();
+  try {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${server.port}`;
+    process.env.OPENAI_TIMEOUT_MS = "50";
+    process.env.OPENAI_MAX_RETRIES = "2";
+    process.env.OPENAI_RETRY_BASE_MS = "10";
+    process.env.IMAGE_PROVIDER_DEFAULT = "openai";
+    process.env.IMAGE_MODEL_DEFAULT = "openai:gpt-image-2";
+    delete process.env.OPENAI_IMAGE_MODEL;
+
+    await assert.rejects(
+      () => new OpenAiImageGenerationProvider().generateImage(fakeOpenAiInput("timeout-no-retry")),
+      (error) => {
+        assert.equal(error instanceof ProviderError, true);
+        assert.equal(error.code, "PROVIDER_TIMEOUT");
+        return true;
+      }
+    );
+
+    assert.equal(server.requests.length, 1);
+  } finally {
+    restoreEnv(previous);
+    await server.close();
+  }
+});
+
+test("openai provider accepts non-array and nested image payload variants", async () => {
+  const server = createFakeOpenAiServer([
+    {
+      status: 200,
+      body: {
+        id: "req_variant_data_url",
+        output: { result: `data:image/png;base64,${onePixelPngBase64}` }
+      }
+    },
+    {
+      status: 200,
+      body: {
+        id: "req_variant_content",
+        output: {
+          content: [{ type: "output_image", image_base64: onePixelPngBase64, mime_type: "image/png" }]
+        }
+      }
+    },
+    {
+      status: 200,
+      body: {
+        id: "req_variant_mixed_content",
+        output: {
+          content: [
+            { type: "output_text", text: "ignore this block" },
+            { type: "output_image", result: `data:image/png;base64,${onePixelPngBase64}` }
+          ]
+        }
+      }
+    },
+    {
+      status: 200,
+      body: {
+        id: "req_variant_nested_image",
+        image: {
+          b64_json: onePixelPngBase64,
+          mimeType: "image/png"
+        }
+      }
+    },
+    {
+      status: 200,
+      body: {
+        id: "req_variant_image_string",
+        image: onePixelPngBase64
+      }
+    }
+  ]);
+  const previous = snapshotEnv([
+    "IMAGE_PROVIDER_DEFAULT",
+    "IMAGE_MODEL_DEFAULT",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_TIMEOUT_MS",
+    "OPENAI_MAX_RETRIES",
+    "OPENAI_RETRY_BASE_MS",
+    "OPENAI_IMAGE_MODEL"
+  ]);
+
+  await server.listen();
+  try {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${server.port}`;
+    process.env.OPENAI_TIMEOUT_MS = "500";
+    process.env.OPENAI_MAX_RETRIES = "0";
+    process.env.OPENAI_RETRY_BASE_MS = "10";
+    process.env.IMAGE_PROVIDER_DEFAULT = "openai";
+    process.env.IMAGE_MODEL_DEFAULT = "openai:gpt-image-2";
+    delete process.env.OPENAI_IMAGE_MODEL;
+
+    const result = await new OpenAiImageGenerationProvider().generateImage({
+      ...fakeOpenAiInput("variant-success"),
+      quantity: 5
+    });
+
+    assert.equal(server.requests.length, 5);
+    for (const request of server.requests) {
+      const requestBody = JSON.parse(request.body);
+      assert.equal(requestBody.n, 1);
+    }
+    assert.equal(result.images.length, 5);
+    for (const image of result.images) {
+      assert.equal(image.mimeType, "image/png");
+      assert.equal(image.bytes, onePixelPngBase64);
+    }
+    assert.equal(result.providerRequestId, "openai_variant-success");
+    assert.deepEqual(result.raw.requestIds, [
+      "req_variant_data_url",
+      "req_variant_content",
+      "req_variant_mixed_content",
+      "req_variant_nested_image",
+      "req_variant_image_string"
+    ]);
+  } finally {
+    restoreEnv(previous);
+    await server.close();
+  }
+});
+
+test("openai provider scales request timeout for batch generation", async () => {
+  const server = createFakeOpenAiServer([
+    {
+      status: 200,
+      body: {
+        id: "req_timeout_split_1",
+        data: [{ b64_json: onePixelPngBase64 }]
+      },
+      delayMs: 180
+    },
+    {
+      status: 200,
+      body: {
+        id: "req_timeout_split_2",
+        data: [{ b64_json: onePixelPngBase64 }]
+      },
+      delayMs: 180
+    },
+    {
+      status: 200,
+      body: {
+        id: "req_timeout_split_3",
+        data: [{ b64_json: onePixelPngBase64 }]
+      },
+      delayMs: 180
+    }
+  ]);
+  const previous = snapshotEnv([
+    "IMAGE_PROVIDER_DEFAULT",
+    "IMAGE_MODEL_DEFAULT",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_TIMEOUT_MS",
+    "OPENAI_MAX_RETRIES",
+    "OPENAI_RETRY_BASE_MS",
+    "OPENAI_IMAGE_MODEL"
+  ]);
+
+  await server.listen();
+  try {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${server.port}`;
+    process.env.OPENAI_TIMEOUT_MS = "220";
+    process.env.OPENAI_MAX_RETRIES = "0";
+    process.env.OPENAI_RETRY_BASE_MS = "10";
+    process.env.IMAGE_PROVIDER_DEFAULT = "openai";
+    process.env.IMAGE_MODEL_DEFAULT = "openai:gpt-image-2";
+    delete process.env.OPENAI_IMAGE_MODEL;
+
+    const result = await new OpenAiImageGenerationProvider().generateImage({
+      ...fakeOpenAiInput("timeout-scaled-batch"),
+      quantity: 3
+    });
+
+    assert.equal(server.requests.length, 3);
+    for (const request of server.requests) {
+      const requestBody = JSON.parse(request.body);
+      assert.equal(requestBody.n, 1);
+    }
+    assert.equal(result.providerRequestId, "openai_timeout-scaled-batch");
+    assert.equal(result.images.length, 3);
+  } finally {
+    restoreEnv(previous);
+    await server.close();
+  }
+});
+
 test("openai provider maps timeout, moderation, auth and empty result errors", async () => {
   const previous = snapshotEnv([
     "IMAGE_PROVIDER_DEFAULT",
@@ -332,13 +570,28 @@ test("openai provider maps timeout, moderation, auth and empty result errors", a
   }
 });
 
+test("production openai runtime guard rejects short timeouts and excessive retries", () => {
+  const previous = snapshotEnv(["OPENAI_TIMEOUT_MS", "OPENAI_MAX_RETRIES"]);
+  try {
+    process.env.OPENAI_TIMEOUT_MS = String(MIN_PRODUCTION_OPENAI_TIMEOUT_MS - 1);
+    process.env.OPENAI_MAX_RETRIES = String(MAX_PRODUCTION_OPENAI_MAX_RETRIES);
+    assert.throws(() => assertProductionOpenAiGenerationConfig(), /OPENAI_TIMEOUT_MS must be at least/);
+
+    process.env.OPENAI_TIMEOUT_MS = String(MIN_PRODUCTION_OPENAI_TIMEOUT_MS);
+    process.env.OPENAI_MAX_RETRIES = String(MAX_PRODUCTION_OPENAI_MAX_RETRIES + 1);
+    assert.throws(() => assertProductionOpenAiGenerationConfig(), /OPENAI_MAX_RETRIES must be 1 or less/);
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
 test("openai provider rejects url-only image responses", async () => {
   const server = createFakeOpenAiServer([
     {
       status: 200,
       body: {
         id: "url_only_response",
-        data: [{ url: "https://cdn.example/generated.png" }]
+        output: [{ result: "https://cdn.example/generated.png" }]
       }
     }
   ]);
@@ -369,7 +622,7 @@ test("openai provider rejects url-only image responses", async () => {
       (error) => {
         assert.equal(error instanceof ProviderError, true);
         assert.equal(error.code, "PROVIDER_BAD_RESPONSE");
-        assert.match(error.message, /必须返回 b64_json/);
+        assert.match(error.message, /不能返回 url/);
         return true;
       }
     );

@@ -117,6 +117,15 @@ export class StripePaymentProvider implements PaymentProvider {
       throw new Error(`Unsupported Stripe event type: ${event.type}`);
     }
     const object = event.data?.object ?? {};
+    // 防资损：checkout.session.completed 在延迟支付方式（SEPA/银行转账等）下会先以 unpaid 触发，
+    // 必须校验 payment_status === "paid" 才发积分。异步支付真正到账走 async_payment_succeeded。
+    // payment_intent.succeeded 本身即收款成功事件，无此字段，不参与该校验。
+    if (event.type === "checkout.session.completed") {
+      const paymentStatus = stringValue(object.payment_status);
+      if (paymentStatus !== "paid") {
+        throw new Error(`Stripe checkout session is not paid (payment_status=${paymentStatus ?? "unknown"})`);
+      }
+    }
     const orderId = stringValue(object.metadata?.orderId) ?? stringValue(object.client_reference_id);
     const orderNo = stringValue(object.metadata?.orderNo);
     const amountCents = numberValue(object.amount_total) ?? numberValue(object.amount_received);
@@ -239,6 +248,7 @@ interface StripeEvent {
       id?: unknown;
       metadata?: Record<string, unknown>;
       payment_intent?: unknown;
+      payment_status?: unknown;
     };
   };
 }

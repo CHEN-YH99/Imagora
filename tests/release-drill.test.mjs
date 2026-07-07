@@ -160,13 +160,16 @@ function productionReadyEnv() {
     DATABASE_URL: "postgresql://imagora:secret@db.imagora.example:5432/imagora",
     REDIS_URL: "redis://redis.imagora.example:6379",
     OPENAI_API_KEY: "sk-live-production-shaped",
+    OPENAI_TIMEOUT_MS: "300000",
+    OPENAI_MAX_RETRIES: "1",
     S3_ENDPOINT: "https://r2.imagora.example",
     S3_BUCKET: "imagora-prod",
     S3_ACCESS_KEY_ID: "r2-access-key",
     S3_SECRET_ACCESS_KEY: "r2-secret-key",
     STRIPE_SECRET_KEY: "sk_live_production_shaped",
     STRIPE_WEBHOOK_SECRET: "whsec_production_shaped",
-    ALERT_WEBHOOK_URL: "https://alerts.imagora.example/webhook"
+    ALERT_WEBHOOK_URL: "https://alerts.imagora.example/webhook",
+    GENERATION_RUNNING_TIMEOUT_MS: "1800000"
   };
 }
 
@@ -195,6 +198,8 @@ function productionEnvNames() {
     "DATABASE_URL",
     "REDIS_URL",
     "OPENAI_API_KEY",
+    "OPENAI_TIMEOUT_MS",
+    "OPENAI_MAX_RETRIES",
     "S3_ENDPOINT",
     "S3_BUCKET",
     "S3_ACCESS_KEY_ID",
@@ -202,6 +207,7 @@ function productionEnvNames() {
     "STRIPE_SECRET_KEY",
     "STRIPE_WEBHOOK_SECRET",
     "ALERT_WEBHOOK_URL",
+    "GENERATION_RUNNING_TIMEOUT_MS",
     "ALERT_EMAIL_TO"
   ];
 }

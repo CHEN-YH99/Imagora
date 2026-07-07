@@ -5,6 +5,10 @@ export const MOCK_MODEL = "mock" as const;
 export const DEFAULT_OPENAI_MODEL_ID = "openai:gpt-image-2" as const;
 export const MOCK_MODEL_ID = "mock:default" as const;
 export const SUPPORTED_IMAGE_MODELS = [DEFAULT_OPENAI_MODEL_ID, MOCK_MODEL_ID] as const;
+export const DEFAULT_OPENAI_TIMEOUT_MS = 300_000 as const;
+export const DEFAULT_OPENAI_MAX_RETRIES = 1 as const;
+export const MIN_PRODUCTION_OPENAI_TIMEOUT_MS = 300_000 as const;
+export const MAX_PRODUCTION_OPENAI_MAX_RETRIES = 1 as const;
 
 type SupportedImageModel = (typeof SUPPORTED_IMAGE_MODELS)[number];
 type SupportedProviderName = "mock" | "openai";
@@ -124,9 +128,21 @@ interface ProviderModelConfig {
   costCentsPerImage: number;
 }
 
+export interface OpenAiGenerationRuntimeConfig {
+  timeoutMs: number;
+  maxRetries: number;
+  initialBackoffMs: number;
+}
+
 interface OpenAiImageResponse {
   id?: string;
-  data?: OpenAiImageItem[];
+  data?: unknown;
+  images?: unknown;
+  output?: unknown;
+  result?: unknown;
+  b64_json?: unknown;
+  image_base64?: unknown;
+  image?: unknown;
   error?: {
     message?: string;
     code?: string;
@@ -138,7 +154,12 @@ interface OpenAiImageResponse {
 interface OpenAiImageItem {
   b64_json?: string;
   url?: string;
+  mimeType?: ProviderImage["mimeType"];
 }
+
+type NormalizedOpenAiImageResponse = OpenAiImageResponse & {
+  data: OpenAiImageItem[];
+};
 
 const providerModelConfigs: Record<SupportedImageModel, ProviderModelConfig> = {
   [DEFAULT_OPENAI_MODEL_ID]: {
@@ -231,9 +252,10 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   readonly modelName = resolveDefaultImageModel(this.name);
   private readonly apiKey = requiredEnv("OPENAI_API_KEY");
   private readonly baseUrl = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
-  private readonly timeoutMs = envNumber("OPENAI_TIMEOUT_MS", 120_000);
-  private readonly maxRetries = envNumber("OPENAI_MAX_RETRIES", 2, true);
-  private readonly initialBackoffMs = envNumber("OPENAI_RETRY_BASE_MS", 600);
+  private readonly runtimeConfig = readOpenAiGenerationRuntimeConfig();
+  private readonly timeoutMs = this.runtimeConfig.timeoutMs;
+  private readonly maxRetries = this.runtimeConfig.maxRetries;
+  private readonly initialBackoffMs = this.runtimeConfig.initialBackoffMs;
 
   async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
     const model = resolveProviderModel(input.model, this.name);
@@ -251,20 +273,22 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     const requestIds = new Set<string>();
 
     for (let index = 0; index < input.quantity; index += 1) {
-      const payload = await this.requestGeneration({
-        model: modelConfig.upstreamModel,
-        prompt: buildPrompt(input),
-        size,
-        quality,
-        n: 1,
-        output_format: "png"
-      });
+      const payload = await this.requestGeneration(
+        {
+          model: modelConfig.upstreamModel,
+          prompt: buildPrompt(input),
+          size,
+          quality,
+          n: 1,
+          output_format: "png"
+        },
+        1
+      );
       if (payload.id) {
         requestIds.add(payload.id);
       }
-      const item = payload.data?.[0];
-      const bytes = extractOpenAiImageBytes(item, payload);
-      if (!bytes) {
+      const image = extractOpenAiImage(payload.data[0], payload);
+      if (!image.bytes) {
         throw new ProviderError("PROVIDER_EMPTY_RESULT", "OpenAI 未返回图片数据。", {
           retryable: false,
           provider: this.name,
@@ -272,8 +296,8 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
         });
       }
       images.push({
-        bytes,
-        mimeType: "image/png",
+        bytes: image.bytes,
+        mimeType: image.mimeType,
         width: input.width,
         height: input.height,
         index
@@ -290,7 +314,13 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     return {
       providerRequestId: requestIds.size === 1 ? [...requestIds][0] : `openai_${input.taskId}`,
       images,
-      raw: { provider: this.name, model, upstreamModel: modelConfig.upstreamModel, requestIds: [...requestIds] }
+      raw: {
+        provider: this.name,
+        model,
+        upstreamModel: modelConfig.upstreamModel,
+        requestIds: [...requestIds],
+        responseImageCount: images.length
+      }
     };
   }
 
@@ -301,14 +331,14 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     quality: OpenAiImageQuality;
     n: number;
     output_format: "png";
-  }): Promise<OpenAiImageResponse> {
+  }, quantity: number): Promise<NormalizedOpenAiImageResponse> {
     let attempt = 0;
     while (true) {
       try {
-        return await this.performRequest(body);
+        return await this.performRequest(body, quantity);
       } catch (error) {
         const providerError = normalizeProviderError(error, this.name);
-        if (!providerError.retryable || attempt >= this.maxRetries) {
+        if (!shouldRetryOpenAiRequest(providerError) || attempt >= this.maxRetries) {
           throw providerError;
         }
         attempt += 1;
@@ -324,12 +354,12 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     quality: OpenAiImageQuality;
     n: number;
     output_format: "png";
-  }): Promise<OpenAiImageResponse> {
+  }, quantity: number): Promise<NormalizedOpenAiImageResponse> {
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/images/generations`, {
         method: "POST",
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(this.resolveRequestTimeoutMs(quantity)),
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json"
@@ -355,16 +385,11 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
       throw mapOpenAiError(response.status, payload, this.name);
     }
 
-    if (!Array.isArray(payload.data)) {
-      throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI 返回格式异常。", {
-        retryable: false,
-        provider: this.name,
-        statusCode: response.status,
-        details: payload
-      });
-    }
+    return normalizeOpenAiSuccessPayload(payload, response.status);
+  }
 
-    return payload;
+  private resolveRequestTimeoutMs(quantity: number): number {
+    return this.timeoutMs * Math.max(1, Math.trunc(quantity));
   }
 }
 
@@ -374,6 +399,26 @@ export function resolveDefaultImageProvider(): SupportedProviderName {
     return normalizeProviderName(configuredProvider);
   }
   return hasConfiguredOpenAiApiKey() ? "openai" : "mock";
+}
+
+export function readOpenAiGenerationRuntimeConfig(): OpenAiGenerationRuntimeConfig {
+  return {
+    timeoutMs: envNumber("OPENAI_TIMEOUT_MS", DEFAULT_OPENAI_TIMEOUT_MS),
+    maxRetries: envNumber("OPENAI_MAX_RETRIES", DEFAULT_OPENAI_MAX_RETRIES, true),
+    initialBackoffMs: envNumber("OPENAI_RETRY_BASE_MS", 600)
+  };
+}
+
+export function assertProductionOpenAiGenerationConfig(): void {
+  const config = readOpenAiGenerationRuntimeConfig();
+  if (config.timeoutMs < MIN_PRODUCTION_OPENAI_TIMEOUT_MS) {
+    throw new Error(`Unsafe production config: OPENAI_TIMEOUT_MS must be at least ${MIN_PRODUCTION_OPENAI_TIMEOUT_MS}`);
+  }
+  if (config.maxRetries > MAX_PRODUCTION_OPENAI_MAX_RETRIES) {
+    throw new Error(
+      `Unsafe production config: OPENAI_MAX_RETRIES must be ${MAX_PRODUCTION_OPENAI_MAX_RETRIES} or less`
+    );
+  }
 }
 
 export function resolveDefaultImageModel(providerName = resolveDefaultImageProvider()): SupportedImageModel {
@@ -531,13 +576,37 @@ function normalizeProviderError(error: unknown, provider: SupportedProviderName)
   });
 }
 
-function extractOpenAiImageBytes(item: OpenAiImageItem | undefined, payload: OpenAiImageResponse): string {
-  const bytes = item?.b64_json?.trim();
-  if (bytes) {
-    return bytes;
+function shouldRetryOpenAiRequest(error: ProviderError): boolean {
+  // 图片生成超时后上游任务可能仍在执行，自动重试会放大重复计费/重复扣模型额度风险。
+  return error.retryable && error.code !== "PROVIDER_TIMEOUT";
+}
+
+function normalizeOpenAiSuccessPayload(
+  payload: OpenAiImageResponse,
+  statusCode: number
+): NormalizedOpenAiImageResponse {
+  const normalizedItems = extractOpenAiImageItems(payload);
+  if (!normalizedItems) {
+    throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI 返回格式异常。", {
+      retryable: false,
+      provider: "openai",
+      statusCode,
+      details: payload
+    });
   }
 
-  if (typeof item?.url === "string" && item.url.trim()) {
+  return {
+    ...payload,
+    data: normalizedItems
+  };
+}
+
+function extractOpenAiImage(item: OpenAiImageItem | undefined, payload: OpenAiImageResponse): {
+  bytes: string;
+  mimeType: ProviderImage["mimeType"];
+} {
+  const rawImagePayload = item?.b64_json?.trim();
+  if (looksLikeRemoteImageUrl(rawImagePayload) || looksLikeRemoteImageUrl(item?.url)) {
     throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI GPT 图像模型必须返回 b64_json，不能返回 url。", {
       retryable: false,
       provider: "openai",
@@ -545,11 +614,176 @@ function extractOpenAiImageBytes(item: OpenAiImageItem | undefined, payload: Ope
     });
   }
 
+  const imageData = normalizeBase64ImagePayload(rawImagePayload);
+  if (imageData) {
+    return {
+      bytes: imageData.bytes,
+      mimeType: imageData.mimeType ?? item?.mimeType ?? "image/png"
+    };
+  }
+
   throw new ProviderError("PROVIDER_EMPTY_RESULT", "OpenAI 未返回图片数据。", {
     retryable: false,
     provider: "openai",
     details: payload
   });
+}
+
+function extractOpenAiImageItems(payload: OpenAiImageResponse): OpenAiImageItem[] | null {
+  const sources = [payload.data, payload.images, payload.output];
+  for (const source of sources) {
+    const normalized = normalizeOpenAiImageItems(source, true);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  const directItem = normalizeOpenAiImageItem(payload);
+  if (directItem) {
+    return [directItem];
+  }
+
+  return null;
+}
+
+function normalizeOpenAiImageItems(source: unknown, preserveEmptyRecord: boolean): OpenAiImageItem[] | null {
+  if (Array.isArray(source)) {
+    return source.map((item) => normalizeOpenAiImageItem(item, preserveEmptyRecord) ?? {});
+  }
+  if (source && typeof source === "object") {
+    return [normalizeOpenAiImageItem(source, preserveEmptyRecord) ?? {}];
+  }
+  if (typeof source === "string") {
+    const directItem = normalizeOpenAiImageItem(source, preserveEmptyRecord);
+    return directItem ? [directItem] : preserveEmptyRecord ? [{}] : null;
+  }
+  return null;
+}
+
+function normalizeOpenAiImageItem(source: unknown, preserveEmptyRecord = false): OpenAiImageItem | null {
+  if (typeof source === "string") {
+    const normalized = source.trim();
+    if (!normalized) {
+      return preserveEmptyRecord ? {} : null;
+    }
+    return { b64_json: normalized };
+  }
+
+  if (!isRecord(source)) {
+    return preserveEmptyRecord ? {} : null;
+  }
+
+  const nestedImage = isRecord(source.image) ? source.image : undefined;
+  const b64Json = firstNonEmptyString(
+    source.b64_json,
+    source.image_base64,
+    source.image,
+    source.base64,
+    source.result,
+    nestedImage?.b64_json,
+    nestedImage?.image_base64,
+    nestedImage?.image,
+    nestedImage?.base64,
+    nestedImage?.result
+  );
+  const url = firstNonEmptyString(source.url, nestedImage?.url);
+  const mimeType = normalizeGeneratedImageMimeType(
+    firstNonEmptyString(
+      source.mime_type,
+      source.mimeType,
+      source.content_type,
+      source.contentType,
+      nestedImage?.mime_type,
+      nestedImage?.mimeType,
+      nestedImage?.content_type,
+      nestedImage?.contentType
+    )
+  );
+
+  if (b64Json || url || mimeType) {
+    return {
+      ...(b64Json ? { b64_json: b64Json } : {}),
+      ...(url ? { url } : {}),
+      ...(mimeType ? { mimeType } : {})
+    };
+  }
+
+  const nestedItem = pickResolvedOpenAiImageItem([
+    ...(normalizeOpenAiImageItems(source.content, false) ?? []),
+    ...(normalizeOpenAiImageItems(source.result, false) ?? []),
+    ...(normalizeOpenAiImageItems(source.data, false) ?? [])
+  ]);
+  if (nestedItem) {
+    return nestedItem;
+  }
+
+  if (preserveEmptyRecord) {
+    return {};
+  }
+
+  return null;
+}
+
+function pickResolvedOpenAiImageItem(items: OpenAiImageItem[]): OpenAiImageItem | null {
+  const imageItem = items.find((item) => item.b64_json || item.url);
+  if (imageItem) {
+    return imageItem;
+  }
+
+  const mimeOnlyItem = items.find((item) => item.mimeType);
+  return mimeOnlyItem ?? null;
+}
+
+function normalizeBase64ImagePayload(
+  value: string | undefined
+): { bytes: string; mimeType?: ProviderImage["mimeType"] } | null {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const dataUrlMatch = normalized.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+  if (!dataUrlMatch) {
+    return { bytes: normalized };
+  }
+
+  return {
+    bytes: dataUrlMatch[2].trim(),
+    mimeType: normalizeGeneratedImageMimeType(dataUrlMatch[1])
+  };
+}
+
+function normalizeGeneratedImageMimeType(value: string | undefined): ProviderImage["mimeType"] | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (
+    normalized === "image/png" ||
+    normalized === "image/jpeg" ||
+    normalized === "image/webp" ||
+    normalized === "image/svg+xml"
+  ) {
+    return normalized;
+  }
+  return undefined;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string") {
+      const normalized = value.trim();
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+  return undefined;
+}
+
+function looksLikeRemoteImageUrl(value: string | undefined): boolean {
+  return /^(https?:)?\/\//i.test(value?.trim() ?? "");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function mapOpenAiError(status: number, payload: OpenAiImageResponse, provider: SupportedProviderName): ProviderError {

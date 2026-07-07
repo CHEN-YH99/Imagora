@@ -261,13 +261,23 @@ export default function ImageDetailPage() {
             </Panel>
 
             <Panel>
+              <h2 className="mb-4 text-lg font-semibold">任务时间</h2>
+              <dl className="grid gap-3 text-sm text-white/58 sm:grid-cols-2">
+                <DetailItem label="创建时间" value={formatTaskTimestamp(task.createdAt)} />
+                <DetailItem label="开始时间" value={formatTaskTimestamp(task.startedAt)} />
+                <DetailItem label="完成时间" value={formatTaskTimestamp(task.completedAt)} />
+                <DetailItem label="更新时间" value={formatTaskTimestamp(task.updatedAt)} />
+              </dl>
+            </Panel>
+
+            <Panel>
               <h2 className="mb-4 text-lg font-semibold">资产信息</h2>
               <dl className="grid gap-3 text-sm text-white/58 sm:grid-cols-2">
                 <DetailItem label="尺寸" value={`${image.width} × ${image.height}`} />
                 <DetailItem label="实际比例" value={formatImageAspectRatio(image.width, image.height)} />
                 <DetailItem label="格式" value={image.mimeType ?? "未知"} />
                 <DetailItem label="文件大小" value={formatFileSize(image.fileSize)} />
-                <DetailItem label="生成时间" value={formatDate(image.createdAt)} />
+                <DetailItem label="生成时间" value={formatTaskTimestamp(image.createdAt)} />
                 <DetailItem label="缩略图 Key" value={image.thumbnailKey ?? "-"} wide />
                 <DetailItem label="原图 Key" value={image.storageKey ?? "-"} wide />
               </dl>
@@ -307,11 +317,27 @@ function DetailItem({ label, value, wide = false }: { label: string; value: Reac
   );
 }
 
-function formatDate(value: string): string {
-  return new Intl.DateTimeFormat("zh-CN", {
-    dateStyle: "medium",
-    timeStyle: "short"
-  }).format(new Date(value));
+function formatTaskTimestamp(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  const datePart = [date.getFullYear(), padTimestampPart(date.getMonth() + 1), padTimestampPart(date.getDate())].join(
+    "-"
+  );
+  const timePart = [padTimestampPart(date.getHours()), padTimestampPart(date.getMinutes()), padTimestampPart(date.getSeconds())].join(
+    ":"
+  );
+  return `${datePart} ${timePart}`;
+}
+
+function padTimestampPart(value: number): string {
+  return value.toString().padStart(2, "0");
 }
 
 function formatFileSize(value: number | undefined): string {

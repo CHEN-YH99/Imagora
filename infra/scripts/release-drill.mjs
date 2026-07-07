@@ -7,6 +7,11 @@ import { fileURLToPath } from "node:url";
 const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const root = resolve(process.env.RELEASE_DRILL_ARTIFACT_ROOT ?? defaultRoot);
 const strict = process.env.RELEASE_DRILL_STRICT === "1";
+const minProductionOpenAiTimeoutMs = 300_000;
+const maxProductionOpenAiRetries = 1;
+const minProductionGenerationRunningTimeoutMs = 1_800_000;
+const maxTaskQuantity = 4;
+const generationRunningTimeoutBufferMs = 5 * 60 * 1000;
 
 const checks = [];
 
@@ -48,7 +53,10 @@ async function checkProductionConfig() {
     "SMTP_HOST",
     "SMTP_USER",
     "SMTP_PASSWORD",
-    "SMTP_FROM"
+    "SMTP_FROM",
+    "OPENAI_TIMEOUT_MS",
+    "OPENAI_MAX_RETRIES",
+    "GENERATION_RUNNING_TIMEOUT_MS"
   ];
   const secrets = [
     "DATABASE_URL",
@@ -86,6 +94,29 @@ async function checkProductionConfig() {
   for (const name of secrets) {
     if (isMissingOrPlaceholder(process.env[name])) {
       problems.push(`${name} is missing or placeholder`);
+    }
+  }
+  const openAiTimeoutMs = readPositiveNumber("OPENAI_TIMEOUT_MS", problems);
+  if (openAiTimeoutMs !== null && openAiTimeoutMs < minProductionOpenAiTimeoutMs) {
+    problems.push(`OPENAI_TIMEOUT_MS must be at least ${minProductionOpenAiTimeoutMs}`);
+  }
+  const openAiMaxRetries = readNonNegativeNumber("OPENAI_MAX_RETRIES", problems);
+  if (openAiMaxRetries !== null && openAiMaxRetries > maxProductionOpenAiRetries) {
+    problems.push(`OPENAI_MAX_RETRIES must be ${maxProductionOpenAiRetries} or less`);
+  }
+  const generationRunningTimeoutMs = readPositiveNumber("GENERATION_RUNNING_TIMEOUT_MS", problems);
+  if (
+    generationRunningTimeoutMs !== null &&
+    generationRunningTimeoutMs < minProductionGenerationRunningTimeoutMs
+  ) {
+    problems.push(`GENERATION_RUNNING_TIMEOUT_MS must be at least ${minProductionGenerationRunningTimeoutMs}`);
+  }
+  if (openAiTimeoutMs !== null && generationRunningTimeoutMs !== null) {
+    const minimumRunningTimeoutMs = openAiTimeoutMs * maxTaskQuantity + generationRunningTimeoutBufferMs;
+    if (generationRunningTimeoutMs < minimumRunningTimeoutMs) {
+      problems.push(
+        `GENERATION_RUNNING_TIMEOUT_MS must be at least ${minimumRunningTimeoutMs} for OPENAI_TIMEOUT_MS=${openAiTimeoutMs} and max quantity ${maxTaskQuantity}`
+      );
     }
   }
 
@@ -181,6 +212,32 @@ function isMissingOrPlaceholder(value) {
 
 function readConfiguredImageProvider() {
   return process.env.IMAGE_PROVIDER_DEFAULT?.trim() || process.env.AI_PROVIDER?.trim() || "";
+}
+
+function readPositiveNumber(name, problems) {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    problems.push(`${name} must be a positive number`);
+    return null;
+  }
+  return parsed;
+}
+
+function readNonNegativeNumber(name, problems) {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    problems.push(`${name} must be a non-negative number`);
+    return null;
+  }
+  return parsed;
 }
 
 function sha256(content) {

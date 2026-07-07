@@ -127,6 +127,18 @@ test("web core pages expose recoverable empty states and confirm destructive act
   }
 
   assert.match(historyPage, /ConfirmDialog/);
+  assert.match(historyPage, /function formatTaskTimestamp\(/);
+  assert.match(historyPage, /padTimestampPart/);
+  assert.match(historyPage, /创建时间/);
+  assert.match(historyPage, /开始时间/);
+  assert.match(historyPage, /完成时间/);
+  assert.match(historyPage, /更新时间/);
+  assert.match(detailPage, /function formatTaskTimestamp\(/);
+  assert.match(detailPage, /padTimestampPart/);
+  assert.match(detailPage, /创建时间/);
+  assert.match(detailPage, /开始时间/);
+  assert.match(detailPage, /完成时间/);
+  assert.match(detailPage, /更新时间/);
   assert.match(detailPage, /ConfirmDialog/);
   assert.match(favoritesPage, /ConfirmDialog/);
   assert.match(adminPage, /ConfirmDialog/);

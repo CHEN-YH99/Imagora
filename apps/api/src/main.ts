@@ -3,8 +3,10 @@ import { createConnection } from "node:net";
 import cors from "@fastify/cors";
 import pino from "pino";
 import {
+  assertProductionOpenAiGenerationConfig,
   getActiveProviderMetadata,
   quoteImageGeneration,
+  readOpenAiGenerationRuntimeConfig,
   resolveDefaultImageModel,
   resolveDefaultImageProvider,
   resolveProviderModel
@@ -25,6 +27,8 @@ import {
   type ApiEnvelope,
   type AspectRatio,
   aspectRatioDimensions,
+  DEFAULT_PENDING_TASK_TIMEOUT_MS,
+  DEFAULT_RUNNING_TASK_TIMEOUT_MS,
   creditSourceRemainders,
   expireCredits,
   refundFailureCount,
@@ -652,6 +656,7 @@ app.post("/api/generation/quote", async (request) => {
 app.post("/api/generation/tasks", async (request, reply) => {
   assertFeatureEnabled("generation");
   const { user } = await requireAuth(request);
+  assertEmailVerified(user);
   const input = generationInputSchema.parse(request.body);
   const { providerMetadata: resolvedProviderMetadata, model: resolvedModel } = resolveGenerationProviderSelection(
     input.model
@@ -2137,6 +2142,21 @@ async function requireAuth(request: FastifyRequest): Promise<{ data: StoreData; 
   return { data, user };
 }
 
+// 邮箱验证门槛：防止一次性邮箱注册即领 120 积分直接消耗。
+// 默认关闭（开发/测试无痛），生产由 validateProductionConfig 强制开启。
+function requireEmailVerification(): boolean {
+  return envBool("REQUIRE_EMAIL_VERIFICATION", process.env.NODE_ENV === "production");
+}
+
+function assertEmailVerified(user: User): void {
+  if (!requireEmailVerification()) {
+    return;
+  }
+  if (!user.emailVerifiedAt) {
+    throw new AppError("EMAIL_NOT_VERIFIED", "Email verification is required before generating images", 403);
+  }
+}
+
 function setSessionCookie(reply: FastifyReply, token: string, expiresAt: string): void {
   reply.header(
     "set-cookie",
@@ -2432,8 +2452,8 @@ function runOrderMaintenance(data: StoreData): OrderMaintenanceResult {
 
 function generationMaintenanceOptions() {
   return {
-    pendingTimeoutMs: envNumber("GENERATION_PENDING_TIMEOUT_MS", 5 * 60 * 1000),
-    runningTimeoutMs: envNumber("GENERATION_RUNNING_TIMEOUT_MS", 15 * 60 * 1000)
+    pendingTimeoutMs: envNumber("GENERATION_PENDING_TIMEOUT_MS", DEFAULT_PENDING_TASK_TIMEOUT_MS),
+    runningTimeoutMs: envNumber("GENERATION_RUNNING_TIMEOUT_MS", DEFAULT_RUNNING_TASK_TIMEOUT_MS)
   };
 }
 
@@ -3420,6 +3440,8 @@ function validateProductionConfig(): void {
   requireProductionValue("DATABASE_URL");
   requireProductionValue("REDIS_URL");
   requireProductionValue("OPENAI_API_KEY");
+  requireProductionValue("OPENAI_TIMEOUT_MS");
+  requireProductionValue("OPENAI_MAX_RETRIES");
   requireProductionValue("S3_ENDPOINT");
   requireProductionValue("S3_BUCKET");
   requireProductionValue("S3_ACCESS_KEY_ID");
@@ -3435,10 +3457,13 @@ function validateProductionConfig(): void {
   requireProductionValue("SMTP_USER");
   requireProductionValue("SMTP_PASSWORD");
   requireProductionValue("SMTP_FROM");
+  requireProductionValue("GENERATION_RUNNING_TIMEOUT_MS");
   requireProductionSetting("DATA_STORE", "prisma");
   requireProductionSetting("QUEUE_PROVIDER", "bullmq");
   requireProductionImageProvider("openai");
   requireProductionImageModel();
+  assertProductionOpenAiGenerationConfig();
+  requireProductionGenerationRunningTimeout();
   requireProductionSetting("STORAGE_PROVIDER", "s3", "r2");
   requireProductionSetting("PAYMENT_PROVIDER", "stripe");
   requireProductionSetting("MAILER_PROVIDER", "smtp");
@@ -3472,6 +3497,14 @@ function requireProductionSetting(name: string, ...allowedValues: string[]): voi
   }
 }
 
+function requireProductionNumber(name: string): number {
+  const value = Number(requireProductionValue(name));
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`Unsafe production config: ${name} must be a positive number`);
+  }
+  return value;
+}
+
 function requireProductionImageProvider(...allowedValues: string[]): void {
   let value: string;
   try {
@@ -3494,6 +3527,17 @@ function requireProductionImageModel(): void {
   } catch (error) {
     throw new Error(
       `Unsafe production config: ${error instanceof Error ? error.message : "image model is not configured"}`
+    );
+  }
+}
+
+function requireProductionGenerationRunningTimeout(): void {
+  const runningTimeoutMs = requireProductionNumber("GENERATION_RUNNING_TIMEOUT_MS");
+  const openAiTimeoutMs = readOpenAiGenerationRuntimeConfig().timeoutMs;
+  const minimum = openAiTimeoutMs * maxQuantity + 5 * 60 * 1000;
+  if (runningTimeoutMs < minimum) {
+    throw new Error(
+      `Unsafe production config: GENERATION_RUNNING_TIMEOUT_MS must be at least ${minimum} when OPENAI_TIMEOUT_MS=${openAiTimeoutMs} and max quantity is ${maxQuantity}`
     );
   }
 }

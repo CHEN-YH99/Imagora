@@ -285,7 +285,7 @@ export default function HistoryPage() {
                   再次生成
                 </button>
               </div>
-              <dl className="mt-4 grid gap-3 text-xs text-white/52 sm:grid-cols-4">
+              <dl className="mt-4 grid gap-3 text-xs text-white/52 sm:grid-cols-2 lg:grid-cols-4">
                 <div>
                   <dt>风格</dt>
                   <dd className="mt-1 text-white/80">{formatStyleLabel(selectedTask.style)}</dd>
@@ -301,6 +301,22 @@ export default function HistoryPage() {
                 <div>
                   <dt>积分</dt>
                   <dd className="mt-1 text-white/80">{formatCredits(selectedTask.creditCost)}</dd>
+                </div>
+                <div>
+                  <dt>创建时间</dt>
+                  <dd className="mt-1 text-white/80">{formatTaskTimestamp(selectedTask.createdAt)}</dd>
+                </div>
+                <div>
+                  <dt>开始时间</dt>
+                  <dd className="mt-1 text-white/80">{formatTaskTimestamp(selectedTask.startedAt)}</dd>
+                </div>
+                <div>
+                  <dt>完成时间</dt>
+                  <dd className="mt-1 text-white/80">{formatTaskTimestamp(selectedTask.completedAt)}</dd>
+                </div>
+                <div>
+                  <dt>更新时间</dt>
+                  <dd className="mt-1 text-white/80">{formatTaskTimestamp(selectedTask.updatedAt)}</dd>
                 </div>
               </dl>
             </div>
@@ -390,4 +406,27 @@ function mergeImagesIntoList(images: GeneratedImage[], nextImages: GeneratedImag
   }
   const nextImageIds = new Set(nextImages.map((image) => image.id));
   return [...nextImages, ...images.filter((image) => !nextImageIds.has(image.id))];
+}
+
+function formatTaskTimestamp(value: string | null | undefined): string {
+  if (!value) {
+    return "-";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  const datePart = [date.getFullYear(), padTimestampPart(date.getMonth() + 1), padTimestampPart(date.getDate())].join(
+    "-"
+  );
+  const timePart = [padTimestampPart(date.getHours()), padTimestampPart(date.getMinutes()), padTimestampPart(date.getSeconds())].join(
+    ":"
+  );
+  return `${datePart} ${timePart}`;
+}
+
+function padTimestampPart(value: number): string {
+  return value.toString().padStart(2, "0");
 }

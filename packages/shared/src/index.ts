@@ -350,7 +350,8 @@ export type ErrorCode =
   | "INTERNAL_ERROR"
   | "INVALID_RESET_TOKEN"
   | "RESET_TOKEN_EXPIRED"
-  | "INVALID_VERIFY_TOKEN";
+  | "INVALID_VERIFY_TOKEN"
+  | "EMAIL_NOT_VERIFIED";
 
 export class AppError extends Error {
   readonly code: ErrorCode;
@@ -376,6 +377,9 @@ export const aspectRatioDimensions: Record<AspectRatio, { width: number; height:
 
 export const maxPromptLength = 1200;
 export const maxQuantity = 4;
+export const DEFAULT_PENDING_TASK_TIMEOUT_MS = 5 * 60 * 1000;
+// OpenAI 批量生图会按请求张数放大超时预算，高质量四宫格时 30 分钟以内都属于正常兜底窗口。
+export const DEFAULT_RUNNING_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 // 生成任务积分成本的唯一真源为 @imagora/ai-providers 的 quoteImageGeneration，
 // 此处不再维护独立公式，避免两套计费口径漂移。
 
@@ -542,10 +546,6 @@ export interface GenerationMaintenanceResult {
   refundedCredits: number;
 }
 
-const defaultPendingTaskTimeoutMs = 5 * 60 * 1000;
-// 第三方 OpenAI 代理单次生成常需数分钟，10 分钟窗口易误杀慢请求，放宽到 15 分钟。
-const defaultRunningTaskTimeoutMs = 15 * 60 * 1000;
-
 export function refundTaskCredits(
   data: StoreData,
   task: GenerationTask,
@@ -609,8 +609,8 @@ export function runGenerationMaintenance(
 ): GenerationMaintenanceResult {
   const now = options.now ?? new Date().toISOString();
   const nowMs = new Date(now).getTime();
-  const pendingTimeoutMs = options.pendingTimeoutMs ?? defaultPendingTaskTimeoutMs;
-  const runningTimeoutMs = options.runningTimeoutMs ?? defaultRunningTaskTimeoutMs;
+  const pendingTimeoutMs = options.pendingTimeoutMs ?? DEFAULT_PENDING_TASK_TIMEOUT_MS;
+  const runningTimeoutMs = options.runningTimeoutMs ?? DEFAULT_RUNNING_TASK_TIMEOUT_MS;
   const result: GenerationMaintenanceResult = {
     failedPendingTasks: 0,
     failedRunningTasks: 0,

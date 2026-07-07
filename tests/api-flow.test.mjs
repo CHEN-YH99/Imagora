@@ -29,6 +29,9 @@ test("api rejects bearer session auth in production config", async () => {
     STRIPE_WEBHOOK_SECRET: "whsec_test",
     STRIPE_SUCCESS_URL: "https://imagora.example/payment/success",
     STRIPE_CANCEL_URL: "https://imagora.example/payment/cancel",
+    OPENAI_TIMEOUT_MS: "300000",
+    OPENAI_MAX_RETRIES: "1",
+    GENERATION_RUNNING_TIMEOUT_MS: "1500000",
     MAILER_PROVIDER: "smtp",
     SMTP_HOST: "smtp.example",
     SMTP_USER: "imagora",
@@ -45,6 +48,7 @@ test("api rejects bearer session auth in production config", async () => {
     PAYMENT_PROVIDER: "stripe",
     RATE_LIMIT_PROVIDER: "redis",
     SESSION_COOKIE_SECURE: "true",
+    ALERT_EMAIL_TO: "ops@imagora.example",
     ALLOW_BEARER_SESSION_AUTH: "true"
   };
 
@@ -70,6 +74,9 @@ test("api rejects production config without any alert channel", async () => {
     STRIPE_WEBHOOK_SECRET: "whsec_test",
     STRIPE_SUCCESS_URL: "https://imagora.example/payment/success",
     STRIPE_CANCEL_URL: "https://imagora.example/payment/cancel",
+    OPENAI_TIMEOUT_MS: "300000",
+    OPENAI_MAX_RETRIES: "1",
+    GENERATION_RUNNING_TIMEOUT_MS: "1500000",
     MAILER_PROVIDER: "smtp",
     SMTP_HOST: "smtp.example",
     SMTP_USER: "imagora",
@@ -385,6 +392,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     IMAGORA_STORE_PATH: storePath,
     EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
     ORDER_PENDING_TTL_MINUTES: "30",
+    GENERATION_RUNNING_TIMEOUT_MS: "600000",
     WORKER_POLL_INTERVAL_MS: "300"
   };
   const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
@@ -1248,15 +1256,22 @@ test("api and worker complete generation with openai provider flow", async () =>
     {
       status: 200,
       body: {
-        id: "openai_req_1",
-        data: [{ b64_json: onePixelPngBase64 }]
+        id: "openai_req_split_1",
+        output: {
+          content: [{ type: "output_image", image_base64: onePixelPngBase64, mime_type: "image/png" }]
+        }
       }
     },
     {
       status: 200,
       body: {
-        id: "openai_req_2",
-        data: [{ b64_json: onePixelPngBase64 }]
+        id: "openai_req_split_2",
+        output: {
+          content: [
+            { type: "output_text", text: "ignore this block" },
+            { type: "output_image", result: `data:image/png;base64,${onePixelPngBase64}` }
+          ]
+        }
       }
     }
   ]);
