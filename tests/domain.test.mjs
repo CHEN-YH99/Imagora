@@ -213,6 +213,10 @@ test("openai provider retries once on rate limit and returns images", async () =
     assert.equal(result.images.length, 1);
     assert.equal(result.providerRequestId, "req_retry_success");
     assert.match(server.requests[0].authorization ?? "", /^Bearer sk-test$/);
+    for (const request of server.requests) {
+      const requestBody = JSON.parse(request.body);
+      assert.equal(requestBody.response_format, "b64_json");
+    }
   } finally {
     restoreEnv(previous);
     await server.close();

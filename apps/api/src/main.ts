@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import cors from "@fastify/cors";
 import pino from "pino";
@@ -17,7 +18,7 @@ import { createAlertNotifier } from "@imagora/notifier";
 import { createPaymentProvider, type VerifiedPaymentEvent } from "@imagora/payments";
 import { createGenerationQueue } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
-import { createObjectStorage } from "@imagora/storage";
+import { createObjectStorage, FilesystemObjectStorage } from "@imagora/storage";
 import {
   AppError,
   type AdminAuditLog,
@@ -308,6 +309,32 @@ app.get("/health", async () => ({
 }));
 
 app.get("/api/features", async (request) => envelope(request, { features: featureFlags() }));
+
+// filesystem 存储模式下的文件回读：复刻 S3 signed URL 的私有 + 过期语义。
+// getSignedUrl 生成 /api/files/<key>?expiresAt=&signature=，这里校验 HMAC 与过期后回读磁盘文件。
+// 仅在 STORAGE_PROVIDER=filesystem 时挂载，其余模式该路由不存在（图片走 data: 内联或 S3 直链）。
+if (storage instanceof FilesystemObjectStorage) {
+  const filesystemStorage = storage;
+  app.get("/api/files/*", async (request, reply) => {
+    const key = (request.params as Record<string, string>)["*"];
+    const query = fileSignatureQuerySchema.parse(request.query);
+    let filePath: string;
+    try {
+      filePath = filesystemStorage.verifyAndResolve(key, Number(query.expiresAt), query.signature);
+    } catch (error) {
+      throw new AppError("FORBIDDEN", errorMessage(error, "Signed URL is invalid"), 403);
+    }
+    let body: Buffer;
+    try {
+      body = await readFile(filePath);
+    } catch {
+      throw new AppError("NOT_FOUND", "File was not found", 404);
+    }
+    reply.header("content-type", contentTypeForStorageKey(key));
+    reply.header("cache-control", "private, max-age=300");
+    return reply.send(body);
+  });
+}
 
 app.get("/api/auth/captcha", async (request) => {
   pruneCaptchaChallenges();
@@ -1950,6 +1977,11 @@ const referenceUploadSchema = z.object({
   contentBase64: z.string().min(16).max(envNumber("UPLOAD_MAX_BASE64_CHARS", 8_000_000))
 });
 
+const fileSignatureQuerySchema = z.object({
+  expiresAt: z.string().regex(/^\d+$/, "expiresAt must be a millisecond timestamp"),
+  signature: z.string().regex(/^[a-f0-9]{64}$/, "signature must be a 64-char hex digest")
+});
+
 const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30)
 });
@@ -2942,8 +2974,26 @@ function withFavorite(data: StoreData, userId: string, image: GeneratedImage): G
 function withoutImagePublicUrl(image: GeneratedImage): GeneratedImage {
   return {
     ...image,
-    publicUrl: ""
+    publicUrl: "",
+    // filesystem 模式下缩略图是 local://key，前端批量展示时直接当 <img src>，
+    // 无法逐张调接口签名，这里就地签成 /api/files/... 长效链接。data:/https 直链原样透传。
+    thumbnailUrl: signLocalThumbnailUrl(image.thumbnailUrl)
   };
+}
+
+// 把 worker 落库的 local://<key> 缩略图签名成前端可直连的 /api/files/<key> URL。
+// 仅 filesystem 模式生效；其余模式 thumbnailUrl 已是 data: 或公开直链，原样返回。
+function signLocalThumbnailUrl(thumbnailUrl: string): string {
+  if (!(storage instanceof FilesystemObjectStorage) || !thumbnailUrl.startsWith("local://")) {
+    return thumbnailUrl;
+  }
+  const key = thumbnailUrl.slice("local://".length);
+  return storage.buildSignedUrl(key, thumbnailSignedUrlTtlSeconds());
+}
+
+function thumbnailSignedUrlTtlSeconds(): number {
+  // 列表页可能久留，给足 TTL 降低裂图；上限受 storage 层 7 天封顶保护。
+  return Math.max(60, envNumber("THUMBNAIL_URL_TTL_HOURS", 24) * 60 * 60);
 }
 
 function resolveInlineDataUrl(value: string): string | null {
@@ -3164,6 +3214,24 @@ function extensionForMimeType(mimeType: string): string {
       return "svg";
     default:
       return "img";
+  }
+}
+
+// 由 storage key 的扩展名反推 content-type，供 /api/files 回读时设置响应头。
+function contentTypeForStorageKey(key: string): string {
+  const extension = key.split(".").pop()?.toLowerCase() ?? "";
+  switch (extension) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "png":
+      return "image/png";
+    case "webp":
+      return "image/webp";
+    case "svg":
+      return "image/svg+xml";
+    default:
+      return "application/octet-stream";
   }
 }
 

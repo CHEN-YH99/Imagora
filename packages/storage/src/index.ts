@@ -1,4 +1,6 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname, resolve, sep } from "node:path";
 
 export interface PutObjectInput {
   key: string;
@@ -42,6 +44,81 @@ export class InlineDataUrlStorage implements ObjectStorage {
 
   async deleteObject(_key: string): Promise<void> {
     return;
+  }
+}
+
+/**
+ * 本地磁盘对象存储：图片写入 LOCAL_STORAGE_DIR，数据库只存路径（key），
+ * 避免把 1.6MB 图片 base64 塞进 Postgres 字段拖垮整库写入（P2024）。
+ *
+ * publicUrl 存 `local://<key>`（非 data: 前缀，走 API 的 getSignedUrl 分支）。
+ * getSignedUrl 返回带 HMAC 签名与过期时间的 `/api/files/<key>` 相对路径，
+ * 复刻 S3 signed URL 的私有 + 过期语义，由 API 侧 /api/files 路由校验后回读文件。
+ */
+export class FilesystemObjectStorage implements ObjectStorage {
+  readonly name = "filesystem";
+  private readonly baseDir = resolve(process.env.LOCAL_STORAGE_DIR ?? "./data/generated-files");
+  private readonly signingSecret = process.env.LOCAL_STORAGE_SIGNING_SECRET ?? "imagora-local-storage-dev-secret";
+  private readonly publicBasePath = (process.env.LOCAL_STORAGE_PUBLIC_PATH ?? "/api/files").replace(/\/$/, "");
+
+  async putObject(input: PutObjectInput): Promise<PutObjectResult> {
+    const filePath = this.resolveKeyPath(input.key);
+    await mkdir(dirname(filePath), { recursive: true });
+    const buffer = Buffer.from(input.body, input.bodyEncoding ?? "utf8");
+    await writeFile(filePath, buffer);
+    return {
+      key: input.key,
+      publicUrl: `local://${input.key}`,
+      fileSize: buffer.byteLength
+    };
+  }
+
+  async getSignedUrl(key: string, expiresInSeconds: number): Promise<string> {
+    return this.buildSignedUrl(key, expiresInSeconds);
+  }
+
+  /**
+   * 同步生成签名 URL，供批量场景（列表缩略图）在同步 map 里直接调用，
+   * 避免为每张缩略图 await 一次。语义与 getSignedUrl 完全一致。
+   */
+  buildSignedUrl(key: string, expiresInSeconds: number): string {
+    const expires = Math.max(60, Math.min(expiresInSeconds, 60 * 60 * 24 * 7));
+    const expiresAt = Date.now() + expires * 1000;
+    const signature = this.sign(key, expiresAt);
+    const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+    return `${this.publicBasePath}/${encodedKey}?expiresAt=${expiresAt}&signature=${signature}`;
+  }
+
+  async deleteObject(key: string): Promise<void> {
+    const filePath = this.resolveKeyPath(key);
+    await rm(filePath, { force: true });
+  }
+
+  /** 供 API /api/files 路由校验签名与过期，返回文件绝对路径（校验失败抛错）。 */
+  verifyAndResolve(key: string, expiresAt: number, signature: string): string {
+    if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) {
+      throw new Error("Signed URL has expired");
+    }
+    const expected = this.sign(key, expiresAt);
+    const provided = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expected);
+    if (provided.length !== expectedBuffer.length || !timingSafeEqual(provided, expectedBuffer)) {
+      throw new Error("Signed URL signature is invalid");
+    }
+    return this.resolveKeyPath(key);
+  }
+
+  private sign(key: string, expiresAt: number): string {
+    return createHmac("sha256", this.signingSecret).update(`${key}:${expiresAt}`).digest("hex");
+  }
+
+  /** 把 key 解析为 baseDir 下的绝对路径，并防止 `../` 越权穿越目录。 */
+  private resolveKeyPath(key: string): string {
+    const target = resolve(this.baseDir, key);
+    if (target !== this.baseDir && !target.startsWith(this.baseDir + sep)) {
+      throw new Error(`Illegal storage key escapes base dir: ${key}`);
+    }
+    return target;
   }
 }
 
@@ -255,11 +332,13 @@ export function createObjectStorage(name = process.env.STORAGE_PROVIDER ?? "inli
   switch (name) {
     case "inline":
       return new InlineDataUrlStorage();
+    case "filesystem":
+      return new FilesystemObjectStorage();
     case "s3":
     case "r2":
       return new S3CompatibleObjectStorage();
     default:
-      throw new Error(`Unsupported storage provider: ${name}. Implemented providers: inline, s3, r2`);
+      throw new Error(`Unsupported storage provider: ${name}. Implemented providers: inline, filesystem, s3, r2`);
   }
 }
 

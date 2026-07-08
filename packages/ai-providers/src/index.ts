@@ -280,6 +280,7 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
           size,
           quality,
           n: 1,
+          response_format: "b64_json",
           output_format: "png"
         },
         1
@@ -330,6 +331,7 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     size: OpenAiImageSize;
     quality: OpenAiImageQuality;
     n: number;
+    response_format: "b64_json";
     output_format: "png";
   }, quantity: number): Promise<NormalizedOpenAiImageResponse> {
     let attempt = 0;
@@ -353,6 +355,7 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     size: OpenAiImageSize;
     quality: OpenAiImageQuality;
     n: number;
+    response_format: "b64_json";
     output_format: "png";
   }, quantity: number): Promise<NormalizedOpenAiImageResponse> {
     let response: Response;
