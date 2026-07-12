@@ -4,6 +4,7 @@ import test from "node:test";
 
 const sharedPreviewFile = "apps/web/components/GeneratedImagePreview.tsx";
 const apiMainFile = "apps/api/src/main.ts";
+const webApiFile = "apps/web/lib/api.ts";
 const previewConsumerFiles = [
   "apps/web/app/favorites/page.tsx",
   "apps/web/app/generate/page.tsx",
@@ -63,6 +64,13 @@ test("web image elements do not bind potentially empty API URLs directly to src"
     const content = await readFile(file, "utf8");
     assert.doesNotMatch(content, pattern, `${file} should sanitize image URLs before rendering img src`);
   }
+});
+
+test("web image src resolver sends signed local file URLs to the API origin", async () => {
+  const content = await readFile(webApiFile, "utf8");
+
+  assert.match(content, /normalized\.startsWith\("\/api\/files\/"\)/);
+  assert.match(content, /return `\$\{apiBaseUrl\}\$\{normalized\}`;/);
 });
 
 test("user-facing pages wire the shared lightbox into generated image surfaces", async () => {

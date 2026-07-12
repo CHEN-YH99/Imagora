@@ -38,6 +38,9 @@ export function resolveImageSrc(...candidates: Array<string | null | undefined>)
   for (const candidate of candidates) {
     const normalized = candidate?.trim();
     if (normalized) {
+      if (normalized.startsWith("/api/files/")) {
+        return `${apiBaseUrl}${normalized}`;
+      }
       return normalized;
     }
   }

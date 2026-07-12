@@ -9,6 +9,8 @@ export const DEFAULT_OPENAI_TIMEOUT_MS = 300_000 as const;
 export const DEFAULT_OPENAI_MAX_RETRIES = 1 as const;
 export const MIN_PRODUCTION_OPENAI_TIMEOUT_MS = 300_000 as const;
 export const MAX_PRODUCTION_OPENAI_MAX_RETRIES = 1 as const;
+const DEFAULT_OPENAI_REMOTE_IMAGE_TIMEOUT_MS = 60_000;
+const MAX_OPENAI_REMOTE_IMAGE_BYTES = 20 * 1024 * 1024;
 
 type SupportedImageModel = (typeof SUPPORTED_IMAGE_MODELS)[number];
 type SupportedProviderName = "mock" | "openai";
@@ -161,6 +163,11 @@ type NormalizedOpenAiImageResponse = OpenAiImageResponse & {
   data: OpenAiImageItem[];
 };
 
+interface OpenAiRemoteImageFetchOptions {
+  timeoutMs: number;
+  allowInsecureLocalhost: boolean;
+}
+
 const providerModelConfigs: Record<SupportedImageModel, ProviderModelConfig> = {
   [DEFAULT_OPENAI_MODEL_ID]: {
     provider: "openai",
@@ -252,6 +259,7 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   readonly modelName = resolveDefaultImageModel(this.name);
   private readonly apiKey = requiredEnv("OPENAI_API_KEY");
   private readonly baseUrl = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
+  private readonly allowInsecureLocalImageFetch = isLocalHttpUrl(this.baseUrl);
   private readonly runtimeConfig = readOpenAiGenerationRuntimeConfig();
   private readonly timeoutMs = this.runtimeConfig.timeoutMs;
   private readonly maxRetries = this.runtimeConfig.maxRetries;
@@ -288,7 +296,10 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
       if (payload.id) {
         requestIds.add(payload.id);
       }
-      const image = extractOpenAiImage(payload.data[0], payload);
+      const image = await extractOpenAiImage(payload.data[0], payload, {
+        timeoutMs: Math.min(this.resolveRequestTimeoutMs(1), DEFAULT_OPENAI_REMOTE_IMAGE_TIMEOUT_MS),
+        allowInsecureLocalhost: this.allowInsecureLocalImageFetch
+      });
       if (!image.bytes) {
         throw new ProviderError("PROVIDER_EMPTY_RESULT", "OpenAI 未返回图片数据。", {
           retryable: false,
@@ -604,25 +615,26 @@ function normalizeOpenAiSuccessPayload(
   };
 }
 
-function extractOpenAiImage(item: OpenAiImageItem | undefined, payload: OpenAiImageResponse): {
+async function extractOpenAiImage(
+  item: OpenAiImageItem | undefined,
+  payload: OpenAiImageResponse,
+  remoteImageOptions: OpenAiRemoteImageFetchOptions
+): Promise<{
   bytes: string;
   mimeType: ProviderImage["mimeType"];
-} {
+}> {
   const rawImagePayload = item?.b64_json?.trim();
-  if (looksLikeRemoteImageUrl(rawImagePayload) || looksLikeRemoteImageUrl(item?.url)) {
-    throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI GPT 图像模型必须返回 b64_json，不能返回 url。", {
-      retryable: false,
-      provider: "openai",
-      details: { payload, item }
-    });
-  }
-
-  const imageData = normalizeBase64ImagePayload(rawImagePayload);
+  const imageData = looksLikeRemoteImageUrl(rawImagePayload) ? null : normalizeBase64ImagePayload(rawImagePayload);
   if (imageData) {
     return {
       bytes: imageData.bytes,
       mimeType: imageData.mimeType ?? item?.mimeType ?? "image/png"
     };
+  }
+
+  const remoteImageUrl = firstRemoteImageUrl(rawImagePayload, item?.url);
+  if (remoteImageUrl) {
+    return fetchOpenAiRemoteImage(remoteImageUrl, remoteImageOptions, payload);
   }
 
   throw new ProviderError("PROVIDER_EMPTY_RESULT", "OpenAI 未返回图片数据。", {
@@ -757,7 +769,7 @@ function normalizeBase64ImagePayload(
 }
 
 function normalizeGeneratedImageMimeType(value: string | undefined): ProviderImage["mimeType"] | undefined {
-  const normalized = value?.trim().toLowerCase();
+  const normalized = value?.split(";")[0]?.trim().toLowerCase();
   if (
     normalized === "image/png" ||
     normalized === "image/jpeg" ||
@@ -783,6 +795,193 @@ function firstNonEmptyString(...values: unknown[]): string | undefined {
 
 function looksLikeRemoteImageUrl(value: string | undefined): boolean {
   return /^(https?:)?\/\//i.test(value?.trim() ?? "");
+}
+
+function firstRemoteImageUrl(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    const normalized = value?.trim();
+    if (normalized && looksLikeRemoteImageUrl(normalized)) {
+      return normalized.startsWith("//") ? `https:${normalized}` : normalized;
+    }
+  }
+  return undefined;
+}
+
+async function fetchOpenAiRemoteImage(
+  urlValue: string,
+  options: OpenAiRemoteImageFetchOptions,
+  payload: OpenAiImageResponse
+): Promise<{
+  bytes: string;
+  mimeType: ProviderImage["mimeType"];
+}> {
+  const url = normalizeFetchableOpenAiImageUrl(urlValue, options.allowInsecureLocalhost, payload);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      signal: AbortSignal.timeout(options.timeoutMs),
+      redirect: "manual"
+    });
+  } catch (error) {
+    throw new ProviderError(
+      "PROVIDER_FAILED",
+      "OpenAI-compatible 图像网关返回了 URL 图片，但后端下载图片失败。",
+      {
+        retryable: true,
+        provider: "openai",
+        details: {
+          url: redactImageUrl(url),
+          error: error instanceof Error ? error.message : String(error)
+        }
+      }
+    );
+  }
+
+  if (!response.ok) {
+    throw new ProviderError(
+      "PROVIDER_BAD_RESPONSE",
+      "OpenAI-compatible 图像网关返回了 URL 图片，但图片地址不可读取。",
+      {
+        retryable: false,
+        provider: "openai",
+        statusCode: response.status,
+        details: {
+          url: redactImageUrl(url),
+          statusText: response.statusText
+        }
+      }
+    );
+  }
+
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > MAX_OPENAI_REMOTE_IMAGE_BYTES) {
+    throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI-compatible 图像网关返回的 URL 图片过大。", {
+      retryable: false,
+      provider: "openai",
+      details: {
+        url: redactImageUrl(url),
+        contentLength,
+        maxBytes: MAX_OPENAI_REMOTE_IMAGE_BYTES
+      }
+    });
+  }
+
+  const mimeType = normalizeGeneratedImageMimeType(response.headers.get("content-type") ?? undefined);
+  if (!mimeType) {
+    throw new ProviderError(
+      "PROVIDER_BAD_RESPONSE",
+      "OpenAI-compatible 图像网关返回的 URL 图片不是受支持的图片类型。",
+      {
+        retryable: false,
+        provider: "openai",
+        details: {
+          url: redactImageUrl(url),
+          contentType: response.headers.get("content-type")
+        }
+      }
+    );
+  }
+
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length) {
+    throw new ProviderError("PROVIDER_EMPTY_RESULT", "OpenAI-compatible 图像网关返回的 URL 图片为空。", {
+      retryable: false,
+      provider: "openai",
+      details: {
+        url: redactImageUrl(url)
+      }
+    });
+  }
+  if (bytes.byteLength > MAX_OPENAI_REMOTE_IMAGE_BYTES) {
+    throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI-compatible 图像网关返回的 URL 图片过大。", {
+      retryable: false,
+      provider: "openai",
+      details: {
+        url: redactImageUrl(url),
+        byteLength: bytes.byteLength,
+        maxBytes: MAX_OPENAI_REMOTE_IMAGE_BYTES
+      }
+    });
+  }
+
+  return {
+    bytes: bytes.toString("base64"),
+    mimeType
+  };
+}
+
+function normalizeFetchableOpenAiImageUrl(
+  urlValue: string,
+  allowInsecureLocalhost: boolean,
+  payload: OpenAiImageResponse
+): URL {
+  let url: URL;
+  try {
+    url = new URL(urlValue);
+  } catch {
+    throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI-compatible 图像网关返回了无效图片 URL。", {
+      retryable: false,
+      provider: "openai",
+      details: {
+        responseShape: summarizeOpenAiImageResponse(payload)
+      }
+    });
+  }
+
+  const isLocalTarget = isLocalHostname(url.hostname);
+  const isAllowedHttps = url.protocol === "https:" && (!isLocalTarget || allowInsecureLocalhost);
+  const isAllowedLocalHttp = allowInsecureLocalhost && url.protocol === "http:" && isLocalHostname(url.hostname);
+  if (!isAllowedHttps && !isAllowedLocalHttp) {
+    throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI-compatible 图像网关返回了不可下载的图片 URL。", {
+      retryable: false,
+      provider: "openai",
+      details: {
+        url: redactImageUrl(url),
+        responseShape: summarizeOpenAiImageResponse(payload)
+      }
+    });
+  }
+
+  if (url.username || url.password) {
+    throw new ProviderError("PROVIDER_BAD_RESPONSE", "OpenAI-compatible 图像网关返回的图片 URL 包含不安全凭据。", {
+      retryable: false,
+      provider: "openai",
+      details: {
+        url: redactImageUrl(url),
+        responseShape: summarizeOpenAiImageResponse(payload)
+      }
+    });
+  }
+
+  return url;
+}
+
+function summarizeOpenAiImageResponse(payload: OpenAiImageResponse): Record<string, boolean> {
+  return {
+    hasData: payload.data !== undefined,
+    hasImages: payload.images !== undefined,
+    hasOutput: payload.output !== undefined,
+    hasResult: payload.result !== undefined,
+    hasDirectImage: payload.image !== undefined,
+    hasDirectBase64: payload.b64_json !== undefined || payload.image_base64 !== undefined
+  };
+}
+
+function redactImageUrl(url: URL): string {
+  return `${url.origin}${url.pathname}`;
+}
+
+function isLocalHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" && isLocalHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isLocalHostname(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

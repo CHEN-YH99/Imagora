@@ -589,16 +589,9 @@ test("production openai runtime guard rejects short timeouts and excessive retri
   }
 });
 
-test("openai provider rejects url-only image responses", async () => {
-  const server = createFakeOpenAiServer([
-    {
-      status: 200,
-      body: {
-        id: "url_only_response",
-        output: [{ result: "https://cdn.example/generated.png" }]
-      }
-    }
-  ]);
+test("openai provider downloads url-only image responses from compatible gateways", async () => {
+  const imageServer = createFakeImageAssetServer(onePixelPngBase64);
+  let server;
   const previous = snapshotEnv([
     "IMAGE_PROVIDER_DEFAULT",
     "IMAGE_MODEL_DEFAULT",
@@ -610,6 +603,16 @@ test("openai provider rejects url-only image responses", async () => {
     "OPENAI_IMAGE_MODEL"
   ]);
 
+  await imageServer.listen();
+  server = createFakeOpenAiServer([
+    {
+      status: 200,
+      body: {
+        id: "url_only_response",
+        output: [{ result: imageServer.url("/generated.png") }]
+      }
+    }
+  ]);
   await server.listen();
   try {
     process.env.OPENAI_API_KEY = "sk-test";
@@ -621,18 +624,22 @@ test("openai provider rejects url-only image responses", async () => {
     process.env.IMAGE_MODEL_DEFAULT = "openai:gpt-image-2";
     delete process.env.OPENAI_IMAGE_MODEL;
 
-    await assert.rejects(
-      () => new OpenAiImageGenerationProvider().generateImage(fakeOpenAiInput("url-only")),
-      (error) => {
-        assert.equal(error instanceof ProviderError, true);
-        assert.equal(error.code, "PROVIDER_BAD_RESPONSE");
-        assert.match(error.message, /不能返回 url/);
-        return true;
-      }
-    );
+    const result = await new OpenAiImageGenerationProvider().generateImage(fakeOpenAiInput("url-only"));
+
+    assert.equal(server.requests.length, 1);
+    const requestBody = JSON.parse(server.requests[0].body);
+    assert.equal(requestBody.response_format, "b64_json");
+    assert.equal(requestBody.output_format, "png");
+    assert.equal(imageServer.requests.length, 1);
+    assert.equal(imageServer.requests[0].url, "/generated.png");
+    assert.equal(result.providerRequestId, "url_only_response");
+    assert.equal(result.images.length, 1);
+    assert.equal(result.images[0].bytes, onePixelPngBase64);
+    assert.equal(result.images[0].mimeType, "image/png");
   } finally {
     restoreEnv(previous);
-    await server.close();
+    await server?.close();
+    await imageServer.close();
   }
 });
 
@@ -1187,6 +1194,53 @@ function createFakeOpenAiServer(responses) {
     requests,
     get port() {
       return port;
+    },
+    listen() {
+      return new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          const address = server.address();
+          assert.ok(address && typeof address === "object");
+          port = address.port;
+          resolve();
+        });
+      });
+    },
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  };
+}
+
+function createFakeImageAssetServer(base64Image) {
+  const requests = [];
+  let port = 0;
+  const server = createServer((request, response) => {
+    requests.push({
+      method: request.method,
+      url: request.url
+    });
+    response.statusCode = 200;
+    response.setHeader("content-type", "image/png");
+    response.end(Buffer.from(base64Image, "base64"));
+  });
+
+  return {
+    requests,
+    get port() {
+      return port;
+    },
+    url(path) {
+      return `http://127.0.0.1:${port}${path}`;
     },
     listen() {
       return new Promise((resolve, reject) => {

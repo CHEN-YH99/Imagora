@@ -1,6 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface PutObjectInput {
   key: string;
@@ -21,6 +22,8 @@ export interface ObjectStorage {
   getSignedUrl(key: string, expiresInSeconds: number): Promise<string>;
   deleteObject(key: string): Promise<void>;
 }
+
+const workspaceRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 export class InlineDataUrlStorage implements ObjectStorage {
   readonly name = "inline-data-url";
@@ -57,7 +60,7 @@ export class InlineDataUrlStorage implements ObjectStorage {
  */
 export class FilesystemObjectStorage implements ObjectStorage {
   readonly name = "filesystem";
-  private readonly baseDir = resolve(process.env.LOCAL_STORAGE_DIR ?? "./data/generated-files");
+  private readonly baseDir = resolveLocalStorageDir(process.env.LOCAL_STORAGE_DIR ?? "./data/generated-files");
   private readonly signingSecret = process.env.LOCAL_STORAGE_SIGNING_SECRET ?? "imagora-local-storage-dev-secret";
   private readonly publicBasePath = (process.env.LOCAL_STORAGE_PUBLIC_PATH ?? "/api/files").replace(/\/$/, "");
 
@@ -120,6 +123,10 @@ export class FilesystemObjectStorage implements ObjectStorage {
     }
     return target;
   }
+}
+
+function resolveLocalStorageDir(value: string): string {
+  return isAbsolute(value) ? resolve(value) : resolve(workspaceRoot, value);
 }
 
 export class S3CompatibleObjectStorage implements ObjectStorage {

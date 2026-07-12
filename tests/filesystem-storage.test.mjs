@@ -1,10 +1,51 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { FilesystemObjectStorage } from "../packages/storage/dist/index.js";
+
+test("filesystem storage resolves relative LOCAL_STORAGE_DIR from the workspace root across process cwd", async () => {
+  const repoRoot = process.cwd();
+  const relativeStorageDir = `.tmp/storage-cwd-${randomUUID()}`;
+  const key = `generated/test-${randomUUID()}.txt`;
+  const previous = snapshotEnv(["LOCAL_STORAGE_DIR", "LOCAL_STORAGE_SIGNING_SECRET", "LOCAL_STORAGE_PUBLIC_PATH"]);
+
+  try {
+    process.env.LOCAL_STORAGE_DIR = relativeStorageDir;
+    process.env.LOCAL_STORAGE_SIGNING_SECRET = "cwd-stable-storage-secret";
+    delete process.env.LOCAL_STORAGE_PUBLIC_PATH;
+
+    process.chdir(join(repoRoot, "apps", "worker"));
+    const writer = new FilesystemObjectStorage();
+    await writer.putObject({
+      key,
+      body: "same file",
+      mimeType: "text/plain"
+    });
+
+    process.chdir(join(repoRoot, "apps", "api"));
+    const reader = new FilesystemObjectStorage();
+    const signedUrl = await reader.getSignedUrl(key, 60);
+    const url = new URL(`http://imagora.local${signedUrl}`);
+    const filePath = reader.verifyAndResolve(
+      key,
+      Number(url.searchParams.get("expiresAt")),
+      url.searchParams.get("signature") ?? ""
+    );
+
+    assert.equal(await readFile(filePath, "utf8"), "same file");
+    assert.equal(filePath.startsWith(join(repoRoot, relativeStorageDir)), true, filePath);
+  } finally {
+    process.chdir(repoRoot);
+    restoreEnv(previous);
+    await rm(join(repoRoot, relativeStorageDir), { recursive: true, force: true });
+    await rm(join(repoRoot, "apps", "worker", relativeStorageDir), { recursive: true, force: true });
+    await rm(join(repoRoot, "apps", "api", relativeStorageDir), { recursive: true, force: true });
+  }
+});
 
 // filesystem 存储模式端到端：图片写本地磁盘，数据库只存 local://key，
 // 前端拿到的是 /api/files/<key>?expiresAt=&signature= 签名 URL，由 API 校验后回读。
@@ -192,6 +233,20 @@ async function get(baseUrl, path, session) {
 
 function sessionHeaders(session) {
   return session ? { Cookie: session } : {};
+}
+
+function snapshotEnv(names) {
+  return Object.fromEntries(names.map((name) => [name, process.env[name]]));
+}
+
+function restoreEnv(snapshot) {
+  for (const [name, value] of Object.entries(snapshot)) {
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  }
 }
 
 function sleep(ms) {
