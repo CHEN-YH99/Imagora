@@ -29,6 +29,7 @@ function RegisterForm() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [registered, setRegistered] = useState(false);
+  const [emailDelivered, setEmailDelivered] = useState(true);
 
   const fromDemo = searchParams.get("from") === "demo";
 
@@ -43,7 +44,8 @@ function RegisterForm() {
     setLoading(true);
     setMessage("");
     try {
-      await register(email.trim().toLowerCase(), password);
+      const result = await register(email.trim().toLowerCase(), password);
+      setEmailDelivered(result.emailDelivered);
       setRegistered(true);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "注册失败，请检查信息后重试。");
@@ -60,10 +62,16 @@ function RegisterForm() {
             ✓
           </div>
           <h1 className="mt-4 text-2xl font-semibold">账号创建成功</h1>
-          <p className="mt-3 text-sm leading-6 text-white/70">
-            我们已向 <span className="font-medium text-white">{email.trim().toLowerCase()}</span>{" "}
-            发送了一封验证邮件，请查收并点击其中的链接完成邮箱验证后再开始生成图片。
-          </p>
+          {emailDelivered ? (
+            <p className="mt-3 text-sm leading-6 text-white/70">
+              我们已向 <span className="font-medium text-white">{email.trim().toLowerCase()}</span>{" "}
+              发送了一封验证邮件，请查收并点击其中的链接完成邮箱验证后再开始生成图片。
+            </p>
+          ) : (
+            <p className="mt-3 rounded-2xl border border-ember/40 bg-ember/10 p-3 text-sm leading-6 text-ember">
+              账号已创建，但验证邮件发送失败。请稍后用下方按钮重新发送，或检查邮箱地址是否正确。
+            </p>
+          )}
           <div className="mt-6 flex flex-col gap-3">
             <Link
               className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt"

@@ -518,8 +518,11 @@ export async function login(
   return result;
 }
 
-export async function register(email: string, password: string): Promise<{ user: User }> {
-  const result = await apiFetch<{ user: User }>("/api/auth/register", {
+export async function register(
+  email: string,
+  password: string
+): Promise<{ user: User; emailDelivered: boolean }> {
+  const result = await apiFetch<{ user: User; emailDelivered: boolean }>("/api/auth/register", {
     method: "POST",
     body: { email, password }
   });
@@ -585,6 +588,14 @@ export async function logoutOtherSessions(): Promise<{ removed: number }> {
   return apiFetch<{ ok: boolean; removed: number }>("/api/auth/logout-others", {
     method: "POST"
   });
+}
+
+export async function deleteAccount(currentPassword: string, reason?: string): Promise<void> {
+  await apiFetch<{ ok: boolean }>("/api/auth/delete-account", {
+    method: "POST",
+    body: { currentPassword, ...(reason ? { reason } : {}) }
+  });
+  setCurrentUser(null);
 }
 
 export async function submitSafetyAppeal(safetyEventId: string, reason: string): Promise<{ appeal: SafetyAppeal }> {

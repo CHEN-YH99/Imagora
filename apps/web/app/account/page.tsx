@@ -1,14 +1,16 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, Edit2, KeyRound, Mail, MailCheck, MonitorSmartphone, Save, Send, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Edit2, KeyRound, Mail, MailCheck, MonitorSmartphone, Save, Send, ShieldCheck, Trash2, X } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { PasswordInput } from "../../components/PasswordInput";
 import {
   apiFetch,
   changeEmail,
   changePassword,
+  deleteAccount,
   formatCredits,
   formatLedgerRemark,
   formatNickname,
@@ -24,6 +26,7 @@ import {
 } from "../../lib/api";
 
 export default function AccountPage() {
+  const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
   const [account, setAccount] = useState<CreditAccount | null>(null);
   const [entries, setEntries] = useState<CreditLedgerEntry[]>([]);
@@ -50,6 +53,11 @@ export default function AccountPage() {
   const [sessions, setSessions] = useState<UserSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [loggingOutOthers, setLoggingOutOthers] = useState(false);
+
+  // 账户安全：注销账户
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteConfirming, setDeleteConfirming] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   useEffect(() => {
     void loadAll();
@@ -143,6 +151,24 @@ export default function AccountPage() {
       setMessage(error instanceof Error ? error.message : "操作失败，请稍后重试。");
     } finally {
       setLoggingOutOthers(false);
+    }
+  }
+
+  async function submitDeleteAccount() {
+    if (!deletePassword) {
+      setMessageTone("danger");
+      setMessage("请输入当前密码以确认注销。");
+      return;
+    }
+    setDeletingAccount(true);
+    setMessage("");
+    try {
+      await deleteAccount(deletePassword);
+      router.replace("/login?deleted=1");
+    } catch (error) {
+      setMessageTone("danger");
+      setMessage(error instanceof Error ? error.message : "注销失败，请稍后重试。");
+      setDeletingAccount(false);
     }
   }
 
@@ -490,6 +516,59 @@ export default function AccountPage() {
                 <p className="text-xs text-white/46">暂无其他登录设备。</p>
               )}
             </div>
+          </Panel>
+
+          <Panel>
+            <div className="flex items-center gap-2">
+              <Trash2 className="size-5 text-ember" aria-hidden="true" />
+              <h2 className="text-lg font-semibold">注销账户</h2>
+            </div>
+            <p className="mt-3 text-sm leading-6 text-white/60">
+              注销后账户将被停用，无法再登录。积分、订单和历史记录会保留归档，但不再可用。此操作不可自助撤销，请谨慎处理。
+            </p>
+            {deleteConfirming ? (
+              <div className="mt-4 space-y-3 rounded-2xl border border-ember/30 bg-ember/8 p-4">
+                <p className="text-sm text-ember">请输入当前密码以确认注销。</p>
+                <PasswordInput
+                  autoComplete="current-password"
+                  maxLength={128}
+                  onChange={(event) => setDeletePassword(event.target.value)}
+                  placeholder="当前密码"
+                  value={deletePassword}
+                />
+                <div className="flex gap-2">
+                  <button
+                    className="focus-ring inline-flex items-center gap-2 rounded-full bg-ember px-4 py-2 text-sm font-semibold text-ink transition-colors hover:bg-ember/80 disabled:opacity-60"
+                    disabled={deletingAccount || !deletePassword}
+                    onClick={() => void submitDeleteAccount()}
+                    type="button"
+                  >
+                    <Trash2 className="size-4" aria-hidden="true" />
+                    {deletingAccount ? "注销中..." : "确认注销"}
+                  </button>
+                  <button
+                    className="focus-ring rounded-full border border-white/12 px-4 py-2 text-sm text-white/60 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-60"
+                    disabled={deletingAccount}
+                    onClick={() => {
+                      setDeleteConfirming(false);
+                      setDeletePassword("");
+                    }}
+                    type="button"
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                className="focus-ring mt-4 inline-flex items-center gap-2 rounded-full border border-ember/40 px-4 py-2 text-sm font-semibold text-ember transition-colors hover:bg-ember/10"
+                onClick={() => setDeleteConfirming(true)}
+                type="button"
+              >
+                <Trash2 className="size-4" aria-hidden="true" />
+                注销账户
+              </button>
+            )}
           </Panel>
 
           <Panel>

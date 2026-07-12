@@ -445,16 +445,19 @@ app.post("/api/auth/register", async (request, reply) => {
   });
 
   const verifyUrl = `${envString("WEB_ORIGIN", "http://127.0.0.1:3100")}/verify-email?token=${result.verifyTokenPlain}`;
+  // 发信成败通过 emailDelivered 透传给前端：失败时提示用户可稍后重发，不再假装一切正常。
+  let emailDelivered = false;
   try {
     await mailer.sendEmail(
       buildVerificationEmail({ to: result.user.email, nickname: result.user.nickname, verifyUrl })
     );
+    emailDelivered = true;
     request.log.info({ userId: result.user.id }, "Verification email sent");
   } catch (error) {
     request.log.error({ userId: result.user.id, error }, "Failed to send verification email");
   }
 
-  return envelope(request, { user: publicUser(result.user) });
+  return envelope(request, { user: publicUser(result.user), emailDelivered });
 });
 
 app.post("/api/auth/login", async (request, reply) => {
@@ -594,6 +597,54 @@ app.post("/api/auth/logout-others", async (request) => {
   });
   request.log.info({ userId: user.id, removed }, "Logged out other sessions");
   return envelope(request, { ok: true, removed });
+});
+
+// 注销账户：软删（status=DELETED），墓碑化邮箱以释放原邮箱供重新注册，清会话并审计留档。
+// 积分/订单等数据保留不动，仅停用账户；requireAuth 会自动拦截非 ACTIVE 账户。
+app.post("/api/auth/delete-account", async (request, reply) => {
+  const { user } = await requireAuth(request);
+  const input = deleteAccountSchema.parse(request.body);
+  await store.update((data) => {
+    const current = mustFindUser(data, user.id);
+    if (!verifyPassword(input.currentPassword, current.passwordHash)) {
+      throw new AppError("INVALID_CURRENT_PASSWORD", "Current password is incorrect", 401);
+    }
+    if (current.role === "ADMIN") {
+      const otherActiveAdmins = data.users.filter(
+        (item) => item.id !== current.id && item.role === "ADMIN" && item.status === "ACTIVE"
+      );
+      if (otherActiveAdmins.length === 0) {
+        throw new AppError("VALIDATION_ERROR", "Cannot remove the last active administrator", 400);
+      }
+    }
+    const now = new Date().toISOString();
+    const originalEmail = current.email;
+    // 墓碑化邮箱：把原邮箱挪到一个不可登录的占位地址，释放原邮箱供他人/本人重新注册。
+    const tombstoneEmail = `deleted+${current.id}@deleted.imagora.local`;
+    const before = { email: originalEmail, status: current.status };
+    current.email = tombstoneEmail;
+    current.status = "DELETED";
+    current.updatedAt = now;
+    // 清掉该用户所有会话，注销后立即失效。
+    data.sessions = data.sessions.filter((session) => session.userId !== current.id);
+    // 清理未使用的验证/重置令牌，避免遗留可用凭据。
+    data.emailVerificationTokens = data.emailVerificationTokens.filter((t) => t.userId !== current.id);
+    data.passwordResetTokens = data.passwordResetTokens.filter((t) => t.userId !== current.id);
+    audit(
+      data,
+      current.id,
+      "account.self-delete",
+      "USER",
+      current.id,
+      input.reason ?? null,
+      before,
+      { email: tombstoneEmail, status: "DELETED" },
+      request
+    );
+    request.log.info({ userId: current.id }, "Account self-deleted");
+  });
+  clearSessionCookie(reply);
+  return envelope(request, { ok: true });
 });
 
 app.post("/api/auth/request-password-reset", async (request) => {
@@ -2093,6 +2144,14 @@ const changeEmailSchema = z
   .object({
     newEmail: emailSchema,
     currentPassword: loginPasswordSchema
+  })
+  .strict();
+
+// 注销账户：需要当前密码确认身份，reason 可选用于审计留档。
+const deleteAccountSchema = z
+  .object({
+    currentPassword: loginPasswordSchema,
+    reason: z.string().trim().max(500).optional()
   })
   .strict();
 
