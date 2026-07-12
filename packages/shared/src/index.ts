@@ -351,7 +351,8 @@ export type ErrorCode =
   | "INVALID_RESET_TOKEN"
   | "RESET_TOKEN_EXPIRED"
   | "INVALID_VERIFY_TOKEN"
-  | "EMAIL_NOT_VERIFIED";
+  | "EMAIL_NOT_VERIFIED"
+  | "INVALID_CURRENT_PASSWORD";
 
 export class AppError extends Error {
   readonly code: ErrorCode;

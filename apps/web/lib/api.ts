@@ -554,6 +554,39 @@ export async function logout(): Promise<void> {
   setCurrentUser(null);
 }
 
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await apiFetch<{ ok: boolean; message: string }>("/api/auth/change-password", {
+    method: "POST",
+    body: { currentPassword, newPassword }
+  });
+}
+
+export async function changeEmail(currentPassword: string, newEmail: string): Promise<{ user: User }> {
+  const result = await apiFetch<{ user: User }>("/api/auth/change-email", {
+    method: "POST",
+    body: { currentPassword, newEmail }
+  });
+  setCurrentUser(result.user);
+  return result;
+}
+
+export type UserSession = {
+  id: string;
+  current: boolean;
+  createdAt: string;
+  expiresAt: string;
+};
+
+export async function getSessions(): Promise<{ sessions: UserSession[] }> {
+  return apiFetch<{ sessions: UserSession[] }>("/api/auth/sessions");
+}
+
+export async function logoutOtherSessions(): Promise<{ removed: number }> {
+  return apiFetch<{ ok: boolean; removed: number }>("/api/auth/logout-others", {
+    method: "POST"
+  });
+}
+
 export async function submitSafetyAppeal(safetyEventId: string, reason: string): Promise<{ appeal: SafetyAppeal }> {
   return apiFetch<{ appeal: SafetyAppeal }>("/api/safety-appeals", {
     method: "POST",
@@ -739,6 +772,7 @@ const apiErrorCodeMap: Record<string, string> = {
   FORBIDDEN: "当前账号没有权限执行此操作。",
   INSUFFICIENT_CREDITS: "积分余额不足，请充值后再提交生成。",
   INTERNAL_ERROR: "服务暂时异常，请稍后重试。",
+  INVALID_CURRENT_PASSWORD: "当前密码不正确，请重新输入。",
   INVALID_RESET_TOKEN: "重置链接无效或已过期，请重新申请。",
   INVALID_VERIFY_TOKEN: "验证链接无效或已过期，请重新申请验证邮件。",
   NOT_FOUND: "请求的资源不存在或已被移除。",

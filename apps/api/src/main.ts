@@ -88,7 +88,11 @@ const logger = pino({
 const app = Fastify({
   loggerInstance: logger,
   requestTimeout: 30000,
-  bodyLimit: envNumber("API_BODY_LIMIT_BYTES", 1024 * 100)
+  bodyLimit: envNumber("API_BODY_LIMIT_BYTES", 1024 * 100),
+  // 反代/负载均衡后面必须信任 X-Forwarded-For，否则 request.ip 全是代理 IP，
+  // 限流按 IP 分桶会退化成"全局共享一个桶"，登录爆破防护形同虚设。
+  // 默认关闭（本地直连更安全），生产由 TRUST_PROXY 显式开启；也可传入代理跳数或 CIDR。
+  trustProxy: resolveTrustProxy()
 });
 const serviceStartedAt = Date.now();
 const routeMetrics = new Map<string, RouteMetric>();
@@ -128,6 +132,18 @@ const rateLimitRules: RateLimitRule[] = [
     id: "auth-resend-verification",
     method: "POST",
     pattern: /^\/api\/auth\/resend-verification$/,
+    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
+  },
+  {
+    id: "auth-change-password",
+    method: "POST",
+    pattern: /^\/api\/auth\/change-password$/,
+    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
+  },
+  {
+    id: "auth-change-email",
+    method: "POST",
+    pattern: /^\/api\/auth\/change-email$/,
     max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
   },
   {
@@ -476,6 +492,108 @@ app.post("/api/auth/logout", async (request, reply) => {
   });
   clearSessionCookie(reply);
   return envelope(request, { ok: true });
+});
+
+// 修改密码：必须校验旧密码，成功后签发新会话并踢掉其余会话，防止旧凭据继续有效。
+app.post("/api/auth/change-password", async (request, reply) => {
+  const { user } = await requireAuth(request);
+  const input = changePasswordSchema.parse(request.body);
+  return store.update(async (data) => {
+    const current = mustFindUser(data, user.id);
+    if (!verifyPassword(input.currentPassword, current.passwordHash)) {
+      throw new AppError("INVALID_CURRENT_PASSWORD", "Current password is incorrect", 400);
+    }
+    const now = new Date().toISOString();
+    current.passwordHash = hashPassword(input.newPassword);
+    current.updatedAt = now;
+    // 清掉该用户的所有会话，再为当前请求签发一个新会话，避免用户在本设备上被强制登出。
+    const newToken = randomUUID();
+    data.sessions = data.sessions.filter((session) => session.userId !== user.id);
+    data.sessions.push({ token: newToken, userId: user.id, createdAt: now, expiresAt: addDays(now, 14) });
+    setSessionCookie(reply, newToken, addDays(now, 14));
+    request.log.info({ userId: user.id }, "Password changed");
+    return envelope(request, { ok: true, message: "Password changed successfully" });
+  });
+});
+
+// 修改邮箱：校验密码 + 查重，换邮箱后重置验证状态并发送新的验证邮件。
+app.post("/api/auth/change-email", async (request) => {
+  const { user } = await requireAuth(request);
+  const input = changeEmailSchema.parse(request.body);
+  const result = await store.update(async (data) => {
+    const current = mustFindUser(data, user.id);
+    if (!verifyPassword(input.currentPassword, current.passwordHash)) {
+      throw new AppError("INVALID_CURRENT_PASSWORD", "Current password is incorrect", 400);
+    }
+    const nextEmail = input.newEmail.toLowerCase();
+    if (nextEmail === current.email) {
+      throw new AppError("VALIDATION_ERROR", "New email is the same as the current email", 400);
+    }
+    if (data.users.some((item) => item.id !== current.id && item.email === nextEmail)) {
+      throw new AppError("CONFLICT", "Unable to update email with this address", 409);
+    }
+    const now = new Date().toISOString();
+    current.email = nextEmail;
+    current.emailVerifiedAt = null;
+    current.updatedAt = now;
+
+    const verifyTokenPlain = randomUUID();
+    const verifyTokenHash = createHash("sha256").update(verifyTokenPlain).digest("hex");
+    const verifyTtlHours = envNumber("EMAIL_VERIFICATION_TOKEN_TTL_HOURS", 24);
+    const verifyExpiresAt = new Date(Date.now() + verifyTtlHours * 60 * 60 * 1000).toISOString();
+    data.emailVerificationTokens = data.emailVerificationTokens.filter((t) => t.userId !== current.id || t.usedAt);
+    data.emailVerificationTokens.push({
+      id: randomUUID(),
+      userId: current.id,
+      tokenHash: verifyTokenHash,
+      expiresAt: verifyExpiresAt,
+      usedAt: null,
+      createdAt: now
+    });
+    return { user: current, verifyTokenPlain };
+  });
+
+  const verifyUrl = `${envString("WEB_ORIGIN", "http://127.0.0.1:3100")}/verify-email?token=${result.verifyTokenPlain}`;
+  try {
+    await mailer.sendEmail(
+      buildVerificationEmail({ to: result.user.email, nickname: result.user.nickname, verifyUrl })
+    );
+    request.log.info({ userId: result.user.id }, "Verification email sent after email change");
+  } catch (error) {
+    request.log.error({ userId: result.user.id, error }, "Failed to send verification email after email change");
+  }
+  return envelope(request, { user: publicUser(result.user) });
+});
+
+// 会话列表：展示当前用户所有有效会话，并标记当前请求所在会话。
+app.get("/api/auth/sessions", async (request) => {
+  const { user, data } = await requireAuth(request);
+  const currentToken = sessionToken(request);
+  const sessions = data.sessions
+    .filter((session) => session.userId === user.id)
+    .sort(descCreated)
+    .map((session) => ({
+      id: createHash("sha256").update(session.token).digest("hex").slice(0, 24),
+      current: session.token === currentToken,
+      createdAt: session.createdAt,
+      expiresAt: session.expiresAt
+    }));
+  return envelope(request, { sessions });
+});
+
+// 登出其他所有设备：只保留当前会话，清掉该用户其余会话。
+app.post("/api/auth/logout-others", async (request) => {
+  const { user } = await requireAuth(request);
+  const currentToken = sessionToken(request);
+  const removed = await store.update((data) => {
+    const before = data.sessions.length;
+    data.sessions = data.sessions.filter(
+      (session) => session.userId !== user.id || session.token === currentToken
+    );
+    return before - data.sessions.length;
+  });
+  request.log.info({ userId: user.id, removed }, "Logged out other sessions");
+  return envelope(request, { ok: true, removed });
 });
 
 app.post("/api/auth/request-password-reset", async (request) => {
@@ -1955,6 +2073,29 @@ const updateProfileSchema = z.object({
   avatarUrl: z.string().url().nullable().optional()
 });
 
+const changePasswordSchema = z
+  .object({
+    currentPassword: loginPasswordSchema,
+    newPassword: newPasswordSchema
+  })
+  .strict()
+  .superRefine((input, context) => {
+    if (input.currentPassword === input.newPassword) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["newPassword"],
+        message: "New password must be different from the current password"
+      });
+    }
+  });
+
+const changeEmailSchema = z
+  .object({
+    newEmail: emailSchema,
+    currentPassword: loginPasswordSchema
+  })
+  .strict();
+
 const generationInputSchema = z.object({
   clientRequestId: z
     .string()
@@ -2114,6 +2255,27 @@ function envString(name: string, fallback: string): string {
 function envNumber(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+// trustProxy 决定 request.ip 取值：反代/网关后面必须开启，否则限流按代理 IP 计数直接失效。
+// 支持三种配置：true/false 布尔；数字（信任的代理跳数）；逗号分隔的可信 IP/CIDR 列表。
+function resolveTrustProxy(): boolean | number | string[] {
+  const raw = process.env.TRUST_PROXY?.trim();
+  if (!raw) {
+    // 生产默认信任一层代理（常见于 Nginx/网关），本地开发关闭。
+    return isProduction ? 1 : false;
+  }
+  if (raw === "true" || raw === "false") {
+    return raw === "true";
+  }
+  const asNumber = Number(raw);
+  if (Number.isInteger(asNumber) && asNumber >= 0) {
+    return asNumber;
+  }
+  return raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 function uploadBodyLimitBytes(): number {
