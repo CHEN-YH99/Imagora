@@ -527,10 +527,6 @@ export async function register(email: string, password: string): Promise<{ user:
   return result;
 }
 
-export async function loginDemo(): Promise<{ user: User }> {
-  throw new Error("请先在登录页完成图片验证后再继续。");
-}
-
 export async function waitForTask(
   taskId: string,
   options: { timeoutMs?: number; pollIntervalMs?: number } = {}

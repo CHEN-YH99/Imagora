@@ -11,6 +11,7 @@ import {
   type CaptchaChallenge,
   type CaptchaSelection
 } from "../../lib/api";
+import { PasswordInput } from "../../components/PasswordInput";
 
 const requiredCaptchaRounds = 2;
 
@@ -74,7 +75,10 @@ function LoginForm() {
       await login(email.trim().toLowerCase(), password, captchaVerificationIds);
       router.push(safeNextPath(searchParams.get("next")) ?? "/generate");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "登录失败，请检查账号信息后重试。");
+      // 后端在校验密码前已一次性消费掉验证 ID（verifyCaptchaVerifications 会 delete），
+      // 因此登录失败后验证态在服务端必然已失效，前端只能重做，明确告知用户避免困惑。
+      const baseMessage = error instanceof Error ? error.message : "登录失败，请检查账号信息后重试。";
+      setMessage(`${baseMessage}（图片验证已失效，请重新完成验证后再登录）`);
       setCaptchaVerificationIds([]);
       await refreshCaptcha();
     } finally {
@@ -161,14 +165,12 @@ function LoginForm() {
           </label>
           <label className="block text-sm text-white/70">
             密码
-            <input
-              className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+            <PasswordInput
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               autoComplete="current-password"
               maxLength={128}
               required
-              type="password"
             />
           </label>
           <div className="space-y-3 rounded-2xl border border-white/12 bg-black/18 p-4 text-sm text-white/70">

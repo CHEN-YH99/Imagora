@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Lock } from "lucide-react";
 import { apiFetch } from "../../lib/api";
+import { PasswordInput } from "../../components/PasswordInput";
 
 export default function ResetPasswordPage() {
   return (
@@ -83,8 +84,7 @@ function ResetPasswordForm() {
         <form className="mt-6 space-y-4" noValidate onSubmit={submit}>
           <label className="block text-sm text-white/70">
             新密码
-            <input
-              className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+            <PasswordInput
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               autoComplete="new-password"
@@ -93,13 +93,11 @@ function ResetPasswordForm() {
               minLength={12}
               placeholder="至少 12 位，包含字母和数字"
               required
-              type="password"
             />
           </label>
           <label className="block text-sm text-white/70">
             确认密码
-            <input
-              className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+            <PasswordInput
               value={confirmPassword}
               onChange={(event) => setConfirmPassword(event.target.value)}
               autoComplete="new-password"
@@ -108,7 +106,6 @@ function ResetPasswordForm() {
               minLength={12}
               placeholder="再次输入新密码"
               required
-              type="password"
             />
           </label>
           {message ? (
