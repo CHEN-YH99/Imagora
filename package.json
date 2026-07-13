@@ -21,6 +21,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "docs:maintenance": "node infra/scripts/generate-maintenance-map.mjs",
     "smoke": "node infra/scripts/smoke-test.mjs",
     "smoke:env": "node --env-file=.env infra/scripts/smoke-test.mjs",
     "load:smoke": "node infra/scripts/load-smoke.mjs",

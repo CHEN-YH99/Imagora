@@ -25,6 +25,8 @@ process.env.RATE_LIMIT_PROVIDER = "memory";
 process.env.RATE_LIMIT_AUTH_MAX = "1000";
 process.env.RATE_LIMIT_CAPTCHA_MAX = "1000";
 process.env.RATE_LIMIT_PASSWORD_RESET_MAX = "1000";
+// 重发冷却缩到 1 秒，测试才能在窗口过后验证“能再次重发”。
+process.env.RESEND_VERIFICATION_COOLDOWN_SECONDS = "1";
 
 const { app } = await import("../apps/api/dist/main.js");
 await app.ready();
@@ -268,6 +270,23 @@ test("logout-others keeps current session and drops the rest", async () => {
   // B 仍有效、A 失效
   assert.equal((await inject(jarB, { method: "GET", url: "/api/auth/me" })).statusCode, 200);
   assert.equal((await inject(jarA, { method: "GET", url: "/api/auth/me" })).statusCode, 401);
+});
+
+test("resend-verification enforces a per-user cooldown after registration", async () => {
+  // 自包含：独立邮箱。注册时已签发一条 token（createdAt=now），
+  // 立即重发必然落在冷却窗口内 → 应被 429 RESEND_TOO_SOON 挡下，不新发邮件。
+  const email = "resend-cooldown-user@example.com";
+  const pass = "ResendPass123abc";
+  const jar = await registerUser(email, pass);
+
+  const res = await inject(jar, { method: "POST", url: "/api/auth/resend-verification" });
+  assert.equal(res.statusCode, 429, "resend right after register should hit the cooldown");
+  assert.equal(body(res).error.code, "RESEND_TOO_SOON");
+
+  // 冷却窗口（测试环境 1s）过后应能再次重发。
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  const okRes = await inject(jar, { method: "POST", url: "/api/auth/resend-verification" });
+  assert.equal(okRes.statusCode, 200, "resend after cooldown window should succeed");
 });
 
 test("delete-account soft-deletes, frees email, and blocks re-login", async () => {

@@ -86,6 +86,11 @@ async function checkProductionConfig() {
   if (!hasAlertChannel) {
     problems.push("at least one alert channel is required (ALERT_WEBHOOK_URL or ALERT_EMAIL_TO)");
   }
+  // 邮箱验证门槛默认开启，只有被显式关闭时才是问题（与 main.ts validateProductionConfig 对齐）。
+  const emailVerification = process.env.REQUIRE_EMAIL_VERIFICATION?.trim().toLowerCase();
+  if (emailVerification && ["0", "false", "no", "off", "disabled"].includes(emailVerification)) {
+    problems.push("REQUIRE_EMAIL_VERIFICATION must not be disabled in production");
+  }
   for (const name of requiredValues) {
     if (isMissingOrPlaceholder(process.env[name])) {
       problems.push(`${name} is missing or placeholder`);

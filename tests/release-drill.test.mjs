@@ -109,6 +109,40 @@ test("p0 readiness passes repo-owned gates with production-shaped config and kee
   assert.deepEqual(externalSmoke.details.requiredProviders, ["openai", "s3-or-r2", "stripe", "smtp", "http-safety"]);
 });
 
+test("release drill flags production config that explicitly disables email verification", async () => {
+  const tempRoot = await createFakeBuildArtifacts();
+  const result = await runNodeScript("infra/scripts/release-drill.mjs", [], {
+    ...productionReadyEnv(),
+    RELEASE_DRILL_ARTIFACT_ROOT: tempRoot,
+    RELEASE_DRILL_STRICT: "1",
+    REQUIRE_EMAIL_VERIFICATION: "false"
+  });
+
+  assert.equal(result.code, 1, result.stderr);
+  const summary = JSON.parse(result.stdout);
+  const productionConfig = summary.checks.find((check) => check.name === "production-config");
+  assert.equal(productionConfig.status, "fail");
+  assert.match(
+    productionConfig.details.join("\n"),
+    /REQUIRE_EMAIL_VERIFICATION must not be disabled in production/
+  );
+});
+
+test("release drill accepts production config that leaves email verification at its default", async () => {
+  const tempRoot = await createFakeBuildArtifacts();
+  const result = await runNodeScript("infra/scripts/release-drill.mjs", [], {
+    ...productionReadyEnv(),
+    RELEASE_DRILL_ARTIFACT_ROOT: tempRoot,
+    RELEASE_DRILL_STRICT: "1"
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  const summary = JSON.parse(result.stdout);
+  const productionConfig = summary.checks.find((check) => check.name === "production-config");
+  assert.equal(productionConfig.status, "pass");
+  assert.doesNotMatch(productionConfig.details.join("\n"), /REQUIRE_EMAIL_VERIFICATION/);
+});
+
 test("p0 documentation records the command and real external smoke boundary", async () => {
   const readme = await readFile("README.md", "utf8");
   const infraReadme = await readFile("infra/README.md", "utf8");

@@ -133,7 +133,8 @@ const rateLimitRules: RateLimitRule[] = [
     id: "auth-resend-verification",
     method: "POST",
     pattern: /^\/api\/auth\/resend-verification$/,
-    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
+    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5),
+    keyBy: "user"
   },
   {
     id: "auth-change-password",
@@ -778,6 +779,21 @@ app.post("/api/auth/resend-verification", async (request) => {
     return envelope(request, { ok: true, message: "Email is already verified" });
   }
   return store.update(async (data) => {
+    // 重发冷却：同一用户两次重发至少间隔 RESEND_VERIFICATION_COOLDOWN_SECONDS（默认 60s），
+    // 防连点轰炸收件箱、省邮件配额。此处尚无写入，抛错回滚无副作用。
+    const cooldownSeconds = envNumber("RESEND_VERIFICATION_COOLDOWN_SECONDS", 60);
+    const lastToken = data.emailVerificationTokens
+      .filter((t) => t.userId === user.id && !t.usedAt)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+    if (lastToken) {
+      const elapsedMs = Date.now() - new Date(lastToken.createdAt).getTime();
+      const remainingMs = cooldownSeconds * 1000 - elapsedMs;
+      if (remainingMs > 0) {
+        throw new AppError("RESEND_TOO_SOON", "Verification email was sent recently, please wait before retrying", 429, {
+          retryAfterSeconds: Math.ceil(remainingMs / 1000)
+        });
+      }
+    }
     const now = new Date().toISOString();
     const verifyTokenPlain = randomUUID();
     const verifyTokenHash = createHash("sha256").update(verifyTokenPlain).digest("hex");
@@ -1963,6 +1979,8 @@ interface RateLimitRule {
   method: string;
   pattern: RegExp;
   max: number;
+  // 限流维度：默认按 IP；登录态接口应按 user，避免换 IP 绕过 / 同 NAT 出口互相误伤。
+  keyBy?: "ip" | "user";
 }
 
 interface CaptchaChallenge {
@@ -2426,7 +2444,8 @@ async function requireAuth(request: FastifyRequest): Promise<{ data: StoreData; 
 }
 
 // 邮箱验证门槛：防止一次性邮箱注册即领 120 积分直接消耗。
-// 默认关闭（开发/测试无痛），生产由 validateProductionConfig 强制开启。
+// 开发/测试默认关闭（无痛调试）；生产默认开启，且 validateProductionConfig
+// 会拒绝任何显式关闭（REQUIRE_EMAIL_VERIFICATION=false）的生产配置。
 function requireEmailVerification(): boolean {
   return envBool("REQUIRE_EMAIL_VERIFICATION", process.env.NODE_ENV === "production");
 }
@@ -3884,6 +3903,11 @@ function validateProductionConfig(): void {
   requireProductionValue("SMTP_USER");
   requireProductionValue("SMTP_PASSWORD");
   requireProductionValue("SMTP_FROM");
+  if (!requireEmailVerification()) {
+    throw new Error(
+      "Unsafe production config: REQUIRE_EMAIL_VERIFICATION must not be disabled in production"
+    );
+  }
   requireProductionValue("GENERATION_RUNNING_TIMEOUT_MS");
   requireProductionSetting("DATA_STORE", "prisma");
   requireProductionSetting("QUEUE_PROVIDER", "bullmq");
@@ -4061,7 +4085,7 @@ async function enforceRateLimit(request: FastifyRequest, reply: FastifyReply): P
     pruneRateLimitBuckets(now);
   }
 
-  const key = `${rule.id}:${request.ip}`;
+  const key = `${rule.id}:${await rateLimitScope(request, rule)}`;
   if ((process.env.RATE_LIMIT_PROVIDER ?? "memory") === "redis") {
     let redisResult: { count: number; resetAt: number };
     try {
@@ -4099,6 +4123,29 @@ async function enforceRateLimit(request: FastifyRequest, reply: FastifyReply): P
       resetAt: new Date(nextBucket.resetAt).toISOString()
     });
   }
+}
+
+// 限流维度：默认按 IP；登录态接口（如重发验证邮件）按 userId，避免换 IP 绕过或同 NAT 出口互相挤占。
+// 取不到有效 session 时退回 IP，保证未登录命中该规则的请求仍受 IP 兜底限制。
+async function rateLimitScope(request: FastifyRequest, rule: RateLimitRule): Promise<string> {
+  if (rule.keyBy !== "user") {
+    return request.ip;
+  }
+  let token: string;
+  try {
+    token = sessionToken(request, true);
+  } catch {
+    return request.ip;
+  }
+  if (!token) {
+    return request.ip;
+  }
+  const data = await store.read();
+  const now = new Date();
+  const session = data.sessions.find(
+    (item) => item.token === token && new Date(item.expiresAt) > now
+  );
+  return session ? `user:${session.userId}` : request.ip;
 }
 
 async function redisFixedWindowIncrement(key: string, windowMs: number): Promise<{ count: number; resetAt: number }> {
