@@ -365,3 +365,16 @@ test("generate page shows animated processing placeholders before results arrive
   assert.match(draftsFile, /saveGenerationTaskSnapshot/);
   assert.match(draftsFile, /readGenerationTaskSnapshot/);
 });
+
+test("generate page does not restore the previous successful task while submitting again", async () => {
+  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+
+  assert.match(generatePage, /const submittingGenerationRef = useRef\(false\);/);
+  assert.match(generatePage, /if \(submittingGenerationRef\.current && taskId\) \{/);
+  assert.match(generatePage, /setRestoringTaskView\(false\);[\s\S]*return;/);
+  assert.match(
+    generatePage,
+    /submittingGenerationRef\.current = true;[\s\S]*setLoading\(true\);[\s\S]*setTask\(null\);[\s\S]*setImages\(\[\]\);/
+  );
+  assert.match(generatePage, /submittedTaskIdRef\.current = created\.task\.id;[\s\S]*submittingGenerationRef\.current = false;/);
+});

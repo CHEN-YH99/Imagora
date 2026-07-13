@@ -97,6 +97,7 @@ function GenerateExperience() {
   const quoteRequestSequenceRef = useRef(0);
   const restoringTaskIdRef = useRef<string | null>(null);
   const submittedTaskIdRef = useRef<string | null>(null);
+  const submittingGenerationRef = useRef(false);
   const taskSyncSequenceRef = useRef(0);
   const isGenerationProcessing =
     images.length === 0 && (loading || task?.status === "PENDING" || task?.status === "RUNNING");
@@ -134,6 +135,10 @@ function GenerateExperience() {
     const q = searchParams.get("quality");
     const qty = searchParams.get("quantity");
     const m = searchParams.get("model");
+    if (submittingGenerationRef.current && taskId) {
+      setRestoringTaskView(false);
+      return;
+    }
     if (taskId && (task?.id === taskId || submittedTaskIdRef.current === taskId)) {
       setActiveGenerationTaskId(taskId);
       setRestoringTaskView(false);
@@ -451,12 +456,15 @@ function GenerateExperience() {
       setMessageTone("danger");
       return;
     }
+    submittingGenerationRef.current = true;
+    router.replace(buildGeneratePath({ aspectRatio, quality, quantity, model }), { scroll: false });
     setLoading(true);
     setMessage("");
     setMessageTone("danger");
     setTask(null);
     setImages([]);
     setSelectedPreviewImage(null);
+    restoringTaskIdRef.current = null;
     setAppealEventId(null);
     setAppealStatus(null);
     setShowAppealForm(false);
@@ -478,6 +486,7 @@ function GenerateExperience() {
       });
       restoringTaskIdRef.current = created.task.id;
       submittedTaskIdRef.current = created.task.id;
+      submittingGenerationRef.current = false;
       setActiveGenerationTaskId(created.task.id);
       saveActiveGenerationTaskId(created.task.id);
       setTask(created.task);
@@ -493,6 +502,7 @@ function GenerateExperience() {
       setMessage(generationSubmitErrorMessage(error));
       setMessageTone("danger");
     } finally {
+      submittingGenerationRef.current = false;
       setLoading(false);
     }
   }
