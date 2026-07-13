@@ -770,6 +770,7 @@ test("stripe webhook accepts a matching signature when multiple v1 signatures ar
         object: {
           amount_total: 9900,
           currency: "usd",
+          payment_status: "paid",
           metadata: {
             orderId: "order_multi_signature",
             orderNo: "IM20260629001"
@@ -1020,7 +1021,7 @@ test("createSafetyProvider resolves configured http third-party provider", () =>
 test("provider factories reject unfinished production adapters", () => {
   assert.throws(
     () => createObjectStorage("aliyun-oss"),
-    /Unsupported storage provider: aliyun-oss\. Implemented providers: inline, s3, r2/
+    /Unsupported storage provider: aliyun-oss\. Implemented providers: inline, filesystem, s3, r2/
   );
   assert.throws(
     () => createPaymentProvider("wechat"),

@@ -22,6 +22,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "docs:maintenance": "node infra/scripts/generate-maintenance-map.mjs",
+    "docs:maintenance:check": "node infra/scripts/generate-maintenance-map.mjs --check",
+    "verify:quick": "npm --workspace apps/api run typecheck && npm --workspace apps/web run typecheck && npm run docs:maintenance:check && node --test tests/generation-state.test.mjs tests/api-route-modules.test.mjs tests/maintenance-map.test.mjs tests/web-routes.test.mjs",
     "smoke": "node infra/scripts/smoke-test.mjs",
     "smoke:env": "node --env-file=.env infra/scripts/smoke-test.mjs",
     "load:smoke": "node infra/scripts/load-smoke.mjs",

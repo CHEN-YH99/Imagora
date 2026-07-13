@@ -15,7 +15,7 @@ import {
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
 import { buildVerificationEmail, createMailer } from "@imagora/mailer";
 import { createAlertNotifier } from "@imagora/notifier";
-import { createPaymentProvider, type VerifiedPaymentEvent } from "@imagora/payments";
+import { createPaymentProvider } from "@imagora/payments";
 import { createGenerationQueue } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
 import { createObjectStorage, FilesystemObjectStorage } from "@imagora/storage";
@@ -42,7 +42,6 @@ import {
   type ModelId,
   type Order,
   type PaymentEvent,
-  type Plan,
   publicUser,
   type Quality,
   type ReferenceImage,
@@ -51,12 +50,12 @@ import {
   type StoreData,
   type StyleId,
   taskRefundedCredits,
-  type User,
-  type SafetyAppeal,
-  type SafetyRule
+  type User
 } from "@imagora/shared";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
+import { registerApiRoutes } from "./routes/index.js";
+import type { ApiRouteContext } from "./routes/index.js";
 
 // Structured logging setup
 const isProduction = process.env.NODE_ENV === "production";
@@ -319,1641 +318,6 @@ app.setErrorHandler(async (error, request, reply) => {
   });
 });
 
-app.get("/health", async () => ({
-  status: "ok",
-  service: "imagora-api",
-  time: new Date().toISOString(),
-  features: featureFlags()
-}));
-
-app.get("/api/features", async (request) => envelope(request, { features: featureFlags() }));
-
-// filesystem 存储模式下的文件回读：复刻 S3 signed URL 的私有 + 过期语义。
-// getSignedUrl 生成 /api/files/<key>?expiresAt=&signature=，这里校验 HMAC 与过期后回读磁盘文件。
-// 仅在 STORAGE_PROVIDER=filesystem 时挂载，其余模式该路由不存在（图片走 data: 内联或 S3 直链）。
-if (storage instanceof FilesystemObjectStorage) {
-  const filesystemStorage = storage;
-  app.get("/api/files/*", async (request, reply) => {
-    const key = (request.params as Record<string, string>)["*"];
-    const query = fileSignatureQuerySchema.parse(request.query);
-    let filePath: string;
-    try {
-      filePath = filesystemStorage.verifyAndResolve(key, Number(query.expiresAt), query.signature);
-    } catch (error) {
-      throw new AppError("FORBIDDEN", errorMessage(error, "Signed URL is invalid"), 403);
-    }
-    let body: Buffer;
-    try {
-      body = await readFile(filePath);
-    } catch {
-      throw new AppError("NOT_FOUND", "File was not found", 404);
-    }
-    reply.header("content-type", contentTypeForStorageKey(key));
-    reply.header("cache-control", "private, max-age=300");
-    return reply.send(body);
-  });
-}
-
-app.get("/api/auth/captcha", async (request) => {
-  pruneCaptchaChallenges();
-  pruneCaptchaVerifications();
-  const challenge = createCaptchaChallenge();
-  const captchaId = randomUUID();
-  const expiresAt = new Date(Date.now() + envNumber("CAPTCHA_TTL_SECONDS", 180) * 1000).toISOString();
-  captchaChallenges.set(captchaId, {
-    answerHash: hashCaptchaAnswer(challenge.answer),
-    expiresAt,
-    createdAt: new Date().toISOString()
-  });
-  return envelope(request, {
-    captchaId,
-    imageSvg: challenge.imageSvg,
-    instruction: `请点击图中所有${challenge.targetLabel}`,
-    targetLabel: challenge.targetLabel,
-    requiredSelections: challenge.answer.length,
-    optionCount: captchaOptions.length,
-    expiresAt,
-    ...(exposeCaptchaAnswerForTests() ? { answer: challenge.answer } : {})
-  });
-});
-
-app.post("/api/auth/captcha/verify", async (request) => {
-  pruneCaptchaChallenges();
-  pruneCaptchaVerifications();
-  const input = captchaVerifySchema.parse(request.body);
-  verifyCaptchaChallenge(input.captchaId, input.captchaSelections);
-  const verificationId = randomUUID();
-  const expiresAt = new Date(Date.now() + envNumber("CAPTCHA_VERIFICATION_TTL_SECONDS", 180) * 1000).toISOString();
-  captchaVerifications.set(verificationId, {
-    expiresAt,
-    createdAt: new Date().toISOString()
-  });
-  return envelope(request, { verificationId, expiresAt });
-});
-
-app.post("/api/auth/register", async (request, reply) => {
-  const input = registerSchema.parse(request.body);
-  const result = await store.update(async (data) => {
-    const email = input.email.toLowerCase();
-    if (data.users.some((user) => user.email === email)) {
-      throw new AppError("CONFLICT", "Unable to create account with these credentials", 409);
-    }
-    const now = new Date().toISOString();
-    const user: User = {
-      id: randomUUID(),
-      email,
-      passwordHash: hashPassword(input.password),
-      nickname: defaultNicknameForEmail(email),
-      avatarUrl: null,
-      emailVerifiedAt: null,
-      role: "USER",
-      status: "ACTIVE",
-      createdAt: now,
-      updatedAt: now,
-      lastLoginAt: now
-    };
-    const sessionToken = randomUUID();
-    const verifyTokenPlain = randomUUID();
-    const verifyTokenHash = createHash("sha256").update(verifyTokenPlain).digest("hex");
-    const verifyTtlHours = envNumber("EMAIL_VERIFICATION_TOKEN_TTL_HOURS", 24);
-    const verifyExpiresAt = new Date(Date.now() + verifyTtlHours * 60 * 60 * 1000).toISOString();
-    data.users.push(user);
-    data.sessions.push({ token: sessionToken, userId: user.id, createdAt: now, expiresAt: addDays(now, 14) });
-    data.emailVerificationTokens.push({
-      id: randomUUID(),
-      userId: user.id,
-      tokenHash: verifyTokenHash,
-      expiresAt: verifyExpiresAt,
-      usedAt: null,
-      createdAt: now
-    });
-    data.creditAccounts.push({ userId: user.id, balance: 120, totalEarned: 120, totalSpent: 0, updatedAt: now });
-    data.creditLedgerEntries.push({
-      id: randomUUID(),
-      userId: user.id,
-      type: "GRANT",
-      amount: 120,
-      balanceAfter: 120,
-      sourceType: "SYSTEM",
-      sourceId: "welcome",
-      idempotencyKey: `welcome:${user.id}`,
-      remark: "Welcome credits",
-      createdAt: now,
-      expiresAt: null
-    });
-    setSessionCookie(reply, sessionToken, addDays(now, 14));
-    reply.status(201);
-    return { user, verifyTokenPlain };
-  });
-
-  const verifyUrl = `${envString("WEB_ORIGIN", "http://127.0.0.1:3100")}/verify-email?token=${result.verifyTokenPlain}`;
-  // 发信成败通过 emailDelivered 透传给前端：失败时提示用户可稍后重发，不再假装一切正常。
-  let emailDelivered = false;
-  try {
-    await mailer.sendEmail(
-      buildVerificationEmail({ to: result.user.email, nickname: result.user.nickname, verifyUrl })
-    );
-    emailDelivered = true;
-    request.log.info({ userId: result.user.id }, "Verification email sent");
-  } catch (error) {
-    request.log.error({ userId: result.user.id, error }, "Failed to send verification email");
-  }
-
-  return envelope(request, { user: publicUser(result.user), emailDelivered });
-});
-
-app.post("/api/auth/login", async (request, reply) => {
-  const input = loginSchema.parse(request.body);
-  // 两条放行路径：① 已有未耗尽的登录尝试令牌 → 扣一次额度直接放行；
-  // ② 无有效令牌 → 必须提交两轮图片验证，验过后签发新令牌。
-  if (consumeLoginAttempt(request)) {
-    // 走令牌路径：本次尝试无需重做图片验证。
-  } else {
-    if (!input.captchaVerificationIds || input.captchaVerificationIds.length !== captchaRequiredRounds) {
-      throw new AppError("CAPTCHA_REQUIRED", "Image verification is required", 400);
-    }
-    verifyCaptchaVerifications(input.captchaVerificationIds);
-    // 签发带额度的尝试令牌并扣掉本次；密码错误时令牌保留，前端可直接重输密码。
-    issueLoginAttempt(reply);
-    consumeLoginAttempt(request);
-  }
-
-  return store.update(async (data) => {
-    const user = data.users.find((item) => item.email === input.email.toLowerCase());
-    if (!user || !verifyPassword(input.password, user.passwordHash)) {
-      // 密码错误：不清令牌，前端凭剩余额度可直接重试而无需重验。
-      throw new AppError("UNAUTHORIZED", "Invalid email or password", 401);
-    }
-    if (user.status !== "ACTIVE") {
-      throw new AppError("FORBIDDEN", "User is not active", 403);
-    }
-    const now = new Date().toISOString();
-    const token = randomUUID();
-    user.lastLoginAt = now;
-    user.updatedAt = now;
-    data.sessions.push({ token, userId: user.id, createdAt: now, expiresAt: addDays(now, 14) });
-    setSessionCookie(reply, token, addDays(now, 14));
-    // 登录成功：作废尝试令牌。
-    clearLoginAttempt(request, reply);
-    return envelope(request, { user: publicUser(user) });
-  });
-});
-
-app.post("/api/auth/logout", async (request, reply) => {
-  const token = sessionToken(request);
-  await store.update((data) => {
-    data.sessions = data.sessions.filter((session) => session.token !== token);
-  });
-  clearSessionCookie(reply);
-  return envelope(request, { ok: true });
-});
-
-// 修改密码：必须校验旧密码，成功后签发新会话并踢掉其余会话，防止旧凭据继续有效。
-app.post("/api/auth/change-password", async (request, reply) => {
-  const { user } = await requireAuth(request);
-  const input = changePasswordSchema.parse(request.body);
-  return store.update(async (data) => {
-    const current = mustFindUser(data, user.id);
-    if (!verifyPassword(input.currentPassword, current.passwordHash)) {
-      throw new AppError("INVALID_CURRENT_PASSWORD", "Current password is incorrect", 400);
-    }
-    const now = new Date().toISOString();
-    current.passwordHash = hashPassword(input.newPassword);
-    current.updatedAt = now;
-    // 清掉该用户的所有会话，再为当前请求签发一个新会话，避免用户在本设备上被强制登出。
-    const newToken = randomUUID();
-    data.sessions = data.sessions.filter((session) => session.userId !== user.id);
-    data.sessions.push({ token: newToken, userId: user.id, createdAt: now, expiresAt: addDays(now, 14) });
-    setSessionCookie(reply, newToken, addDays(now, 14));
-    request.log.info({ userId: user.id }, "Password changed");
-    return envelope(request, { ok: true, message: "Password changed successfully" });
-  });
-});
-
-// 修改邮箱：校验密码 + 查重，换邮箱后重置验证状态并发送新的验证邮件。
-app.post("/api/auth/change-email", async (request) => {
-  const { user } = await requireAuth(request);
-  const input = changeEmailSchema.parse(request.body);
-  const result = await store.update(async (data) => {
-    const current = mustFindUser(data, user.id);
-    if (!verifyPassword(input.currentPassword, current.passwordHash)) {
-      throw new AppError("INVALID_CURRENT_PASSWORD", "Current password is incorrect", 400);
-    }
-    const nextEmail = input.newEmail.toLowerCase();
-    if (nextEmail === current.email) {
-      throw new AppError("VALIDATION_ERROR", "New email is the same as the current email", 400);
-    }
-    if (data.users.some((item) => item.id !== current.id && item.email === nextEmail)) {
-      throw new AppError("CONFLICT", "Unable to update email with this address", 409);
-    }
-    const now = new Date().toISOString();
-    current.email = nextEmail;
-    current.emailVerifiedAt = null;
-    current.updatedAt = now;
-
-    const verifyTokenPlain = randomUUID();
-    const verifyTokenHash = createHash("sha256").update(verifyTokenPlain).digest("hex");
-    const verifyTtlHours = envNumber("EMAIL_VERIFICATION_TOKEN_TTL_HOURS", 24);
-    const verifyExpiresAt = new Date(Date.now() + verifyTtlHours * 60 * 60 * 1000).toISOString();
-    data.emailVerificationTokens = data.emailVerificationTokens.filter((t) => t.userId !== current.id || t.usedAt);
-    data.emailVerificationTokens.push({
-      id: randomUUID(),
-      userId: current.id,
-      tokenHash: verifyTokenHash,
-      expiresAt: verifyExpiresAt,
-      usedAt: null,
-      createdAt: now
-    });
-    return { user: current, verifyTokenPlain };
-  });
-
-  const verifyUrl = `${envString("WEB_ORIGIN", "http://127.0.0.1:3100")}/verify-email?token=${result.verifyTokenPlain}`;
-  try {
-    await mailer.sendEmail(
-      buildVerificationEmail({ to: result.user.email, nickname: result.user.nickname, verifyUrl })
-    );
-    request.log.info({ userId: result.user.id }, "Verification email sent after email change");
-  } catch (error) {
-    request.log.error({ userId: result.user.id, error }, "Failed to send verification email after email change");
-  }
-  return envelope(request, { user: publicUser(result.user) });
-});
-
-// 会话列表：展示当前用户所有有效会话，并标记当前请求所在会话。
-app.get("/api/auth/sessions", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const currentToken = sessionToken(request);
-  const sessions = data.sessions
-    .filter((session) => session.userId === user.id)
-    .sort(descCreated)
-    .map((session) => ({
-      id: createHash("sha256").update(session.token).digest("hex").slice(0, 24),
-      current: session.token === currentToken,
-      createdAt: session.createdAt,
-      expiresAt: session.expiresAt
-    }));
-  return envelope(request, { sessions });
-});
-
-// 登出其他所有设备：只保留当前会话，清掉该用户其余会话。
-app.post("/api/auth/logout-others", async (request) => {
-  const { user } = await requireAuth(request);
-  const currentToken = sessionToken(request);
-  const removed = await store.update((data) => {
-    const before = data.sessions.length;
-    data.sessions = data.sessions.filter(
-      (session) => session.userId !== user.id || session.token === currentToken
-    );
-    return before - data.sessions.length;
-  });
-  request.log.info({ userId: user.id, removed }, "Logged out other sessions");
-  return envelope(request, { ok: true, removed });
-});
-
-// 注销账户：软删（status=DELETED），墓碑化邮箱以释放原邮箱供重新注册，清会话并审计留档。
-// 积分/订单等数据保留不动，仅停用账户；requireAuth 会自动拦截非 ACTIVE 账户。
-app.post("/api/auth/delete-account", async (request, reply) => {
-  const { user } = await requireAuth(request);
-  const input = deleteAccountSchema.parse(request.body);
-  await store.update((data) => {
-    const current = mustFindUser(data, user.id);
-    if (!verifyPassword(input.currentPassword, current.passwordHash)) {
-      throw new AppError("INVALID_CURRENT_PASSWORD", "Current password is incorrect", 401);
-    }
-    if (current.role === "ADMIN") {
-      const otherActiveAdmins = data.users.filter(
-        (item) => item.id !== current.id && item.role === "ADMIN" && item.status === "ACTIVE"
-      );
-      if (otherActiveAdmins.length === 0) {
-        throw new AppError("VALIDATION_ERROR", "Cannot remove the last active administrator", 400);
-      }
-    }
-    const now = new Date().toISOString();
-    const originalEmail = current.email;
-    // 墓碑化邮箱：把原邮箱挪到一个不可登录的占位地址，释放原邮箱供他人/本人重新注册。
-    const tombstoneEmail = `deleted+${current.id}@deleted.imagora.local`;
-    const before = { email: originalEmail, status: current.status };
-    current.email = tombstoneEmail;
-    current.status = "DELETED";
-    current.updatedAt = now;
-    // 清掉该用户所有会话，注销后立即失效。
-    data.sessions = data.sessions.filter((session) => session.userId !== current.id);
-    // 清理未使用的验证/重置令牌，避免遗留可用凭据。
-    data.emailVerificationTokens = data.emailVerificationTokens.filter((t) => t.userId !== current.id);
-    data.passwordResetTokens = data.passwordResetTokens.filter((t) => t.userId !== current.id);
-    audit(
-      data,
-      current.id,
-      "account.self-delete",
-      "USER",
-      current.id,
-      input.reason ?? null,
-      before,
-      { email: tombstoneEmail, status: "DELETED" },
-      request
-    );
-    request.log.info({ userId: current.id }, "Account self-deleted");
-  });
-  clearSessionCookie(reply);
-  return envelope(request, { ok: true });
-});
-
-app.post("/api/auth/request-password-reset", async (request) => {
-  const input = requestPasswordResetSchema.parse(request.body);
-  const data = await store.read();
-  const user = data.users.find((u) => u.email === input.email.toLowerCase());
-
-  // Always return success to prevent email enumeration
-  if (!user) {
-    return envelope(request, { ok: true, message: "If email exists, reset link will be sent" });
-  }
-
-  return store.update(async (data) => {
-    const now = new Date().toISOString();
-    const ttlMinutes = envNumber("PASSWORD_RESET_TOKEN_TTL_MINUTES", 30);
-    const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
-    const resetToken = randomUUID();
-    const tokenHash = createHash("sha256").update(resetToken).digest("hex");
-
-    // Clean up old reset tokens for this user
-    data.passwordResetTokens = data.passwordResetTokens.filter(
-      (t) => t.userId !== user.id || new Date(t.expiresAt) > new Date()
-    );
-
-    // Add new reset token
-    data.passwordResetTokens.push({
-      id: randomUUID(),
-      userId: user.id,
-      tokenHash,
-      expiresAt,
-      usedAt: null,
-      createdAt: now
-    });
-
-    // Send reset email
-    const resetUrl = `${envString("WEB_ORIGIN", "http://127.0.0.1:3100")}/reset-password?token=${resetToken}`;
-    try {
-      await mailer.sendEmail({
-        to: user.email,
-        subject: "重置您的 Imagora 密码",
-        text: `您好，\n\n请点击以下链接重置您的密码（${ttlMinutes} 分钟内有效）：\n\n${resetUrl}\n\n如果您没有请求重置密码，请忽略此邮件。\n\nImagora 团队`,
-        html: `
-          <p>您好，</p>
-          <p>请点击以下链接重置您的密码（${ttlMinutes} 分钟内有效）：</p>
-          <p><a href="${resetUrl}">${resetUrl}</a></p>
-          <p>如果您没有请求重置密码，请忽略此邮件。</p>
-          <p>Imagora 团队</p>
-        `
-      });
-      request.log.info({ userId: user.id }, "Password reset email sent");
-    } catch (error) {
-      request.log.error({ userId: user.id, error }, "Failed to send password reset email");
-      // Don't throw - continue silently to prevent email enumeration
-    }
-
-    return envelope(request, { ok: true, message: "If email exists, reset link will be sent" });
-  });
-});
-
-app.post("/api/auth/reset-password", async (request) => {
-  const input = resetPasswordSchema.parse(request.body);
-
-  const data = await store.read();
-  const tokenHash = createHash("sha256").update(input.token).digest("hex");
-  const resetToken = data.passwordResetTokens.find((t) => t.tokenHash === tokenHash && !t.usedAt);
-
-  if (!resetToken || new Date(resetToken.expiresAt) < new Date()) {
-    throw new AppError("INVALID_RESET_TOKEN", "Invalid or expired reset token", 400);
-  }
-
-  return store.update(async (data) => {
-    const user = mustFindUser(data, resetToken.userId);
-    const now = new Date().toISOString();
-
-    user.passwordHash = hashPassword(input.password);
-    user.updatedAt = now;
-
-    // Mark token as used
-    const token = data.passwordResetTokens.find((t) => t.tokenHash === tokenHash);
-    if (token) {
-      token.usedAt = now;
-    }
-
-    // Invalidate all existing sessions for security
-    data.sessions = data.sessions.filter((s) => s.userId !== user.id);
-
-    request.log.info({ userId: user.id }, "Password reset completed");
-
-    return envelope(request, {
-      ok: true,
-      message: "Password reset successfully. Please login with your new password."
-    });
-  });
-});
-
-app.post("/api/auth/verify-email", async (request) => {
-  const input = z.object({ token: z.string().min(1) }).parse(request.body);
-  const tokenHash = createHash("sha256").update(input.token).digest("hex");
-  const data = await store.read();
-  const verifyToken = data.emailVerificationTokens.find((t) => t.tokenHash === tokenHash && !t.usedAt);
-  if (!verifyToken || new Date(verifyToken.expiresAt) < new Date()) {
-    throw new AppError("INVALID_VERIFY_TOKEN", "Invalid or expired verification token", 400);
-  }
-  return store.update(async (data) => {
-    const user = mustFindUser(data, verifyToken.userId);
-    const now = new Date().toISOString();
-    user.emailVerifiedAt = now;
-    user.updatedAt = now;
-    const token = data.emailVerificationTokens.find((t) => t.tokenHash === tokenHash);
-    if (token) {
-      token.usedAt = now;
-    }
-    request.log.info({ userId: user.id }, "Email verified");
-    return envelope(request, { ok: true, email: user.email });
-  });
-});
-
-app.post("/api/auth/resend-verification", async (request) => {
-  const { user } = await requireAuth(request);
-  if (user.emailVerifiedAt) {
-    return envelope(request, { ok: true, message: "Email is already verified" });
-  }
-  return store.update(async (data) => {
-    // 重发冷却：同一用户两次重发至少间隔 RESEND_VERIFICATION_COOLDOWN_SECONDS（默认 60s），
-    // 防连点轰炸收件箱、省邮件配额。此处尚无写入，抛错回滚无副作用。
-    const cooldownSeconds = envNumber("RESEND_VERIFICATION_COOLDOWN_SECONDS", 60);
-    const lastToken = data.emailVerificationTokens
-      .filter((t) => t.userId === user.id && !t.usedAt)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
-    if (lastToken) {
-      const elapsedMs = Date.now() - new Date(lastToken.createdAt).getTime();
-      const remainingMs = cooldownSeconds * 1000 - elapsedMs;
-      if (remainingMs > 0) {
-        throw new AppError("RESEND_TOO_SOON", "Verification email was sent recently, please wait before retrying", 429, {
-          retryAfterSeconds: Math.ceil(remainingMs / 1000)
-        });
-      }
-    }
-    const now = new Date().toISOString();
-    const verifyTokenPlain = randomUUID();
-    const verifyTokenHash = createHash("sha256").update(verifyTokenPlain).digest("hex");
-    const verifyTtlHours = envNumber("EMAIL_VERIFICATION_TOKEN_TTL_HOURS", 24);
-    const verifyExpiresAt = new Date(Date.now() + verifyTtlHours * 60 * 60 * 1000).toISOString();
-    data.emailVerificationTokens = data.emailVerificationTokens.filter((t) => t.userId !== user.id || t.usedAt);
-    data.emailVerificationTokens.push({
-      id: randomUUID(),
-      userId: user.id,
-      tokenHash: verifyTokenHash,
-      expiresAt: verifyExpiresAt,
-      usedAt: null,
-      createdAt: now
-    });
-    const verifyUrl = `${envString("WEB_ORIGIN", "http://127.0.0.1:3100")}/verify-email?token=${verifyTokenPlain}`;
-    try {
-      await mailer.sendEmail(buildVerificationEmail({ to: user.email, nickname: user.nickname, verifyUrl }));
-      request.log.info({ userId: user.id }, "Verification email resent");
-    } catch (error) {
-      request.log.error({ userId: user.id, error }, "Failed to resend verification email");
-    }
-    return envelope(request, { ok: true, message: "Verification email sent" });
-  });
-});
-
-app.get("/api/auth/me", async (request) => {
-  const { user } = await requireAuth(request);
-  return envelope(request, { user: publicUser(user) });
-});
-
-app.get("/api/users/me", async (request) => {
-  const { user } = await requireAuth(request);
-  return envelope(request, { user: publicUser(user) });
-});
-
-app.patch("/api/users/me", async (request) => {
-  const { user } = await requireAuth(request);
-  const input = updateProfileSchema.parse(request.body);
-  return store.update(async (data) => {
-    const current = mustFindUser(data, user.id);
-    current.nickname = input.nickname ?? current.nickname;
-    current.avatarUrl = input.avatarUrl ?? current.avatarUrl;
-    current.updatedAt = new Date().toISOString();
-    return envelope(request, { user: publicUser(current) });
-  });
-});
-
-app.get("/api/users/me/credits", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const account = mustFindCreditAccount(data, user.id);
-  return envelope(request, { account });
-});
-
-app.get("/api/users/me/credit-ledger", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const query = paginationSchema.parse(request.query);
-  const entries = data.creditLedgerEntries
-    .filter((entry) => entry.userId === user.id)
-    .sort(descCreated)
-    .slice(0, query.limit);
-  return envelope(request, { entries });
-});
-
-app.get("/api/users/me/safety-events", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const query = paginationSchema.parse(request.query);
-  const events = data.safetyEvents
-    .filter((event) => event.userId === user.id)
-    .sort(descCreated)
-    .slice(0, query.limit);
-  return envelope(request, { events });
-});
-
-app.post("/api/generation/quote", async (request) => {
-  assertFeatureEnabled("generation");
-  await requireAuth(request);
-  const input = generationInputSchema.parse(request.body);
-  const estimatedCost = quote(input);
-  return envelope(request, { creditCost: estimatedCost, balanceRequired: estimatedCost });
-});
-
-app.post("/api/generation/tasks", async (request, reply) => {
-  assertFeatureEnabled("generation");
-  const { user } = await requireAuth(request);
-  assertEmailVerified(user);
-  const input = generationInputSchema.parse(request.body);
-  const { providerMetadata: resolvedProviderMetadata, model: resolvedModel } = resolveGenerationProviderSelection(
-    input.model
-  );
-  const cost = quote({ ...input, model: resolvedModel });
-  const result = await store.update(async (data) => {
-    const duplicate = data.generationTasks.find(
-      (task) => task.userId === user.id && task.clientRequestId === input.clientRequestId
-    );
-    if (duplicate) {
-      return {
-        task: taskWithRefund(data, duplicate),
-        balanceAfter: mustFindCreditAccount(data, user.id).balance,
-        enqueue: false,
-        requestedAt: duplicate.createdAt
-      };
-    }
-    const referenceImage = input.referenceImageId
-      ? mustFindOwnReferenceImage(data, user.id, input.referenceImageId)
-      : null;
-    const safety = await safetyProvider.checkText({
-      text: [input.prompt, input.negativePrompt ?? ""].join("\n"),
-      blockedTerms: data.safetyRules
-        .filter((rule) => rule.status === "ACTIVE" && rule.action === "BLOCK")
-        .map((rule) => rule.term),
-      reviewTerms: data.safetyRules
-        .filter((rule) => rule.status === "ACTIVE" && rule.action === "REVIEW")
-        .map((rule) => rule.term)
-    });
-    if (safety.status === "BLOCKED" || safety.status === "REVIEW_REQUIRED") {
-      // 注意：store.update 在回调抛异常时会回滚，不落库。安全事件必须靠“正常返回”提交，
-      // 再在事务外抛 AppError，否则待复核/拦截记录会随回滚丢失，人工复核队列永远为空。
-      data.safetyEvents.push({
-        id: randomUUID(),
-        userId: user.id,
-        targetType: "PROMPT",
-        targetId: input.clientRequestId,
-        status: safety.status,
-        reasonCode: safety.reasonCode,
-        reasonMessage: safety.reasonMessage,
-        provider: safety.provider,
-        createdAt: new Date().toISOString()
-      });
-      return { blocked: true as const, safety };
-    }
-    const account = mustFindCreditAccount(data, user.id);
-    if (account.balance < cost) {
-      throw new AppError("INSUFFICIENT_CREDITS", "Credit balance is not enough", 402, {
-        balance: account.balance,
-        required: cost
-      });
-    }
-    const now = new Date().toISOString();
-    const dimension = aspectRatioDimensions[input.aspectRatio];
-    const task: GenerationTask = {
-      id: randomUUID(),
-      userId: user.id,
-      clientRequestId: input.clientRequestId,
-      referenceImageId: referenceImage?.id ?? null,
-      prompt: input.prompt,
-      negativePrompt: input.negativePrompt ?? null,
-      style: input.style,
-      aspectRatio: input.aspectRatio,
-      width: dimension.width,
-      height: dimension.height,
-      quantity: input.quantity,
-      quality: input.quality,
-      modelProvider: resolvedProviderMetadata.name,
-      modelName: resolvedModel,
-      status: "PENDING",
-      creditCost: cost,
-      providerCostCents: 0,
-      failureCode: null,
-      failureMessage: null,
-      startedAt: null,
-      completedAt: null,
-      createdAt: now,
-      updatedAt: now
-    };
-    data.generationTasks.push(task);
-    spendCredits(data, user.id, cost, "TASK", task.id, `task-spend:${task.id}`, "Image generation task");
-    return {
-      blocked: false as const,
-      task: taskWithRefund(data, task),
-      balanceAfter: mustFindCreditAccount(data, user.id).balance,
-      enqueue: true,
-      requestedAt: now
-    };
-  });
-  if (result.blocked) {
-    // 安全事件已在上面的事务里落库，这里才安全地抛错拦截请求。
-    // REVIEW_REQUIRED 用独立错误码，前端才能给出“人工复核 + 申诉”文案，而不是笼统的拦截提示。
-    const review = result.safety.status === "REVIEW_REQUIRED";
-    throw new AppError(
-      review ? "CONTENT_REVIEW_REQUIRED" : "CONTENT_BLOCKED",
-      review ? "Prompt requires manual safety review" : "Prompt was blocked by safety rules",
-      400,
-      { ...result.safety }
-    );
-  }
-  if (result.enqueue) {
-    await enqueueGenerationTaskOrFail(result.task.id, user.id, result.requestedAt);
-    reply.status(201);
-  }
-  return envelope(request, { task: result.task, balanceAfter: result.balanceAfter });
-});
-
-app.post("/api/uploads/reference-images", { bodyLimit: uploadBodyLimitBytes() }, async (request, reply) => {
-  assertFeatureEnabled("uploads");
-  const { user } = await requireAuth(request);
-  const input = referenceUploadSchema.parse(request.body);
-  const upload = inspectReferenceUpload(input);
-  const safety = await safetyProvider.checkImage({ mimeType: upload.mimeType, bytes: upload.contentBase64 });
-
-  const result = await store.update(async (data) => {
-    if (safety.status === "BLOCKED" || safety.status === "REVIEW_REQUIRED") {
-      // 同 /api/generation/tasks：安全事件必须靠正常返回提交，抛异常会回滚导致记录丢失
-      data.safetyEvents.push({
-        id: randomUUID(),
-        userId: user.id,
-        targetType: "UPLOAD_IMAGE",
-        targetId: upload.contentHash,
-        status: safety.status,
-        reasonCode: safety.reasonCode,
-        reasonMessage: safety.reasonMessage,
-        provider: safety.provider,
-        createdAt: new Date().toISOString()
-      });
-      return { blocked: true as const, safety };
-    }
-
-    const existing = data.referenceImages.find(
-      (image) => image.userId === user.id && image.contentHash === upload.contentHash && !image.deletedAt
-    );
-    if (existing) {
-      return { blocked: false as const, referenceImage: existing, duplicate: true, created: false };
-    }
-
-    const now = new Date().toISOString();
-    const id = randomUUID();
-    const stored = await storage.putObject({
-      key: `reference/${user.id}/${id}.${extensionForMime(upload.mimeType)}`,
-      body: upload.contentBase64,
-      bodyEncoding: "base64",
-      mimeType: upload.mimeType
-    });
-    const referenceImage: ReferenceImage = {
-      id,
-      userId: user.id,
-      storageKey: stored.key,
-      publicUrl: stored.publicUrl,
-      originalFileName: input.fileName,
-      mimeType: upload.mimeType,
-      fileSize: upload.fileSize,
-      width: upload.width,
-      height: upload.height,
-      contentHash: upload.contentHash,
-      safetyStatus: "PASSED",
-      createdAt: now,
-      expiresAt: addDays(now, envNumber("UPLOAD_REFERENCE_TTL_DAYS", 1)),
-      deletedAt: null
-    };
-    data.referenceImages.push(referenceImage);
-    return { blocked: false as const, referenceImage, duplicate: false, created: true };
-  });
-  if (result.blocked) {
-    // 安全事件已在事务里落库,这里才抛错拦截。参考图 REVIEW 同样拦截,因为花钱的是后续生成而非上传本身。
-    const review = result.safety.status === "REVIEW_REQUIRED";
-    throw new AppError(
-      review ? "CONTENT_REVIEW_REQUIRED" : "CONTENT_BLOCKED",
-      review ? "Reference image requires manual safety review" : "Reference image was blocked by safety rules",
-      400,
-      { ...result.safety }
-    );
-  }
-  if (result.created) {
-    reply.status(201);
-  }
-  return envelope(request, { referenceImage: result.referenceImage, duplicate: result.duplicate });
-});
-
-app.get("/api/generation/tasks", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const query = taskQuerySchema.parse(request.query);
-  const tasks = data.generationTasks
-    .filter((task) => task.userId === user.id)
-    .filter((task) => (query.status ? task.status === query.status : true))
-    .sort(descCreated)
-    .slice(0, query.limit)
-    .map((task) => taskWithRefund(data, task));
-  return envelope(request, { tasks });
-});
-
-app.get("/api/generation/tasks/:taskId", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const { taskId } = idParamSchema.parse(request.params);
-  const task = mustFindOwnTask(data, user.id, taskId);
-  const images = data.generatedImages
-    .filter((image) => image.taskId === task.id && !image.deletedAt)
-    .map(withoutImagePublicUrl);
-  return envelope(request, { task: taskWithRefund(data, task), images });
-});
-
-app.post("/api/generation/tasks/:taskId/retry", async (request, reply) => {
-  const { user } = await requireAuth(request);
-  const { taskId } = idParamSchema.parse(request.params);
-  const result = await store.update(async (data) => {
-    const previous = mustFindOwnTask(data, user.id, taskId);
-    if (!["FAILED", "BLOCKED"].includes(previous.status)) {
-      throw new AppError("TASK_NOT_RETRYABLE", "Only failed or blocked tasks can be retried", 400);
-    }
-    const now = new Date().toISOString();
-    const task: GenerationTask = {
-      ...previous,
-      id: randomUUID(),
-      clientRequestId: `retry:${previous.id}:${now}`,
-      status: "PENDING",
-      failureCode: null,
-      failureMessage: null,
-      startedAt: null,
-      completedAt: null,
-      createdAt: now,
-      updatedAt: now
-    };
-    const account = mustFindCreditAccount(data, user.id);
-    if (account.balance < task.creditCost) {
-      throw new AppError("INSUFFICIENT_CREDITS", "Credit balance is not enough", 402);
-    }
-    data.generationTasks.push(task);
-    spendCredits(
-      data,
-      user.id,
-      task.creditCost,
-      "TASK",
-      task.id,
-      `task-spend:${task.id}`,
-      "Retry image generation task"
-    );
-    return { task, balanceAfter: mustFindCreditAccount(data, user.id).balance };
-  });
-  await enqueueGenerationTaskOrFail(result.task.id, user.id, result.task.createdAt);
-  reply.status(201);
-  return envelope(request, { task: result.task, balanceAfter: result.balanceAfter });
-});
-
-app.get("/api/images", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const query = paginationSchema.parse(request.query);
-  const images = data.generatedImages
-    .filter((image) => image.userId === user.id && !image.deletedAt && image.visibility !== "HIDDEN")
-    .sort(descCreated)
-    .slice(0, query.limit)
-    .map((image) => withFavorite(data, user.id, image));
-  return envelope(request, { images });
-});
-
-app.get("/api/images/:imageId", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const { imageId } = imageParamSchema.parse(request.params);
-  const image = mustFindOwnImage(data, user.id, imageId);
-  const task = data.generationTasks.find((item) => item.id === image.taskId);
-  return envelope(request, { image: withFavorite(data, user.id, image), task });
-});
-
-app.post("/api/images/:imageId/preview-url", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const { imageId } = imageParamSchema.parse(request.params);
-  const image = mustFindOwnImage(data, user.id, imageId);
-  const expiresInSeconds = Math.max(
-    60,
-    Math.min(envNumber("PREVIEW_URL_TTL_MINUTES", envNumber("DOWNLOAD_URL_TTL_MINUTES", 15)) * 60, 60 * 60 * 24 * 7)
-  );
-  const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
-  const inlineOriginalUrl = resolveInlineDataUrl(image.publicUrl);
-
-  return envelope(request, {
-    url: inlineOriginalUrl ?? (await storage.getSignedUrl(image.storageKey, expiresInSeconds)),
-    expiresAt
-  });
-});
-
-app.post("/api/images/:imageId/favorite", async (request) => {
-  const { user } = await requireAuth(request);
-  const { imageId } = imageParamSchema.parse(request.params);
-  return store.update(async (data) => {
-    mustFindOwnImage(data, user.id, imageId);
-    if (!data.imageFavorites.some((favorite) => favorite.userId === user.id && favorite.imageId === imageId)) {
-      data.imageFavorites.push({ userId: user.id, imageId, createdAt: new Date().toISOString() });
-    }
-    return envelope(request, { imageId, favorite: true });
-  });
-});
-
-app.delete("/api/images/:imageId/favorite", async (request) => {
-  const { user } = await requireAuth(request);
-  const { imageId } = imageParamSchema.parse(request.params);
-  return store.update((data) => {
-    mustFindOwnImage(data, user.id, imageId);
-    data.imageFavorites = data.imageFavorites.filter(
-      (favorite) => !(favorite.userId === user.id && favorite.imageId === imageId)
-    );
-    return envelope(request, { imageId, favorite: false });
-  });
-});
-
-app.post("/api/images/:imageId/download-url", async (request) => {
-  assertFeatureEnabled("downloads");
-  const { user, data } = await requireAuth(request);
-  const { imageId } = imageParamSchema.parse(request.params);
-  const image = mustFindOwnImage(data, user.id, imageId);
-  const expiresInSeconds = Math.max(60, Math.min(envNumber("DOWNLOAD_URL_TTL_MINUTES", 15) * 60, 60 * 60 * 24 * 7));
-  const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
-  return envelope(request, {
-    url: await storage.getSignedUrl(image.storageKey, expiresInSeconds),
-    fileName: `imagora-${image.id}.${extensionForMimeType(image.mimeType)}`,
-    expiresAt
-  });
-});
-
-app.delete("/api/images/:imageId", async (request) => {
-  const { user, data } = await requireAuth(request);
-  const { imageId } = imageParamSchema.parse(request.params);
-  const image = mustFindOwnImage(data, user.id, imageId);
-  await storage.deleteObject(image.storageKey);
-  if (image.thumbnailKey && image.thumbnailKey !== image.storageKey) {
-    await storage.deleteObject(image.thumbnailKey);
-  }
-  return store.update((data) => {
-    const image = mustFindOwnImage(data, user.id, imageId);
-    image.deletedAt = new Date().toISOString();
-    return envelope(request, { imageId, deleted: true });
-  });
-});
-
-app.get("/api/plans", async (request) => {
-  const data = await store.read();
-  return envelope(request, {
-    plans: data.plans.filter((plan) => plan.status === "ACTIVE").sort((a, b) => a.sortOrder - b.sortOrder)
-  });
-});
-
-app.post("/api/orders", async (request, reply) => {
-  assertFeatureEnabled("payments");
-  const { user } = await requireAuth(request);
-  const input = createOrderSchema.parse(request.body);
-  assertPaymentProviderEnabled(input.paymentProvider);
-  return store.update(async (data) => {
-    runOrderMaintenance(data);
-    const duplicate = input.clientRequestId ? findOrderByClientRequestId(data, user.id, input.clientRequestId) : null;
-    if (duplicate) {
-      if (duplicate.planId !== input.planId || duplicate.paymentProvider !== input.paymentProvider) {
-        throw new AppError("CONFLICT", "clientRequestId has already been used for another order", 409);
-      }
-      const duplicatePlan = data.plans.find((item) => item.id === duplicate.planId);
-      if (!duplicatePlan) {
-        throw new AppError("PLAN_UNAVAILABLE", "Plan is not available", 404);
-      }
-      return envelope(request, {
-        order: duplicate,
-        plan: duplicatePlan,
-        checkoutUrl: findCheckoutUrl(data, duplicate)
-      });
-    }
-    const plan = data.plans.find((item) => item.id === input.planId && item.status === "ACTIVE");
-    if (!plan) {
-      throw new AppError("PLAN_UNAVAILABLE", "Plan is not available", 404);
-    }
-    const now = new Date().toISOString();
-    const order: Order = {
-      id: randomUUID(),
-      userId: user.id,
-      planId: plan.id,
-      orderNo: `IM${Date.now()}${Math.floor(Math.random() * 900 + 100)}`,
-      amountCents: plan.priceCents,
-      currency: plan.currency,
-      paymentProvider: input.paymentProvider,
-      paymentIntentId: null,
-      status: "PENDING",
-      paidAt: null,
-      createdAt: now,
-      updatedAt: now
-    };
-    let checkoutUrl: string | null = null;
-    if (input.paymentProvider === paymentProvider.name) {
-      const payment = await paymentProvider.createPayment({
-        orderId: order.id,
-        orderNo: order.orderNo,
-        amountCents: order.amountCents,
-        currency: order.currency
-      });
-      order.paymentIntentId = payment.paymentIntentId;
-      checkoutUrl = payment.checkoutUrl;
-      data.paymentEvents.push({
-        id: randomUUID(),
-        provider: payment.provider,
-        providerEventId: `checkout:${payment.paymentIntentId}`,
-        orderId: order.id,
-        eventType: "checkout.created",
-        payload: {
-          checkoutUrl: payment.checkoutUrl,
-          paymentIntentId: payment.paymentIntentId,
-          orderId: order.id,
-          orderNo: order.orderNo,
-          amountCents: order.amountCents,
-          currency: order.currency,
-          clientRequestId: input.clientRequestId ?? null
-        },
-        processedAt: now,
-        createdAt: now
-      });
-    }
-    data.orders.push(order);
-    reply.status(201);
-    return envelope(request, { order, plan, checkoutUrl });
-  });
-});
-
-app.get("/api/orders", async (request) => {
-  const { user } = await requireAuth(request);
-  return store.update((data) => {
-    const maintenance = runOrderMaintenance(data);
-    const query = optionalPaginationSchema.parse(request.query);
-    const orders = data.orders
-      .filter((order) => order.userId === user.id)
-      .sort(descCreated)
-      .slice(0, query.limit ?? Number.POSITIVE_INFINITY);
-    return envelope(request, { orders, maintenance });
-  });
-});
-
-app.get("/api/orders/:orderId", async (request) => {
-  const { user } = await requireAuth(request);
-  const { orderId } = orderParamSchema.parse(request.params);
-  return store.update((data) => {
-    const maintenance = runOrderMaintenance(data);
-    const order = mustFindOwnOrder(data, user.id, orderId);
-    const plan = data.plans.find((item) => item.id === order.planId);
-    return envelope(request, { order, plan, maintenance });
-  });
-});
-
-app.post("/api/orders/:orderId/pay", async (request) => {
-  assertFeatureEnabled("payments");
-  const { user } = await requireAuth(request);
-  const { orderId } = orderParamSchema.parse(request.params);
-  return store.update(async (data) => {
-    runOrderMaintenance(data);
-    const order = mustFindOwnOrder(data, user.id, orderId);
-    if (order.status === "PAID") {
-      return envelope(request, {
-        order,
-        balanceAfter: mustFindCreditAccount(data, user.id).balance,
-        checkoutUrl: null
-      });
-    }
-    if (order.status !== "PENDING") {
-      throw new AppError("ORDER_NOT_PAYABLE", "Order is not payable", 400);
-    }
-    if (order.paymentProvider !== paymentProvider.name) {
-      throw new AppError("VALIDATION_ERROR", "Payment provider is not enabled", 400);
-    }
-    if (order.paymentProvider !== "mock") {
-      const checkoutUrl = await ensureCheckoutUrl(data, order);
-      return envelope(request, { order, checkoutUrl });
-    }
-    assertMockPaymentAllowed();
-    const result = applyPaymentSucceeded(data, {
-      provider: order.paymentProvider,
-      providerEventId: `mock:${order.id}:paid`,
-      orderId: order.id,
-      orderNo: order.orderNo,
-      eventType: "payment.succeeded",
-      amountCents: order.amountCents,
-      currency: order.currency,
-      paymentIntentId: order.paymentIntentId,
-      requestId: request.requestId ?? null,
-      route: routeLabel(request),
-      payload: {
-        mock: true,
-        orderId: order.id,
-        orderNo: order.orderNo,
-        amountCents: order.amountCents,
-        currency: order.currency
-      }
-    });
-    return envelope(request, { order: result.order, balanceAfter: result.balanceAfter, checkoutUrl: null });
-  });
-});
-
-app.post("/api/payments/webhooks/:provider", async (request) => {
-  const { provider } = paymentWebhookParamSchema.parse(request.params);
-  if (provider === "mock") {
-    assertMockPaymentAllowed();
-  }
-  if (provider !== paymentProvider.name) {
-    throw new AppError("VALIDATION_ERROR", "Payment provider is not enabled", 400);
-  }
-
-  let event: VerifiedPaymentEvent;
-  try {
-    event = await paymentProvider.verifyWebhook(request.body, webhookSignature(request));
-  } catch (error) {
-    throw new AppError(
-      "VALIDATION_ERROR",
-      error instanceof Error ? error.message : "Invalid payment webhook payload",
-      400
-    );
-  }
-
-  return store.update((data) => {
-    const result = applyPaymentSucceeded(data, {
-      provider: event.provider,
-      providerEventId: event.providerEventId,
-      orderId: event.orderId,
-      orderNo: event.orderNo,
-      eventType: event.eventType,
-      amountCents: event.amountCents,
-      currency: event.currency,
-      paymentIntentId: event.paymentIntentId,
-      requestId: request.requestId ?? null,
-      route: routeLabel(request),
-      payload: payloadRecord(request.body)
-    });
-    return envelope(request, result);
-  });
-});
-
-app.get("/api/admin/dashboard", async (request) => {
-  await requireAdmin(request);
-  return store.update((data) => {
-    runOrderMaintenance(data);
-    const paidRevenueCents = data.orders
-      .filter((order) => order.status === "PAID")
-      .reduce((sum, order) => sum + order.amountCents, 0);
-    // AI 成本仅统计已成功产出的任务，避免把失败退款任务的名义成本算进毛利
-    const aiCostCents = data.generationTasks
-      .filter((task) => task.status === "SUCCEEDED")
-      .reduce((sum, task) => sum + (task.providerCostCents ?? 0), 0);
-    return envelope(request, {
-      metrics: {
-        users: data.users.length,
-        tasks: data.generationTasks.length,
-        images: data.generatedImages.length,
-        paidOrders: data.orders.filter((order) => order.status === "PAID").length,
-        paidRevenueCents,
-        aiCostCents,
-        grossProfitCents: paidRevenueCents - aiCostCents,
-        blockedSafetyEvents: data.safetyEvents.filter((event) => event.status === "BLOCKED").length,
-        reviewRequiredSafetyEvents: data.safetyEvents.filter((event) => event.status === "REVIEW_REQUIRED").length
-      }
-    });
-  });
-});
-
-app.get("/api/admin/metrics", async (request) => {
-  await requireAdmin(request);
-  return store.update((data) => {
-    const maintenance = runOrderMaintenance(data);
-    const http = httpMetricsSnapshot();
-    const domain = domainMetricsSnapshot(data);
-    const alerts = operationalAlertsSnapshot(data, http);
-    recordLocalAlertNotifications(data, alerts);
-    return envelope(request, {
-      service: {
-        uptimeSeconds: Math.floor((Date.now() - serviceStartedAt) / 1000),
-        startedAt: new Date(serviceStartedAt).toISOString(),
-        features: featureFlags()
-      },
-      http,
-      domain,
-      maintenance,
-      alerts,
-      recentIncidents: data.operationalIncidents.sort(descUpdated).slice(0, 12),
-      alertNotifications: data.alertNotifications.sort(descCreated).slice(0, 12)
-    });
-  });
-});
-
-app.post("/api/admin/maintenance/reconcile", async (request) => {
-  const { user: admin } = await requireAdmin(request);
-  const input = adminReasonSchema.parse(request.body ?? {});
-  return store.update((data) => {
-    const maintenance = runOrderMaintenance(data);
-    audit(
-      data,
-      admin.id,
-      "maintenance.reconcile",
-      "SYSTEM",
-      "platform",
-      input.reason,
-      null,
-      { ...maintenance },
-      request
-    );
-    return envelope(request, { maintenance });
-  });
-});
-
-app.post("/api/admin/maintenance/reconcile-generation", async (request) => {
-  const { user: admin } = await requireAdmin(request);
-  const input = adminReasonSchema.parse(request.body ?? {});
-  return store.update((data) => {
-    const maintenance = runGenerationMaintenance(data, generationMaintenanceOptions());
-    audit(
-      data,
-      admin.id,
-      "maintenance.generation.reconcile",
-      "SYSTEM",
-      "generation",
-      input.reason,
-      null,
-      { ...maintenance },
-      request
-    );
-    return envelope(request, { maintenance });
-  });
-});
-
-app.get("/api/admin/users", async (request) => {
-  const query = adminUserQuerySchema.parse(request.query);
-  const { data } = await requireAdmin(request);
-  const search = query.search?.toLowerCase();
-  const users = data.users
-    .filter((user) => !query.status || user.status === query.status)
-    .filter((user) => !query.role || user.role === query.role)
-    .filter((user) => {
-      if (!search) {
-        return true;
-      }
-      return user.email.toLowerCase().includes(search) || user.nickname.toLowerCase().includes(search);
-    })
-    .sort(descCreated)
-    .slice(0, query.limit)
-    .map(withoutPassword);
-  return envelope(request, { users, total: data.users.length });
-});
-
-app.get("/api/admin/users/:userId", async (request) => {
-  await requireAdmin(request);
-  const { userId } = userParamSchema.parse(request.params);
-  const data = await store.read();
-  const user = mustFindUser(data, userId);
-  const account = data.creditAccounts.find((a) => a.userId === userId);
-  const orders = data.orders
-    .filter((o) => o.userId === userId)
-    .sort(descCreated)
-    .slice(0, 10);
-  const tasks = data.generationTasks
-    .filter((t) => t.userId === userId)
-    .sort(descCreated)
-    .slice(0, 10);
-  const images = data.generatedImages.filter((img) => img.userId === userId).length;
-
-  return envelope(request, {
-    user: withoutPassword(user),
-    account,
-    stats: {
-      totalOrders: data.orders.filter((o) => o.userId === userId).length,
-      paidOrders: data.orders.filter((o) => o.userId === userId && o.status === "PAID").length,
-      totalTasks: data.generationTasks.filter((t) => t.userId === userId).length,
-      succeededTasks: data.generationTasks.filter((t) => t.userId === userId && t.status === "SUCCEEDED").length,
-      totalImages: images
-    },
-    recentOrders: orders,
-    recentTasks: tasks
-  });
-});
-
-app.patch("/api/admin/users/:userId/status", async (request) => {
-  const { user: admin } = await requireAdmin(request);
-  const { userId } = userParamSchema.parse(request.params);
-  const input = adminStatusSchema.parse(request.body);
-  return store.update((data) => {
-    const target = mustFindUser(data, userId);
-    if (target.id === admin.id) {
-      throw new AppError("VALIDATION_ERROR", "Admin cannot change own status here", 400);
-    }
-    if (target.role === "ADMIN" && input.status !== "ACTIVE") {
-      const otherActiveAdmins = data.users.filter(
-        (user) => user.id !== target.id && user.role === "ADMIN" && user.status === "ACTIVE"
-      );
-      if (otherActiveAdmins.length === 0) {
-        throw new AppError("VALIDATION_ERROR", "Cannot remove the last active administrator", 400);
-      }
-    }
-    const before = { status: target.status };
-    target.status = input.status;
-    target.updatedAt = new Date().toISOString();
-    audit(
-      data,
-      admin.id,
-      "user.status.update",
-      "USER",
-      target.id,
-      input.reason,
-      before,
-      { status: target.status },
-      request
-    );
-    return envelope(request, { user: withoutPassword(target) });
-  });
-});
-
-app.post("/api/admin/users/:userId/credits/adjust", async (request) => {
-  const { user: admin } = await requireAdmin(request);
-  const { userId } = userParamSchema.parse(request.params);
-  const input = adjustCreditSchema.parse(request.body);
-  // 大额人工调整必须显式二次确认，防止误触多敲一个零就发出去
-  const largeAdjustThreshold = envNumber("ADMIN_CREDIT_ADJUST_THRESHOLD", 1000);
-  if (Math.abs(input.amount) >= largeAdjustThreshold && !input.confirm) {
-    throw new AppError("VALIDATION_ERROR", "大额积分调整需要二次确认", 400, {
-      requiresConfirmation: true,
-      threshold: largeAdjustThreshold,
-      amount: input.amount
-    });
-  }
-  return store.update((data) => {
-    mustFindUser(data, userId);
-    const account = mustFindCreditAccount(data, userId);
-    const before = { balance: account.balance };
-    // 幂等键随请求传入，重复提交只执行一次，也不重复写审计
-    const applied = adjustCredits(
-      data,
-      userId,
-      input.amount,
-      admin.id,
-      `admin-adjust:${input.clientRequestId}`,
-      input.reason
-    );
-    if (applied) {
-      audit(
-        data,
-        admin.id,
-        "user.credits.adjust",
-        "USER",
-        userId,
-        input.reason,
-        before,
-        { balance: account.balance },
-        request
-      );
-    }
-    return envelope(request, { account });
-  });
-});
-
-app.get("/api/admin/generation/tasks", async (request) => {
-  const query = adminTaskQuerySchema.parse(request.query);
-  const { data } = await requireAdmin(request);
-  const tasks = data.generationTasks
-    .filter((task) => !query.status || task.status === query.status)
-    .filter((task) => !query.userId || task.userId === query.userId)
-    .filter((task) => matchesCreatedRange(task.createdAt, query))
-    .sort(descCreated)
-    .slice(0, query.limit);
-  return envelope(request, { tasks });
-});
-
-app.get("/api/admin/generation/tasks/:taskId", async (request) => {
-  await requireAdmin(request);
-  const { taskId } = idParamSchema.parse(request.params);
-  const data = await store.read();
-  const task = mustFindTask(data, taskId);
-  const user = mustFindUser(data, task.userId);
-  const images = data.generatedImages.filter((image) => image.taskId === task.id).sort(descCreated);
-  return envelope(request, { task, user: withoutPassword(user), images });
-});
-
-app.get("/api/admin/images", async (request) => {
-  const query = adminImageQuerySchema.parse(request.query);
-  const { data } = await requireAdmin(request);
-  const images = data.generatedImages
-    .filter((image) => !query.visibility || image.visibility === query.visibility)
-    .filter((image) => !query.userId || image.userId === query.userId)
-    .filter((image) => matchesCreatedRange(image.createdAt, query))
-    .sort(descCreated)
-    .slice(0, query.limit);
-  return envelope(request, { images });
-});
-
-app.get("/api/admin/images/:imageId", async (request) => {
-  await requireAdmin(request);
-  const { imageId } = imageParamSchema.parse(request.params);
-  const data = await store.read();
-  const image = mustFindImage(data, imageId);
-  const user = mustFindUser(data, image.userId);
-  const task = mustFindTask(data, image.taskId);
-  return envelope(request, { image, user: withoutPassword(user), task });
-});
-
-app.patch("/api/admin/images/:imageId/visibility", async (request) => {
-  const { user: admin } = await requireAdmin(request);
-  const { imageId } = imageParamSchema.parse(request.params);
-  const input = adminVisibilitySchema.parse(request.body);
-  return store.update((data) => {
-    const image = data.generatedImages.find((item) => item.id === imageId);
-    if (!image) {
-      throw new AppError("NOT_FOUND", "Image was not found", 404);
-    }
-    const before = { visibility: image.visibility };
-    image.visibility = input.visibility;
-    audit(
-      data,
-      admin.id,
-      "image.visibility.update",
-      "IMAGE",
-      image.id,
-      input.reason,
-      before,
-      { visibility: image.visibility },
-      request
-    );
-    return envelope(request, { image });
-  });
-});
-
-app.get("/api/admin/orders", async (request) => {
-  const query = adminOrderQuerySchema.parse(request.query);
-  const { data } = await requireAdmin(request);
-  const orders = data.orders
-    .filter((order) => !query.status || order.status === query.status)
-    .filter((order) => !query.userId || order.userId === query.userId)
-    .filter((order) => !query.orderNo || order.orderNo.toLowerCase().includes(query.orderNo.toLowerCase()))
-    .filter((order) => matchesCreatedRange(order.createdAt, query))
-    .sort(descCreated)
-    .slice(0, query.limit);
-  return envelope(request, { orders });
-});
-
-app.get("/api/admin/orders/:orderId", async (request) => {
-  await requireAdmin(request);
-  const { orderId } = orderParamSchema.parse(request.params);
-  const data = await store.read();
-  const order = mustFindOrder(data, orderId);
-  const user = mustFindUser(data, order.userId);
-  const plan = data.plans.find((item) => item.id === order.planId);
-  if (!plan) {
-    throw new AppError("NOT_FOUND", "Plan was not found", 404);
-  }
-  const paymentEvents = data.paymentEvents.filter((event) => event.orderId === order.id).sort(descCreated);
-  return envelope(request, { order, user: withoutPassword(user), plan, paymentEvents });
-});
-
-app.get("/api/admin/plans", async (request) => {
-  const { data } = await requireAdmin(request);
-  return envelope(request, { plans: data.plans.sort((a, b) => a.sortOrder - b.sortOrder) });
-});
-
-app.post("/api/admin/plans", async (request, reply) => {
-  const { user: admin } = await requireAdmin(request);
-  const input = adminPlanSchema.parse(request.body);
-  return store.update((data) => {
-    const now = new Date().toISOString();
-    const plan: Plan = { id: randomUUID(), ...stripAdminReason(input), createdAt: now, updatedAt: now };
-    data.plans.push(plan);
-    audit(
-      data,
-      admin.id,
-      "plan.create",
-      "PLAN",
-      plan.id,
-      input.reason,
-      null,
-      plan as unknown as Record<string, unknown>,
-      request
-    );
-    reply.status(201);
-    return envelope(request, { plan });
-  });
-});
-
-app.patch("/api/admin/plans/:planId", async (request) => {
-  const { user: admin } = await requireAdmin(request);
-  const { planId } = planParamSchema.parse(request.params);
-  const input = adminPlanPatchSchema.parse(request.body);
-  return store.update((data) => {
-    const plan = data.plans.find((item) => item.id === planId);
-    if (!plan) {
-      throw new AppError("NOT_FOUND", "Plan was not found", 404);
-    }
-    const before = { ...plan };
-    Object.assign(plan, stripAdminReason(input), { updatedAt: new Date().toISOString() });
-    audit(
-      data,
-      admin.id,
-      "plan.update",
-      "PLAN",
-      plan.id,
-      input.reason,
-      before,
-      plan as unknown as Record<string, unknown>,
-      request
-    );
-    return envelope(request, { plan });
-  });
-});
-
-app.get("/api/admin/audit-logs", async (request) => {
-  const query = adminAuditQuerySchema.parse(request.query);
-  const { data } = await requireAdmin(request);
-  const logs = data.adminAuditLogs
-    .filter((log) => !query.adminUserId || log.adminUserId === query.adminUserId)
-    .filter((log) => !query.action || log.action === query.action)
-    .filter((log) => !query.targetType || log.targetType === query.targetType)
-    .filter((log) => !query.targetId || log.targetId === query.targetId)
-    .sort(descCreated)
-    .slice(0, query.limit);
-  return envelope(request, { logs });
-});
-
-app.get("/api/admin/safety-rules", async (request) => {
-  const { data } = await requireAdmin(request);
-  return envelope(request, { rules: data.safetyRules.sort(descCreated) });
-});
-
-app.post("/api/admin/safety-rules", async (request, reply) => {
-  const { user: admin } = await requireAdmin(request);
-  const input = safetyRuleSchema.parse(request.body);
-  return store.update((data) => {
-    const now = new Date().toISOString();
-    const rule: SafetyRule = {
-      id: randomUUID(),
-      ...input,
-      createdAt: now,
-      updatedAt: now
-    };
-    data.safetyRules.push(rule);
-    audit(data, admin.id, "safety-rule.create", "SAFETY_RULE", rule.id, null, null, { ...rule }, request);
-    reply.status(201);
-    return envelope(request, { rule });
-  });
-});
-
-app.patch("/api/admin/safety-rules/:ruleId", async (request) => {
-  const { user: admin } = await requireAdmin(request);
-  const { ruleId } = safetyRuleParamSchema.parse(request.params);
-  const input = safetyRulePatchSchema.parse(request.body);
-  return store.update((data) => {
-    const rule = data.safetyRules.find((item) => item.id === ruleId);
-    if (!rule) {
-      throw new AppError("NOT_FOUND", "Safety rule was not found", 404);
-    }
-    const before = { ...rule };
-    Object.assign(rule, input, { updatedAt: new Date().toISOString() });
-    audit(data, admin.id, "safety-rule.update", "SAFETY_RULE", rule.id, null, before, { ...rule }, request);
-    return envelope(request, { rule });
-  });
-});
-
-app.get("/api/admin/safety-events", async (request) => {
-  const query = safetyEventQuerySchema.parse(request.query);
-  const { data } = await requireAdmin(request);
-  const events = data.safetyEvents
-    .filter((event) => !query.status || event.status === query.status)
-    .sort(descCreated)
-    .slice(0, query.limit);
-  return envelope(request, { events });
-});
-
-app.patch("/api/admin/safety-events/:eventId", async (request) => {
-  const { user: admin } = await requireAdmin(request);
-  const { eventId } = safetyEventParamSchema.parse(request.params);
-  const input = safetyEventReviewSchema.parse(request.body);
-  return store.update((data) => {
-    const event = data.safetyEvents.find((item) => item.id === eventId);
-    if (!event) {
-      throw new AppError("NOT_FOUND", "Safety event was not found", 404);
-    }
-    if (event.status !== "REVIEW_REQUIRED") {
-      throw new AppError("VALIDATION_ERROR", "Only pending safety reviews can be handled", 400);
-    }
-    const before = { ...event };
-    event.status = input.status;
-    event.reasonMessage = `${event.reasonMessage}；人工复核：${input.reason}`;
-    audit(data, admin.id, "safety-event.review", "SAFETY_EVENT", event.id, input.reason, before, { ...event }, request);
-    return envelope(request, { event });
-  });
-});
-
-// ---- 用户申诉接口 ----
-
-app.post("/api/safety-appeals", async (request) => {
-  const { user } = await requireAuth(request);
-  const input = safetyAppealCreateSchema.parse(request.body);
-  return store.update((data) => {
-    const event = data.safetyEvents.find((item) => item.id === input.safetyEventId && item.userId === user.id);
-    if (!event) {
-      throw new AppError("NOT_FOUND", "Safety event was not found", 404);
-    }
-    const existing = data.safetyAppeals.find(
-      (appeal) => appeal.safetyEventId === input.safetyEventId && appeal.status === "PENDING"
-    );
-    if (existing) {
-      throw new AppError("CONFLICT", "已有待处理的申诉，请等待结果后再提交", 409);
-    }
-    const now = new Date().toISOString();
-    const appeal: SafetyAppeal = {
-      id: randomUUID(),
-      userId: user.id,
-      safetyEventId: input.safetyEventId,
-      reason: input.reason,
-      status: "PENDING",
-      adminNote: null,
-      createdAt: now,
-      resolvedAt: null
-    };
-    data.safetyAppeals.push(appeal);
-    return envelope(request, { appeal });
-  });
-});
-
-app.get("/api/safety-appeals", async (request) => {
-  const { user } = await requireAuth(request);
-  const data = await store.read();
-  const appeals = data.safetyAppeals.filter((appeal) => appeal.userId === user.id).sort(descCreated);
-  return envelope(request, { appeals });
-});
-
-app.get("/api/admin/safety-appeals", async (request) => {
-  const query = safetyAppealAdminQuerySchema.parse(request.query);
-  await requireAdmin(request);
-  const data = await store.read();
-  const appeals = data.safetyAppeals
-    .filter((appeal) => !query.status || appeal.status === query.status)
-    .sort(descCreated)
-    .slice(0, query.limit);
-  return envelope(request, { appeals });
-});
-
-app.patch("/api/admin/safety-appeals/:appealId", async (request) => {
-  const { user: admin } = await requireAdmin(request);
-  const { appealId } = safetyAppealParamSchema.parse(request.params);
-  const input = safetyAppealReviewSchema.parse(request.body);
-  return store.update((data) => {
-    const appeal = data.safetyAppeals.find((item) => item.id === appealId);
-    if (!appeal) {
-      throw new AppError("NOT_FOUND", "Appeal was not found", 404);
-    }
-    if (appeal.status !== "PENDING") {
-      throw new AppError("VALIDATION_ERROR", "Only pending appeals can be reviewed", 400);
-    }
-    const before = { ...appeal };
-    const now = new Date().toISOString();
-    appeal.status = input.status;
-    appeal.adminNote = input.adminNote ?? null;
-    appeal.resolvedAt = now;
-    audit(
-      data,
-      admin.id,
-      "safety-appeal.review",
-      "SAFETY_APPEAL",
-      appeal.id,
-      input.adminNote ?? null,
-      before,
-      { ...appeal },
-      request
-    );
-    return envelope(request, { appeal });
-  });
-});
-
-// 导出 app 供测试用 app.inject 跑全链路。
-export { app };
-
-// API_NO_LISTEN=true 时只构建 app、不监听端口也不起后台定时器，
-// 让测试可以 import 本模块后用 app.inject 而不真正占用端口。
-if (process.env.API_NO_LISTEN !== "true") {
-  startBackgroundGenerationMaintenance();
-  startBackgroundAlertEvaluation();
-
-  const port = Number(process.env.API_PORT ?? 4100);
-  const host = process.env.API_HOST ?? "127.0.0.1";
-  await app.listen({ port, host });
-}
-
 declare module "fastify" {
   interface FastifyRequest {
     requestId?: string;
@@ -2132,14 +496,9 @@ const loginSchema = z
   .object({
     email: emailSchema,
     password: loginPasswordSchema,
-    captchaVerificationIds: z.array(z.string().uuid()).length(captchaRequiredRounds).optional()
+    captchaVerificationIds: z.array(z.string().uuid()).max(captchaRequiredRounds).optional()
   })
   .strict();
-
-// 仅校验图片验证字段：当没有有效登录尝试令牌时，login 必须带齐两轮 verificationId。
-const loginCaptchaSchema = z.object({
-  captchaVerificationIds: z.array(z.string().uuid()).length(captchaRequiredRounds)
-});
 
 const captchaVerifySchema = z
   .object({
@@ -2460,16 +819,23 @@ function assertEmailVerified(user: User): void {
 }
 
 function setSessionCookie(reply: FastifyReply, token: string, expiresAt: string): void {
-  reply.header(
-    "set-cookie",
-    serializeCookie(sessionCookieName(), token, {
-      expires: new Date(expiresAt),
-      httpOnly: true,
-      secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
-      path: "/"
-    })
-  );
+  const sessionCookie = serializeCookie(sessionCookieName(), token, {
+    expires: new Date(expiresAt),
+    httpOnly: true,
+    secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
+    sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+    path: "/"
+  });
+  const existing = reply.getHeader("set-cookie");
+  if (existing === undefined) {
+    reply.header("set-cookie", sessionCookie);
+    return;
+  }
+  const existingCookies = Array.isArray(existing) ? existing.map(String) : [String(existing)];
+  reply.header("set-cookie", [
+    sessionCookie,
+    ...existingCookies.filter((cookie) => !cookie.startsWith(`${sessionCookieName()}=`))
+  ]);
 }
 
 function clearSessionCookie(reply: FastifyReply): void {
@@ -3904,9 +2270,7 @@ function validateProductionConfig(): void {
   requireProductionValue("SMTP_PASSWORD");
   requireProductionValue("SMTP_FROM");
   if (!requireEmailVerification()) {
-    throw new Error(
-      "Unsafe production config: REQUIRE_EMAIL_VERIFICATION must not be disabled in production"
-    );
+    throw new Error("Unsafe production config: REQUIRE_EMAIL_VERIFICATION must not be disabled in production");
   }
   requireProductionValue("GENERATION_RUNNING_TIMEOUT_MS");
   requireProductionSetting("DATA_STORE", "prisma");
@@ -4142,9 +2506,7 @@ async function rateLimitScope(request: FastifyRequest, rule: RateLimitRule): Pro
   }
   const data = await store.read();
   const now = new Date();
-  const session = data.sessions.find(
-    (item) => item.token === token && new Date(item.expiresAt) > now
-  );
+  const session = data.sessions.find((item) => item.token === token && new Date(item.expiresAt) > now);
   return session ? `user:${session.userId}` : request.ip;
 }
 
@@ -4385,7 +2747,13 @@ function planAlertDeliveries(
  */
 function recordAlertDeliveries(
   data: StoreData,
-  deliveries: Array<{ alert: OperationalAlert; channel: string; dedupeKey: string; status: AlertNotificationStatus; error?: string }>
+  deliveries: Array<{
+    alert: OperationalAlert;
+    channel: string;
+    dedupeKey: string;
+    status: AlertNotificationStatus;
+    error?: string;
+  }>
 ): void {
   data.alertNotifications ??= [];
   const now = new Date().toISOString();
@@ -4814,4 +3182,158 @@ function descCreated<T extends { createdAt: string }>(a: T, b: T): number {
 
 function descUpdated<T extends { updatedAt: string }>(a: T, b: T): number {
   return b.updatedAt.localeCompare(a.updatedAt);
+}
+
+function createRouteContext(): ApiRouteContext {
+  return {
+    AppError,
+    FilesystemObjectStorage,
+    addDays,
+    adjustCreditSchema,
+    adjustCredits,
+    adminAuditQuerySchema,
+    adminImageQuerySchema,
+    adminOrderQuerySchema,
+    adminPlanPatchSchema,
+    adminPlanSchema,
+    adminReasonSchema,
+    adminStatusSchema,
+    adminTaskQuerySchema,
+    adminUserQuerySchema,
+    adminVisibilitySchema,
+    applyPaymentSucceeded,
+    aspectRatioDimensions,
+    assertEmailVerified,
+    assertFeatureEnabled,
+    assertMockPaymentAllowed,
+    assertPaymentProviderEnabled,
+    audit,
+    buildVerificationEmail,
+    captchaChallenges,
+    captchaOptions,
+    captchaRequiredRounds,
+    captchaVerifications,
+    captchaVerifySchema,
+    changeEmailSchema,
+    changePasswordSchema,
+    clearLoginAttempt,
+    clearSessionCookie,
+    consumeLoginAttempt,
+    contentTypeForStorageKey,
+    createCaptchaChallenge,
+    createHash,
+    createOrderSchema,
+    defaultNicknameForEmail,
+    deleteAccountSchema,
+    descCreated,
+    descUpdated,
+    domainMetricsSnapshot,
+    enqueueGenerationTaskOrFail,
+    envelope,
+    ensureCheckoutUrl,
+    envNumber,
+    envString,
+    errorMessage,
+    exposeCaptchaAnswerForTests,
+    extensionForMime,
+    extensionForMimeType,
+    featureFlags,
+    fileSignatureQuerySchema,
+    findCheckoutUrl,
+    findOrderByClientRequestId,
+    generationInputSchema,
+    generationMaintenanceOptions,
+    hashCaptchaAnswer,
+    hashPassword,
+    httpMetricsSnapshot,
+    idParamSchema,
+    imageParamSchema,
+    inspectReferenceUpload,
+    issueLoginAttempt,
+    loginSchema,
+    mailer,
+    matchesCreatedRange,
+    mustFindCreditAccount,
+    mustFindImage,
+    mustFindOrder,
+    mustFindOwnImage,
+    mustFindOwnOrder,
+    mustFindOwnReferenceImage,
+    mustFindOwnTask,
+    mustFindTask,
+    mustFindUser,
+    operationalAlertsSnapshot,
+    optionalPaginationSchema,
+    orderParamSchema,
+    paginationSchema,
+    payloadRecord,
+    paymentProvider,
+    paymentWebhookParamSchema,
+    planParamSchema,
+    pruneCaptchaChallenges,
+    pruneCaptchaVerifications,
+    publicUser,
+    quote,
+    randomUUID,
+    readFile,
+    recordLocalAlertNotifications,
+    referenceUploadSchema,
+    registerSchema,
+    requestPasswordResetSchema,
+    requireAdmin,
+    requireAuth,
+    resetPasswordSchema,
+    resolveGenerationProviderSelection,
+    resolveInlineDataUrl,
+    routeLabel,
+    runGenerationMaintenance,
+    runOrderMaintenance,
+    safetyAppealAdminQuerySchema,
+    safetyAppealCreateSchema,
+    safetyAppealParamSchema,
+    safetyAppealReviewSchema,
+    safetyEventParamSchema,
+    safetyEventQuerySchema,
+    safetyEventReviewSchema,
+    safetyProvider,
+    safetyRuleParamSchema,
+    safetyRulePatchSchema,
+    safetyRuleSchema,
+    serviceStartedAt,
+    sessionToken,
+    setSessionCookie,
+    spendCredits,
+    stripAdminReason,
+    storage,
+    store,
+    taskQuerySchema,
+    taskWithRefund,
+    updateProfileSchema,
+    uploadBodyLimitBytes,
+    userParamSchema,
+    verifyCaptchaChallenge,
+    verifyCaptchaVerifications,
+    verifyPassword,
+    webhookSignature,
+    withFavorite,
+    withoutImagePublicUrl,
+    withoutPassword,
+    z
+  };
+}
+
+registerApiRoutes(app, createRouteContext());
+
+// 导出 app 供测试用 app.inject 跑全链路。
+export { app };
+
+// API_NO_LISTEN=true 时只构建 app、不监听端口也不起后台定时器，
+// 让测试可以 import 本模块后用 app.inject 而不真正占用端口。
+if (process.env.API_NO_LISTEN !== "true") {
+  startBackgroundGenerationMaintenance();
+  startBackgroundAlertEvaluation();
+
+  const port = Number(process.env.API_PORT ?? 4100);
+  const host = process.env.API_HOST ?? "127.0.0.1";
+  await app.listen({ port, host });
 }

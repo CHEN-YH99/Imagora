@@ -488,7 +488,11 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
     if (method === "GET" && /^\/api\/generation\/tasks\/[^/]+$/.test(path)) {
       state.generationTaskPolls += 1;
       const taskId = path.split("/").at(-1) ?? "task-e2e";
-      if (taskId === "task-e2e" && generationOutcome === "recoverAfterPollingError" && state.generationTaskPolls === 1) {
+      if (
+        taskId === "task-e2e" &&
+        generationOutcome === "recoverAfterPollingError" &&
+        state.generationTaskPolls === 1
+      ) {
         await fulfillError(route, "Temporary task polling failure", 503);
         return;
       }
@@ -801,10 +805,7 @@ function createMockState(): MockState {
     generationTaskPolls: 0,
     historyTaskDetailPolls: 0,
     historyTaskListRequests: 0,
-    images: [
-      createGeneratedImage("image-history", "task-history"),
-      createGeneratedImage("image-e2e", "task-e2e")
-    ],
+    images: [createGeneratedImage("image-history", "task-history"), createGeneratedImage("image-e2e", "task-e2e")],
     orders: [
       createOrder("order-pending", "IG-E2E-PENDING", "PENDING"),
       createOrder("order-paid", "IG-E2E-PAID", "PAID")

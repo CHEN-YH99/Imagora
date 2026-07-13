@@ -2156,6 +2156,7 @@ function stripeEventPayload({ eventId, sessionId, orderId, orderNo, amountCents,
         currency: currency.toLowerCase(),
         client_reference_id: orderId,
         payment_intent: sessionId,
+        payment_status: "paid",
         metadata: {
           orderId,
           orderNo

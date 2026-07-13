@@ -518,10 +518,7 @@ export async function login(
   return result;
 }
 
-export async function register(
-  email: string,
-  password: string
-): Promise<{ user: User; emailDelivered: boolean }> {
+export async function register(email: string, password: string): Promise<{ user: User; emailDelivered: boolean }> {
   const result = await apiFetch<{ user: User; emailDelivered: boolean }>("/api/auth/register", {
     method: "POST",
     body: { email, password }

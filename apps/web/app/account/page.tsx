@@ -3,7 +3,20 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, Edit2, KeyRound, Mail, MailCheck, MonitorSmartphone, Save, Send, ShieldCheck, Trash2, X } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Edit2,
+  KeyRound,
+  Mail,
+  MailCheck,
+  MonitorSmartphone,
+  Save,
+  Send,
+  ShieldCheck,
+  Trash2,
+  X
+} from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { PasswordInput } from "../../components/PasswordInput";
 import {
@@ -442,9 +455,7 @@ export default function AccountPage() {
                 <Mail className="size-4 text-white/60" aria-hidden="true" />
                 修改邮箱
               </div>
-              <p className="text-xs leading-5 text-white/46">
-                更换邮箱后需重新验证，我们会向新邮箱发送验证邮件。
-              </p>
+              <p className="text-xs leading-5 text-white/46">更换邮箱后需重新验证，我们会向新邮箱发送验证邮件。</p>
               <input
                 className="focus-ring w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-sm text-white"
                 value={newEmail}
@@ -497,9 +508,7 @@ export default function AccountPage() {
                       className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-xs"
                     >
                       <div className="min-w-0">
-                        <p className="text-white/72">
-                          登录于 {new Date(session.createdAt).toLocaleString("zh-CN")}
-                        </p>
+                        <p className="text-white/72">登录于 {new Date(session.createdAt).toLocaleString("zh-CN")}</p>
                         <p className="mt-0.5 text-white/42">
                           有效期至 {new Date(session.expiresAt).toLocaleString("zh-CN")}
                         </p>
@@ -716,11 +725,7 @@ function isEmailLike(value: string): boolean {
 }
 
 // 与后端 newPasswordSchema 对齐的前端预校验，减少无谓请求。
-function validateNewPassword(
-  currentPassword: string,
-  newPassword: string,
-  confirmNewPassword: string
-): string | null {
+function validateNewPassword(currentPassword: string, newPassword: string, confirmNewPassword: string): string | null {
   if (!currentPassword) {
     return "请输入当前密码。";
   }

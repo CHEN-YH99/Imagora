@@ -61,8 +61,7 @@ export default function HistoryPage() {
   const activeTaskIdsKey = activeTaskIds.join("|");
 
   useEffect(() => {
-    const activeSelectedTaskId =
-      selectedTask && isActiveTaskStatus(selectedTask.status) ? selectedTask.id : null;
+    const activeSelectedTaskId = selectedTask && isActiveTaskStatus(selectedTask.status) ? selectedTask.id : null;
     const activeBackgroundTaskIds = activeTaskIds.filter((taskId) => taskId !== activeSelectedTaskId);
     if (!activeSelectedTaskId && activeBackgroundTaskIds.length === 0) {
       return;
@@ -421,9 +420,11 @@ function formatTaskTimestamp(value: string | null | undefined): string {
   const datePart = [date.getFullYear(), padTimestampPart(date.getMonth() + 1), padTimestampPart(date.getDate())].join(
     "-"
   );
-  const timePart = [padTimestampPart(date.getHours()), padTimestampPart(date.getMinutes()), padTimestampPart(date.getSeconds())].join(
-    ":"
-  );
+  const timePart = [
+    padTimestampPart(date.getHours()),
+    padTimestampPart(date.getMinutes()),
+    padTimestampPart(date.getSeconds())
+  ].join(":");
   return `${datePart} ${timePart}`;
 }
 

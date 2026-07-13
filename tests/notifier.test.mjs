@@ -147,8 +147,18 @@ test("AlertNotifier.dispatch collects per-channel results without throwing", asy
 
 test("AlertNotifier.dispatch can target a subset of channels", async () => {
   const calls = [];
-  const channelA = { name: "a", async send() { calls.push("a"); } };
-  const channelB = { name: "b", async send() { calls.push("b"); } };
+  const channelA = {
+    name: "a",
+    async send() {
+      calls.push("a");
+    }
+  };
+  const channelB = {
+    name: "b",
+    async send() {
+      calls.push("b");
+    }
+  };
   const notifier = new AlertNotifier([channelA, channelB]);
   const results = await notifier.dispatch(samplePayload, { channels: ["b"] });
   assert.deepEqual(calls, ["b"]);

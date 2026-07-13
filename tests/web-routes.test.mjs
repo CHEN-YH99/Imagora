@@ -23,6 +23,7 @@ test("web exposes image detail workflow from history and favorites", async () =>
 test("web auth pages validate inputs and registration does not ask for nickname", async () => {
   const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
   const apiMain = await readFile(join(root, "apps/api/src/main.ts"), "utf8");
+  const apiAuthRoutes = await readFile(join(root, "apps/api/src/routes/auth.ts"), "utf8");
   const appFrame = await readFile(join(root, "apps/web/components/AppFrame.tsx"), "utf8");
   const forgotPasswordPage = await readFile(join(root, "apps/web/app/forgot-password/page.tsx"), "utf8");
   const loginPage = await readFile(join(root, "apps/web/app/login/page.tsx"), "utf8");
@@ -74,8 +75,8 @@ test("web auth pages validate inputs and registration does not ask for nickname"
   assert.match(apiMain, /password: newPasswordSchema/);
   assert.match(apiMain, /captchaVerifications/);
   assert.match(apiMain, /captchaRequiredRounds/);
-  assert.match(apiMain, /captchaSelections/);
-  assert.match(apiMain, /createCaptchaChallenge/);
+  assert.match(apiAuthRoutes, /captchaSelections/);
+  assert.match(apiAuthRoutes, /createCaptchaChallenge/);
   assert.match(nextConfig, /X-Content-Type-Options/);
   assert.match(nextConfig, /X-Frame-Options/);
   assert.match(nextConfig, /Permissions-Policy/);
@@ -321,6 +322,7 @@ test("generate page exposes safety appeal entry after direct content blocking", 
 
 test("generation failures reconcile refunds and surface refunded credit copy", async () => {
   const apiMain = await readFile(join(root, "apps/api/src/main.ts"), "utf8");
+  const apiAdminRoutes = await readFile(join(root, "apps/api/src/routes/admin.ts"), "utf8");
   const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
   const workerMain = await readFile(join(root, "apps/worker/src/main.ts"), "utf8");
@@ -328,7 +330,7 @@ test("generation failures reconcile refunds and surface refunded credit copy", a
   assert.match(apiMain, /runGenerationMaintenance/);
   assert.match(apiMain, /startBackgroundGenerationMaintenance/);
   assert.match(apiMain, /GENERATION_MAINTENANCE_INTERVAL_MS/);
-  assert.match(apiMain, /\/api\/admin\/maintenance\/reconcile-generation/);
+  assert.match(apiAdminRoutes, /\/api\/admin\/maintenance\/reconcile-generation/);
   assert.match(apiClient, /refundedCredits\?: number/);
   assert.match(generatePage, /generationFailureMessage/);
   assert.match(generatePage, /generationTaskSyncErrorMessage/);
@@ -345,11 +347,12 @@ test("generation failures reconcile refunds and surface refunded credit copy", a
 test("generate page shows animated processing placeholders before results arrive", async () => {
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
   const draftsFile = await readFile(join(root, "apps/web/lib/generateDrafts.ts"), "utf8");
+  const stateFile = await readFile(join(root, "apps/web/app/generate/generationState.ts"), "utf8");
 
   assert.match(generatePage, /function GenerationProcessingPlaceholder/);
   assert.match(generatePage, /isGenerationProcessing/);
   assert.match(generatePage, /setTask\(null\);/);
-  assert.match(generatePage, /const processingPlaceholderCount = Math\.max\(1, task\?\.quantity \?\? quantity\);/);
+  assert.match(generatePage, /resolveProcessingPlaceholderCount/);
   assert.match(generatePage, /Array\.from\(\{ length: processingPlaceholderCount \}/);
   assert.match(
     generatePage,
@@ -364,8 +367,10 @@ test("generate page shows animated processing placeholders before results arrive
   assert.match(generatePage, /terminalGenerationFailureMessage/);
   assert.match(generatePage, /生成失败/);
   assert.match(generatePage, /!terminalGenerationFailureMessage && !isGenerationProcessing && images\.length === 0/);
-  assert.match(generatePage, /task\?\.failureMessage/);
+  assert.match(stateFile, /task\.failureMessage/);
   assert.match(generatePage, /正在恢复上一次生成结果/);
+  assert.match(stateFile, /export function resolveProcessingPlaceholderCount/);
+  assert.match(stateFile, /Math\.max\(1, task\?\.quantity \?\? quantity\)/);
   assert.match(draftsFile, /GENERATION_TASK_SNAPSHOTS_STORAGE_KEY/);
   assert.match(draftsFile, /saveGenerationTaskSnapshot/);
   assert.match(draftsFile, /readGenerationTaskSnapshot/);
@@ -395,7 +400,7 @@ test("generate page does not restore the previous successful task while submitti
   );
   assert.match(generatePage, /if \(taskId && task\?\.id === taskId\) \{/);
   const submittingWithoutTaskIdGuard = generatePage.match(
-    /if \(submittingGenerationRef\.current && !taskId\) \{(?<body>[\s\S]*?)\n    \}/
+    /if \(submittingGenerationRef\.current && !taskId\) \{(?<body>[\s\S]*?)\n {4}\}/
   );
   assert.ok(submittingWithoutTaskIdGuard?.groups?.body, "submitting without taskId guard must exist");
   assert.match(submittingWithoutTaskIdGuard.groups.body, /setRestoringTaskView\(false\);[\s\S]*return;/);
@@ -409,4 +414,27 @@ test("generate page does not restore the previous successful task while submitti
     generatePage,
     /submittedTaskIdRef\.current = created\.task\.id;\s*submittingGenerationRef\.current = false;/
   );
+});
+
+test("generate page centralizes view state decisions in a state helper", async () => {
+  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const stateFile = await readFile(join(root, "apps/web/app/generate/generationState.ts"), "utf8");
+
+  assert.match(generatePage, /resolveGenerationViewState/);
+  assert.match(generatePage, /resolveProcessingPlaceholderCount/);
+  assert.match(generatePage, /hasTerminalGenerationFailure/);
+  assert.match(generatePage, /isTerminalTaskStatus/);
+  assert.match(stateFile, /export type GenerationViewState =/);
+  for (const state of ["idle", "submitting", "processing", "succeeded", "failed", "restoring"]) {
+    assert.match(stateFile, new RegExp(`"${state}"`));
+  }
+  assert.match(stateFile, /export function resolveGenerationViewState/);
+  assert.match(stateFile, /export function resolveProcessingPlaceholderCount/);
+  assert.match(stateFile, /task\?\.status === "PENDING"/);
+  assert.match(stateFile, /task\?\.status === "RUNNING"/);
+  assert.match(stateFile, /task\.status === "FAILED"/);
+  assert.match(stateFile, /task\.status === "BLOCKED"/);
+  assert.match(stateFile, /task\.status === "CANCELED"/);
+  assert.doesNotMatch(generatePage, /const isGenerationProcessing =\s*\n\s*images\.length === 0/);
+  assert.doesNotMatch(generatePage, /const processingPlaceholderCount = Math\.max/);
 });

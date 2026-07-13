@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, Suspense, useState } from "react";
+import { type ClipboardEvent, type FormEvent, Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { UserPlus } from "lucide-react";
@@ -54,6 +54,11 @@ function RegisterForm() {
     }
   }
 
+  function handleConfirmPasswordPaste(event: ClipboardEvent<HTMLInputElement>) {
+    event.preventDefault();
+    setMessage("请手动输入确认密码，避免复制错误。");
+  }
+
   if (registered) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-ink px-4 text-white">
@@ -97,7 +102,9 @@ function RegisterForm() {
         <h1 className="mt-6 text-3xl font-semibold">创建账号</h1>
         {fromDemo ? (
           <div className="mt-3 rounded-2xl border border-mint/30 bg-mint/8 px-4 py-3">
-            <p className="text-sm text-white/80">注册并完成邮箱验证后即可进入生成工作台，你的当前预设会在本标签页内保留。</p>
+            <p className="text-sm text-white/80">
+              注册并完成邮箱验证后即可进入生成工作台，你的当前预设会在本标签页内保留。
+            </p>
           </div>
         ) : (
           <p className="mt-2 text-sm leading-6 text-white/62">
@@ -133,6 +140,7 @@ function RegisterForm() {
             <PasswordInput
               value={confirmPassword}
               onChange={(event) => setConfirmPassword(event.target.value)}
+              onPaste={handleConfirmPasswordPaste}
               autoComplete="new-password"
               maxLength={128}
               minLength={12}

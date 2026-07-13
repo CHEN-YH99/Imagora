@@ -330,9 +330,11 @@ function formatTaskTimestamp(value: string | null | undefined): string {
   const datePart = [date.getFullYear(), padTimestampPart(date.getMonth() + 1), padTimestampPart(date.getDate())].join(
     "-"
   );
-  const timePart = [padTimestampPart(date.getHours()), padTimestampPart(date.getMinutes()), padTimestampPart(date.getSeconds())].join(
-    ":"
-  );
+  const timePart = [
+    padTimestampPart(date.getHours()),
+    padTimestampPart(date.getMinutes()),
+    padTimestampPart(date.getSeconds())
+  ].join(":");
   return `${datePart} ${timePart}`;
 }
 

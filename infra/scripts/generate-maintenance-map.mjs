@@ -8,6 +8,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(scriptDir, "..", "..");
 const outputDir = join(repoRoot, "docs", "maintenance", "generated");
 const generatedNotice = "> 自动生成文件。运行 `npm run docs:maintenance` 更新，不要手工编辑本目录内容。\n";
+const checkOnly = process.argv.includes("--check");
 
 const ignoredDirs = new Set([
   ".git",
@@ -20,42 +21,79 @@ const ignoredDirs = new Set([
   "__pycache__"
 ]);
 
-await mkdir(outputDir, { recursive: true });
-
 const apiRoutes = await collectApiRoutes();
 const webPages = await collectWebPages();
 const packages = await collectPackages();
 const envVars = await collectEnvVars();
+const outputs = [
+  { fileName: "api-routes.md", content: renderApiRoutes(apiRoutes) },
+  { fileName: "web-pages.md", content: renderWebPages(webPages) },
+  { fileName: "package-map.md", content: renderPackageMap(packages) },
+  { fileName: "env-vars.md", content: renderEnvVars(envVars) }
+];
 
-await writeFile(join(outputDir, "api-routes.md"), renderApiRoutes(apiRoutes), "utf8");
-await writeFile(join(outputDir, "web-pages.md"), renderWebPages(webPages), "utf8");
-await writeFile(join(outputDir, "package-map.md"), renderPackageMap(packages), "utf8");
-await writeFile(join(outputDir, "env-vars.md"), renderEnvVars(envVars), "utf8");
+if (checkOnly) {
+  const staleFiles = [];
+  for (const output of outputs) {
+    const target = join(outputDir, output.fileName);
+    let current = "";
+    try {
+      current = await readFile(target, "utf8");
+    } catch {
+      staleFiles.push(output.fileName);
+      continue;
+    }
+    if (current !== output.content) {
+      staleFiles.push(output.fileName);
+    }
+  }
+  if (staleFiles.length) {
+    process.stderr.write(
+      `[maintenance-map] stale generated docs: ${staleFiles.join(", ")}. Run npm run docs:maintenance.\n`
+    );
+    process.exit(1);
+  }
+  process.stdout.write(
+    `[maintenance-map] checked ${apiRoutes.length} api routes, ${webPages.length} pages, ${packages.length} packages, ${envVars.length} env vars\n`
+  );
+} else {
+  await mkdir(outputDir, { recursive: true });
+  for (const output of outputs) {
+    await writeFile(join(outputDir, output.fileName), output.content, "utf8");
+  }
 
-process.stdout.write(
-  `[maintenance-map] generated ${apiRoutes.length} api routes, ${webPages.length} pages, ${packages.length} packages, ${envVars.length} env vars\n`
-);
+  process.stdout.write(
+    `[maintenance-map] generated ${apiRoutes.length} api routes, ${webPages.length} pages, ${packages.length} packages, ${envVars.length} env vars\n`
+  );
+}
 
 async function collectApiRoutes() {
-  const apiMain = join(repoRoot, "apps", "api", "src", "main.ts");
-  const source = await readFile(apiMain, "utf8");
-  const lines = source.split(/\r?\n/);
+  const routeFiles = await collectApiRouteFiles();
   const routes = [];
   const routePattern = /app\.(get|post|patch|delete)\("([^"]+)"/g;
 
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    for (const match of line.matchAll(routePattern)) {
-      routes.push({
-        method: match[1].toUpperCase(),
-        path: match[2],
-        file: toRepoPath(apiMain),
-        line: index + 1
-      });
+  for (const file of routeFiles) {
+    const source = await readFile(file, "utf8");
+    const lines = source.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      for (const match of line.matchAll(routePattern)) {
+        routes.push({
+          method: match[1].toUpperCase(),
+          path: match[2],
+          file: toRepoPath(file),
+          line: index + 1
+        });
+      }
     }
   }
 
   return routes.sort((left, right) => left.path.localeCompare(right.path) || left.method.localeCompare(right.method));
+}
+
+async function collectApiRouteFiles() {
+  const routesDir = join(repoRoot, "apps", "api", "src", "routes");
+  return (await walk(routesDir)).filter((file) => file.endsWith(".ts"));
 }
 
 async function collectWebPages() {

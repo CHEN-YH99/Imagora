@@ -81,8 +81,7 @@ async function checkProductionConfig() {
   if (imageProvider !== "openai") {
     problems.push("IMAGE_PROVIDER_DEFAULT (or legacy AI_PROVIDER) must be openai");
   }
-  const hasAlertChannel =
-    Boolean(process.env.ALERT_WEBHOOK_URL?.trim()) || Boolean(process.env.ALERT_EMAIL_TO?.trim());
+  const hasAlertChannel = Boolean(process.env.ALERT_WEBHOOK_URL?.trim()) || Boolean(process.env.ALERT_EMAIL_TO?.trim());
   if (!hasAlertChannel) {
     problems.push("at least one alert channel is required (ALERT_WEBHOOK_URL or ALERT_EMAIL_TO)");
   }
@@ -110,10 +109,7 @@ async function checkProductionConfig() {
     problems.push(`OPENAI_MAX_RETRIES must be ${maxProductionOpenAiRetries} or less`);
   }
   const generationRunningTimeoutMs = readPositiveNumber("GENERATION_RUNNING_TIMEOUT_MS", problems);
-  if (
-    generationRunningTimeoutMs !== null &&
-    generationRunningTimeoutMs < minProductionGenerationRunningTimeoutMs
-  ) {
+  if (generationRunningTimeoutMs !== null && generationRunningTimeoutMs < minProductionGenerationRunningTimeoutMs) {
     problems.push(`GENERATION_RUNNING_TIMEOUT_MS must be at least ${minProductionGenerationRunningTimeoutMs}`);
   }
   if (openAiTimeoutMs !== null && generationRunningTimeoutMs !== null) {

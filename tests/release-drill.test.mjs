@@ -122,10 +122,7 @@ test("release drill flags production config that explicitly disables email verif
   const summary = JSON.parse(result.stdout);
   const productionConfig = summary.checks.find((check) => check.name === "production-config");
   assert.equal(productionConfig.status, "fail");
-  assert.match(
-    productionConfig.details.join("\n"),
-    /REQUIRE_EMAIL_VERIFICATION must not be disabled in production/
-  );
+  assert.match(productionConfig.details.join("\n"), /REQUIRE_EMAIL_VERIFICATION must not be disabled in production/);
 });
 
 test("release drill accepts production config that leaves email verification at its default", async () => {

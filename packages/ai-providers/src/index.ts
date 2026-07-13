@@ -336,15 +336,18 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     };
   }
 
-  private async requestGeneration(body: {
-    model: string;
-    prompt: string;
-    size: OpenAiImageSize;
-    quality: OpenAiImageQuality;
-    n: number;
-    response_format: "b64_json";
-    output_format: "png";
-  }, quantity: number): Promise<NormalizedOpenAiImageResponse> {
+  private async requestGeneration(
+    body: {
+      model: string;
+      prompt: string;
+      size: OpenAiImageSize;
+      quality: OpenAiImageQuality;
+      n: number;
+      response_format: "b64_json";
+      output_format: "png";
+    },
+    quantity: number
+  ): Promise<NormalizedOpenAiImageResponse> {
     let attempt = 0;
     while (true) {
       try {
@@ -360,15 +363,18 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     }
   }
 
-  private async performRequest(body: {
-    model: string;
-    prompt: string;
-    size: OpenAiImageSize;
-    quality: OpenAiImageQuality;
-    n: number;
-    response_format: "b64_json";
-    output_format: "png";
-  }, quantity: number): Promise<NormalizedOpenAiImageResponse> {
+  private async performRequest(
+    body: {
+      model: string;
+      prompt: string;
+      size: OpenAiImageSize;
+      quality: OpenAiImageQuality;
+      n: number;
+      response_format: "b64_json";
+      output_format: "png";
+    },
+    quantity: number
+  ): Promise<NormalizedOpenAiImageResponse> {
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/images/generations`, {
@@ -823,18 +829,14 @@ async function fetchOpenAiRemoteImage(
       redirect: "manual"
     });
   } catch (error) {
-    throw new ProviderError(
-      "PROVIDER_FAILED",
-      "OpenAI-compatible 图像网关返回了 URL 图片，但后端下载图片失败。",
-      {
-        retryable: true,
-        provider: "openai",
-        details: {
-          url: redactImageUrl(url),
-          error: error instanceof Error ? error.message : String(error)
-        }
+    throw new ProviderError("PROVIDER_FAILED", "OpenAI-compatible 图像网关返回了 URL 图片，但后端下载图片失败。", {
+      retryable: true,
+      provider: "openai",
+      details: {
+        url: redactImageUrl(url),
+        error: error instanceof Error ? error.message : String(error)
       }
-    );
+    });
   }
 
   if (!response.ok) {

@@ -31,6 +31,12 @@ import {
   saveGenerationDraft,
   saveGenerationTaskSnapshot
 } from "../../lib/generateDrafts";
+import {
+  hasTerminalGenerationFailure,
+  isTerminalTaskStatus,
+  resolveGenerationViewState,
+  resolveProcessingPlaceholderCount
+} from "./generationState";
 
 const DEFAULT_PROMPT = "半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节";
 const DEFAULT_NEGATIVE_PROMPT = "低质量、模糊、水印、变形";
@@ -99,21 +105,17 @@ function GenerateExperience() {
   const submittedTaskIdRef = useRef<string | null>(null);
   const submittingGenerationRef = useRef(false);
   const taskSyncSequenceRef = useRef(0);
-  const isGenerationProcessing =
-    images.length === 0 && (loading || task?.status === "PENDING" || task?.status === "RUNNING");
+  const generationViewState = resolveGenerationViewState({ loading, restoringTaskView, task, images });
+  const isGenerationProcessing = generationViewState === "submitting" || generationViewState === "processing";
   const processingAspectRatio = task ? `${task.width} / ${task.height}` : aspectRatio.replace(":", " / ");
   const hasPrompt = prompt.trim().length > 0;
   const terminalGenerationFailureMessage =
-    images.length === 0 &&
-    task &&
-    (task.status === "FAILED" ||
-      task.status === "BLOCKED" ||
-      task.status === "CANCELED" ||
-      Boolean(task?.failureMessage))
-      ? generationFailureMessage(task)
-      : "";
-  const resultStatus = isGenerationProcessing ? (task?.status ?? "RUNNING") : (task?.status ?? "IDLE");
-  const processingPlaceholderCount = Math.max(1, task?.quantity ?? quantity);
+    task && hasTerminalGenerationFailure(task, images) ? generationFailureMessage(task) : "";
+  const resultStatus =
+    generationViewState === "processing" || generationViewState === "submitting" || generationViewState === "restoring"
+      ? (task?.status ?? "RUNNING")
+      : (task?.status ?? "IDLE");
+  const processingPlaceholderCount = resolveProcessingPlaceholderCount(task, quantity);
 
   useEffect(() => {
     if (browserStorageRestoredRef.current || initialTaskId) {
@@ -923,10 +925,6 @@ function generationFailureMessage(task: Task): string {
   }
   const baseMessage = task.failureMessage ?? "生成未成功，请调整提示词或稍后重试。";
   return appendRefundHint(baseMessage, refundedCredits);
-}
-
-function isTerminalTaskStatus(status: Task["status"]): boolean {
-  return status === "SUCCEEDED" || status === "FAILED" || status === "BLOCKED" || status === "CANCELED";
 }
 
 function restoreTaskMessage(task: Task, images: GeneratedImage[]): string {
