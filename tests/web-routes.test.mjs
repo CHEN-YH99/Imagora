@@ -349,7 +349,12 @@ test("generate page shows animated processing placeholders before results arrive
   assert.match(generatePage, /function GenerationProcessingPlaceholder/);
   assert.match(generatePage, /isGenerationProcessing/);
   assert.match(generatePage, /setTask\(null\);/);
-  assert.match(generatePage, /Array\.from\(\{ length: Math\.max\(1, quantity\) \}/);
+  assert.match(generatePage, /const processingPlaceholderCount = Math\.max\(1, task\?\.quantity \?\? quantity\);/);
+  assert.match(generatePage, /Array\.from\(\{ length: processingPlaceholderCount \}/);
+  assert.match(
+    generatePage,
+    /const activeTaskId = readActiveGenerationTaskId\(\);[\s\S]*const cachedSnapshot = readGenerationTaskSnapshot\(activeTaskId\);[\s\S]*applyTaskResult\(cachedSnapshot\);[\s\S]*applyTaskParameters\(cachedSnapshot\.task\);/
+  );
   assert.match(generatePage, /生成占位/);
   assert.match(generatePage, /aria-label=\{`第 \$\{index \+ 1\} 张图片正在生成`\}/);
   assert.match(generatePage, /style=\{\{ aspectRatio: processingAspectRatio/);
@@ -376,9 +381,29 @@ test("generate page does not restore the previous successful task while submitti
     generatePage,
     /submittingGenerationRef\.current = true;[\s\S]*setLoading\(true\);[\s\S]*setTask\(null\);[\s\S]*setImages\(\[\]\);/
   );
+  const submittedTaskBranchIndex = generatePage.indexOf("if (taskId && submittedTaskIdRef.current === taskId) {");
+  const submittingTaskIdGuardIndex = generatePage.indexOf("if (submittingGenerationRef.current && taskId) {");
+  assert.ok(submittedTaskBranchIndex >= 0, "submitted taskId branch must release submitting state");
+  assert.ok(submittingTaskIdGuardIndex >= 0, "stale taskId guard must exist while submitting");
+  assert.ok(
+    submittedTaskBranchIndex < submittingTaskIdGuardIndex,
+    "the newly submitted taskId must be accepted before stale taskId recovery is blocked"
+  );
   assert.match(
     generatePage,
-    /if \(taskId && \(task\?\.id === taskId \|\| submittedTaskIdRef\.current === taskId\)\) \{[\s\S]*submittingGenerationRef\.current = false;/
+    /if \(taskId && submittedTaskIdRef\.current === taskId\) \{[\s\S]*submittingGenerationRef\.current = false;/
+  );
+  assert.match(generatePage, /if \(taskId && task\?\.id === taskId\) \{/);
+  const submittingWithoutTaskIdGuard = generatePage.match(
+    /if \(submittingGenerationRef\.current && !taskId\) \{(?<body>[\s\S]*?)\n    \}/
+  );
+  assert.ok(submittingWithoutTaskIdGuard?.groups?.body, "submitting without taskId guard must exist");
+  assert.match(submittingWithoutTaskIdGuard.groups.body, /setRestoringTaskView\(false\);[\s\S]*return;/);
+  assert.doesNotMatch(submittingWithoutTaskIdGuard.groups.body, /setActiveGenerationTaskId\(null\);/);
+  assert.doesNotMatch(submittingWithoutTaskIdGuard.groups.body, /clearActiveGenerationTaskId\(\);/);
+  assert.match(
+    generatePage,
+    /submittingGenerationRef\.current = true;[\s\S]*taskSyncSequenceRef\.current \+= 1;[\s\S]*setActiveGenerationTaskId\(null\);[\s\S]*clearActiveGenerationTaskId\(\);[\s\S]*router\.replace\(buildGeneratePath/
   );
   assert.doesNotMatch(
     generatePage,

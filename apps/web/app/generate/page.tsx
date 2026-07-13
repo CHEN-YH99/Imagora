@@ -113,6 +113,7 @@ function GenerateExperience() {
       ? generationFailureMessage(task)
       : "";
   const resultStatus = isGenerationProcessing ? (task?.status ?? "RUNNING") : (task?.status ?? "IDLE");
+  const processingPlaceholderCount = Math.max(1, task?.quantity ?? quantity);
 
   useEffect(() => {
     if (browserStorageRestoredRef.current || initialTaskId) {
@@ -135,12 +136,21 @@ function GenerateExperience() {
     const q = searchParams.get("quality");
     const qty = searchParams.get("quantity");
     const m = searchParams.get("model");
+    if (taskId && submittedTaskIdRef.current === taskId) {
+      submittingGenerationRef.current = false;
+      setActiveGenerationTaskId(taskId);
+      setRestoringTaskView(false);
+      return;
+    }
     if (submittingGenerationRef.current && taskId) {
       setRestoringTaskView(false);
       return;
     }
-    if (taskId && (task?.id === taskId || submittedTaskIdRef.current === taskId)) {
-      submittingGenerationRef.current = false;
+    if (submittingGenerationRef.current && !taskId) {
+      setRestoringTaskView(false);
+      return;
+    }
+    if (taskId && task?.id === taskId) {
       setActiveGenerationTaskId(taskId);
       setRestoringTaskView(false);
       return;
@@ -167,6 +177,14 @@ function GenerateExperience() {
         // 避免正在生成的任务在界面上"消失"。指针只在任务进行中存在，终态时已被清除。
         const activeTaskId = readActiveGenerationTaskId();
         if (activeTaskId && restoringTaskIdRef.current !== activeTaskId) {
+          const cachedSnapshot = readGenerationTaskSnapshot(activeTaskId);
+          if (cachedSnapshot) {
+            applyTaskResult(cachedSnapshot);
+            applyTaskParameters(cachedSnapshot.task);
+            setRestoringTaskView(false);
+            void restoreTask(activeTaskId, { preserveVisibleState: true });
+            return;
+          }
           setRestoringTaskView(true);
           void restoreTask(activeTaskId);
           return;
@@ -458,6 +476,10 @@ function GenerateExperience() {
       return;
     }
     submittingGenerationRef.current = true;
+    submittedTaskIdRef.current = null;
+    taskSyncSequenceRef.current += 1;
+    setActiveGenerationTaskId(null);
+    clearActiveGenerationTaskId();
     router.replace(buildGeneratePath({ aspectRatio, quality, quantity, model }), { scroll: false });
     setLoading(true);
     setMessage("");
@@ -489,6 +511,7 @@ function GenerateExperience() {
       submittedTaskIdRef.current = created.task.id;
       setActiveGenerationTaskId(created.task.id);
       saveActiveGenerationTaskId(created.task.id);
+      saveGenerationTaskSnapshot(created.task, []);
       setTask(created.task);
       router.replace(buildGenerateTaskPath(created.task.id), { scroll: false });
       setAccount((value) => (value ? { ...value, balance: created.balanceAfter } : value));
@@ -768,7 +791,7 @@ function GenerateExperience() {
               ) : null}
               <div className="grid gap-3 sm:grid-cols-2">
                 {isGenerationProcessing
-                  ? Array.from({ length: Math.max(1, quantity) }).map((_, index) => (
+                  ? Array.from({ length: processingPlaceholderCount }).map((_, index) => (
                       <GenerationProcessingPlaceholder
                         key={`生成占位-${index}`}
                         index={index}
