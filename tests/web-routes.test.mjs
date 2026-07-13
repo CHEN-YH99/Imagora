@@ -376,5 +376,12 @@ test("generate page does not restore the previous successful task while submitti
     generatePage,
     /submittingGenerationRef\.current = true;[\s\S]*setLoading\(true\);[\s\S]*setTask\(null\);[\s\S]*setImages\(\[\]\);/
   );
-  assert.match(generatePage, /submittedTaskIdRef\.current = created\.task\.id;[\s\S]*submittingGenerationRef\.current = false;/);
+  assert.match(
+    generatePage,
+    /if \(taskId && \(task\?\.id === taskId \|\| submittedTaskIdRef\.current === taskId\)\) \{[\s\S]*submittingGenerationRef\.current = false;/
+  );
+  assert.doesNotMatch(
+    generatePage,
+    /submittedTaskIdRef\.current = created\.task\.id;\s*submittingGenerationRef\.current = false;/
+  );
 });

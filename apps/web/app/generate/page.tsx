@@ -140,6 +140,7 @@ function GenerateExperience() {
       return;
     }
     if (taskId && (task?.id === taskId || submittedTaskIdRef.current === taskId)) {
+      submittingGenerationRef.current = false;
       setActiveGenerationTaskId(taskId);
       setRestoringTaskView(false);
       return;
@@ -486,7 +487,6 @@ function GenerateExperience() {
       });
       restoringTaskIdRef.current = created.task.id;
       submittedTaskIdRef.current = created.task.id;
-      submittingGenerationRef.current = false;
       setActiveGenerationTaskId(created.task.id);
       saveActiveGenerationTaskId(created.task.id);
       setTask(created.task);
@@ -502,7 +502,9 @@ function GenerateExperience() {
       setMessage(generationSubmitErrorMessage(error));
       setMessageTone("danger");
     } finally {
-      submittingGenerationRef.current = false;
+      if (!submittedTaskIdRef.current) {
+        submittingGenerationRef.current = false;
+      }
       setLoading(false);
     }
   }
