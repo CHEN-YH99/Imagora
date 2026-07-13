@@ -99,6 +99,7 @@ const routeMetrics = new Map<string, RouteMetric>();
 const rateLimitBuckets = new Map<string, RateLimitBucket>();
 const captchaChallenges = new Map<string, CaptchaChallenge>();
 const captchaVerifications = new Map<string, CaptchaVerification>();
+const loginAttempts = new Map<string, LoginAttempt>();
 const captchaRequiredRounds = 2;
 const rateLimitWindowMs = envNumber("RATE_LIMIT_WINDOW_MS", 60_000);
 const generationMaintenanceIntervalMs = envNumber("GENERATION_MAINTENANCE_INTERVAL_MS", 60_000);
@@ -461,18 +462,25 @@ app.post("/api/auth/register", async (request, reply) => {
 });
 
 app.post("/api/auth/login", async (request, reply) => {
-  const payload = payloadRecord(request.body);
-  if (
-    !Array.isArray(payload.captchaVerificationIds) ||
-    payload.captchaVerificationIds.length !== captchaRequiredRounds
-  ) {
-    throw new AppError("CAPTCHA_REQUIRED", "Image verification is required", 400);
-  }
   const input = loginSchema.parse(request.body);
-  verifyCaptchaVerifications(input.captchaVerificationIds);
+  // 两条放行路径：① 已有未耗尽的登录尝试令牌 → 扣一次额度直接放行；
+  // ② 无有效令牌 → 必须提交两轮图片验证，验过后签发新令牌。
+  if (consumeLoginAttempt(request)) {
+    // 走令牌路径：本次尝试无需重做图片验证。
+  } else {
+    if (!input.captchaVerificationIds || input.captchaVerificationIds.length !== captchaRequiredRounds) {
+      throw new AppError("CAPTCHA_REQUIRED", "Image verification is required", 400);
+    }
+    verifyCaptchaVerifications(input.captchaVerificationIds);
+    // 签发带额度的尝试令牌并扣掉本次；密码错误时令牌保留，前端可直接重输密码。
+    issueLoginAttempt(reply);
+    consumeLoginAttempt(request);
+  }
+
   return store.update(async (data) => {
     const user = data.users.find((item) => item.email === input.email.toLowerCase());
     if (!user || !verifyPassword(input.password, user.passwordHash)) {
+      // 密码错误：不清令牌，前端凭剩余额度可直接重试而无需重验。
       throw new AppError("UNAUTHORIZED", "Invalid email or password", 401);
     }
     if (user.status !== "ACTIVE") {
@@ -484,6 +492,8 @@ app.post("/api/auth/login", async (request, reply) => {
     user.updatedAt = now;
     data.sessions.push({ token, userId: user.id, createdAt: now, expiresAt: addDays(now, 14) });
     setSessionCookie(reply, token, addDays(now, 14));
+    // 登录成功：作废尝试令牌。
+    clearLoginAttempt(request, reply);
     return envelope(request, { user: publicUser(user) });
   });
 });
@@ -1914,12 +1924,19 @@ app.patch("/api/admin/safety-appeals/:appealId", async (request) => {
   });
 });
 
-startBackgroundGenerationMaintenance();
-startBackgroundAlertEvaluation();
+// 导出 app 供测试用 app.inject 跑全链路。
+export { app };
 
-const port = Number(process.env.API_PORT ?? 4100);
-const host = process.env.API_HOST ?? "127.0.0.1";
-await app.listen({ port, host });
+// API_NO_LISTEN=true 时只构建 app、不监听端口也不起后台定时器，
+// 让测试可以 import 本模块后用 app.inject 而不真正占用端口。
+if (process.env.API_NO_LISTEN !== "true") {
+  startBackgroundGenerationMaintenance();
+  startBackgroundAlertEvaluation();
+
+  const port = Number(process.env.API_PORT ?? 4100);
+  const host = process.env.API_HOST ?? "127.0.0.1";
+  await app.listen({ port, host });
+}
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -1955,6 +1972,12 @@ interface CaptchaChallenge {
 }
 
 interface CaptchaVerification {
+  expiresAt: string;
+  createdAt: string;
+}
+
+interface LoginAttempt {
+  remaining: number;
   expiresAt: string;
   createdAt: string;
 }
@@ -2085,13 +2108,20 @@ const registerSchema = z
     }
   });
 
+// captchaVerificationIds 变为可选：带有效登录尝试令牌重试时前端不再发验证码 ID。
+// 提供时仍必须恰好 captchaRequiredRounds 个，保持首次验证的强度。
 const loginSchema = z
   .object({
     email: emailSchema,
     password: loginPasswordSchema,
-    captchaVerificationIds: z.array(z.string().uuid()).length(captchaRequiredRounds)
+    captchaVerificationIds: z.array(z.string().uuid()).length(captchaRequiredRounds).optional()
   })
   .strict();
+
+// 仅校验图片验证字段：当没有有效登录尝试令牌时，login 必须带齐两轮 verificationId。
+const loginCaptchaSchema = z.object({
+  captchaVerificationIds: z.array(z.string().uuid()).length(captchaRequiredRounds)
+});
 
 const captchaVerifySchema = z
   .object({
@@ -2424,8 +2454,8 @@ function setSessionCookie(reply: FastifyReply, token: string, expiresAt: string)
 }
 
 function clearSessionCookie(reply: FastifyReply): void {
-  reply.header(
-    "set-cookie",
+  appendSetCookie(
+    reply,
     serializeCookie(sessionCookieName(), "", {
       expires: new Date(0),
       httpOnly: true,
@@ -2451,6 +2481,18 @@ function cookieValue(cookieHeader: string | undefined, name: string): string | n
     }
   }
   return null;
+}
+
+// 追加一个 Set-Cookie 头，避免同一响应里多次 reply.header("set-cookie") 相互覆盖
+// （典型场景：登录成功同时要种 session cookie 并清掉登录尝试令牌 cookie）。
+function appendSetCookie(reply: FastifyReply, cookie: string): void {
+  const existing = reply.getHeader("set-cookie");
+  if (existing === undefined) {
+    reply.header("set-cookie", cookie);
+    return;
+  }
+  const list = Array.isArray(existing) ? [...existing.map(String), cookie] : [String(existing), cookie];
+  reply.header("set-cookie", list);
 }
 
 function serializeCookie(
@@ -3690,6 +3732,102 @@ function pruneCaptchaVerifications(): void {
     .slice(0, captchaVerifications.size - maxVerifications);
   for (const [verificationId] of overflow) {
     captchaVerifications.delete(verificationId);
+  }
+}
+
+// 登录尝试令牌名，随会话 cookie 名派生，避免命名冲突。
+function loginAttemptCookieName(): string {
+  return process.env.LOGIN_ATTEMPT_COOKIE_NAME ?? "imagora_login_attempt";
+}
+
+function loginAttemptMaxTries(): number {
+  return envNumber("LOGIN_ATTEMPT_MAX_TRIES", 5);
+}
+
+function loginAttemptTtlMs(): number {
+  return envNumber("LOGIN_ATTEMPT_TTL_SECONDS", 300) * 1000;
+}
+
+// 验证码验过后签发一个带额度的登录尝试令牌，允许在有效期内多次尝试密码而无需重做图片验证。
+function issueLoginAttempt(reply: FastifyReply): void {
+  pruneLoginAttempts();
+  const token = randomUUID();
+  const now = Date.now();
+  const expiresAtMs = now + loginAttemptTtlMs();
+  loginAttempts.set(token, {
+    remaining: loginAttemptMaxTries(),
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    createdAt: new Date(now).toISOString()
+  });
+  appendSetCookie(
+    reply,
+    serializeCookie(loginAttemptCookieName(), token, {
+      expires: new Date(expiresAtMs),
+      httpOnly: true,
+      secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
+      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+      path: "/"
+    })
+  );
+}
+
+// 消费一次登录尝试额度：令牌存在、未过期且有剩余额度则扣 1 并返回 true；否则清理并返回 false。
+function consumeLoginAttempt(request: FastifyRequest): boolean {
+  pruneLoginAttempts();
+  const token = cookieValue(request.headers.cookie, loginAttemptCookieName());
+  if (!token) {
+    return false;
+  }
+  const attempt = loginAttempts.get(token);
+  if (!attempt) {
+    return false;
+  }
+  if (new Date(attempt.expiresAt).getTime() <= Date.now() || attempt.remaining <= 0) {
+    loginAttempts.delete(token);
+    return false;
+  }
+  attempt.remaining -= 1;
+  if (attempt.remaining <= 0) {
+    // 额度用尽：本次仍放行，但令牌作废，下次必须重新做图片验证。
+    loginAttempts.delete(token);
+  }
+  return true;
+}
+
+// 登录成功或需要强制重验时，清掉当前尝试令牌及其 cookie。
+function clearLoginAttempt(request: FastifyRequest, reply: FastifyReply): void {
+  const token = cookieValue(request.headers.cookie, loginAttemptCookieName());
+  if (token) {
+    loginAttempts.delete(token);
+  }
+  appendSetCookie(
+    reply,
+    serializeCookie(loginAttemptCookieName(), "", {
+      expires: new Date(0),
+      httpOnly: true,
+      secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
+      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+      path: "/"
+    })
+  );
+}
+
+function pruneLoginAttempts(): void {
+  const now = Date.now();
+  for (const [token, attempt] of loginAttempts) {
+    if (new Date(attempt.expiresAt).getTime() <= now || attempt.remaining <= 0) {
+      loginAttempts.delete(token);
+    }
+  }
+  const maxAttempts = envNumber("LOGIN_ATTEMPT_MAX_TOKENS", 5000);
+  if (loginAttempts.size <= maxAttempts) {
+    return;
+  }
+  const overflow = [...loginAttempts.entries()]
+    .sort(([, left], [, right]) => left.createdAt.localeCompare(right.createdAt))
+    .slice(0, loginAttempts.size - maxAttempts);
+  for (const [token] of overflow) {
+    loginAttempts.delete(token);
   }
 }
 
