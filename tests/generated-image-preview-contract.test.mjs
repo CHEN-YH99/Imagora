@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const sharedPreviewFile = "apps/web/components/GeneratedImagePreview.tsx";
-const apiMainFile = "apps/api/src/main.ts";
+const apiRateLimitFile = "apps/api/src/rate-limit-runtime.ts";
 const webApiFile = "apps/web/lib/api.ts";
 const previewConsumerFiles = [
   "apps/web/app/favorites/page.tsx",
@@ -105,7 +105,7 @@ test("image detail page surfaces the real aspect ratio in both preview and metad
 });
 
 test("api rate limits full-size preview URL requests separately from downloads", async () => {
-  const content = await readFile(apiMainFile, "utf8");
+  const content = await readFile(apiRateLimitFile, "utf8");
 
   assert.match(content, /id: "preview-url"/);
   assert.match(content, /pattern: \/\^\\\/api\\\/images\\\/\[\^\/\]\+\\\/preview-url\$\//);

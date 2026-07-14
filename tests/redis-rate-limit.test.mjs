@@ -47,6 +47,50 @@ test("redis rate limiter fails closed with a service-unavailable error", async (
   }
 });
 
+test("redis rate limiter fails closed when redis returns an error", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-redis-error-"));
+  const apiPort = 5700 + Math.floor(Math.random() * 200);
+  const redis = createErrorRedisServer();
+  await redis.listen();
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(apiPort),
+    IMAGORA_STORE_PATH: join(dir, "store.json"),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    RATE_LIMIT_PROVIDER: "redis",
+    REDIS_URL: `redis://127.0.0.1:${redis.port}`,
+    REDIS_RATE_LIMIT_TIMEOUT_MS: "1000",
+    RATE_LIMIT_AUTH_MAX: "1"
+  };
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${apiPort}`;
+    await waitForHealth(baseUrl);
+    const response = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        email: "demo@imagora.local",
+        password: "wrong-password"
+      })
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 503);
+    assert.equal(payload.error.code, "RATE_LIMIT_UNAVAILABLE");
+    assert.equal(api.exitCode, null);
+  } finally {
+    api.kill();
+    await redis.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("redis rate limiter shares counters across api instances", async () => {
   const dir = await mkdtemp(join(tmpdir(), "imagora-redis-shared-"));
   const firstApiPort = 5900 + Math.floor(Math.random() * 200);
@@ -188,6 +232,44 @@ function createFakeRedisServer() {
         buffer = buffer.subarray(parsed.bytes);
         socket.write(handleRedisCommand(parsed.args, values));
       }
+    });
+  });
+
+  return {
+    get port() {
+      return port;
+    },
+    listen() {
+      return new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          const address = server.address();
+          assert.ok(address && typeof address === "object");
+          port = address.port;
+          resolve();
+        });
+      });
+    },
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  };
+}
+
+function createErrorRedisServer() {
+  let port = 0;
+  const server = createServer((socket) => {
+    socket.on("data", () => {
+      socket.write("-ERR simulated redis failure\r\n");
     });
   });
 

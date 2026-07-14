@@ -123,3 +123,100 @@ test("api request schemas are isolated from main entrypoint", async () => {
     assert.doesNotMatch(main, new RegExp(`const ${schema}\\b`));
   }
 });
+
+test("api auth and session helpers are isolated from main entrypoint", async () => {
+  const main = await readProjectFile("apps/api/src/main.ts");
+  const authRuntime = await readProjectFile("apps/api/src/auth-runtime.ts");
+
+  assert.match(main, /from "\.\/auth-runtime\.js"/);
+  assert.match(authRuntime, /export function createAuthRuntime\b/);
+  for (const helper of [
+    "allowBearerSessionAuth",
+    "appendSetCookie",
+    "assertEmailVerified",
+    "clearSessionCookie",
+    "cookieValue",
+    "defaultNicknameForEmail",
+    "requireEmailVerification",
+    "serializeCookie",
+    "sessionCookieName",
+    "sessionToken",
+    "setSessionCookie"
+  ]) {
+    assert.match(authRuntime, new RegExp(`export function ${helper}\\b`));
+    assert.doesNotMatch(main, new RegExp(`function ${helper}\\b`));
+  }
+  for (const helper of ["requireAuth", "requireAdmin"]) {
+    assert.match(authRuntime, new RegExp(`async function ${helper}\\b`));
+    assert.doesNotMatch(main, new RegExp(`async function ${helper}\\b`));
+  }
+});
+
+test("api captcha and login attempt helpers are isolated from main entrypoint", async () => {
+  const main = await readProjectFile("apps/api/src/main.ts");
+  const captchaRuntime = await readProjectFile("apps/api/src/captcha-runtime.ts");
+
+  assert.match(main, /from "\.\/captcha-runtime\.js"/);
+  for (const exported of [
+    "captchaChallenges",
+    "captchaOptions",
+    "captchaVerifications",
+    "createCaptchaChallenge",
+    "hashCaptchaAnswer",
+    "issueLoginAttempt",
+    "loginAttempts",
+    "pruneCaptchaChallenges",
+    "pruneCaptchaVerifications",
+    "verifyCaptchaChallenge",
+    "verifyCaptchaVerifications"
+  ]) {
+    assert.match(captchaRuntime, new RegExp(`export (?:const|function) ${exported}\\b`));
+  }
+  for (const helper of [
+    "createCaptchaChallenge",
+    "createCaptchaSvg",
+    "createCaptchaAnimalSvg",
+    "verifyCaptchaChallenge",
+    "verifyCaptchaVerifications",
+    "hashCaptchaAnswer",
+    "normalizeCaptchaSelections",
+    "captchaSelectionKey",
+    "pickUniqueIndexes",
+    "randomNonTargetCaptchaOption",
+    "exposeCaptchaAnswerForTests",
+    "pruneCaptchaChallenges",
+    "pruneCaptchaVerifications",
+    "loginAttemptCookieName",
+    "loginAttemptMaxTries",
+    "loginAttemptTtlMs",
+    "issueLoginAttempt",
+    "consumeLoginAttempt",
+    "clearLoginAttempt",
+    "pruneLoginAttempts"
+  ]) {
+    assert.doesNotMatch(main, new RegExp(`function ${helper}\\b`));
+  }
+});
+
+test("api rate limit helpers are isolated from main entrypoint", async () => {
+  const main = await readProjectFile("apps/api/src/main.ts");
+  const rateLimitRuntime = await readProjectFile("apps/api/src/rate-limit-runtime.ts");
+
+  assert.match(main, /from "\.\/rate-limit-runtime\.js"/);
+  assert.match(rateLimitRuntime, /export function createRateLimitRuntime\b/);
+  for (const exported of ["rateLimitBuckets", "rateLimitRules", "redisFixedWindowIncrement"]) {
+    assert.match(rateLimitRuntime, new RegExp(`export (?:async )?(?:const|function) ${exported}\\b`));
+    assert.doesNotMatch(main, new RegExp(`const ${exported}\\b`));
+  }
+  for (const helper of [
+    "enforceRateLimit",
+    "rateLimitScope",
+    "redisFixedWindowIncrement",
+    "redisCommand",
+    "encodeRedisCommand",
+    "parseRedisResponse",
+    "pruneRateLimitBuckets"
+  ]) {
+    assert.doesNotMatch(main, new RegExp(`function ${helper}\\b`));
+  }
+});

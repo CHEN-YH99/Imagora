@@ -7,6 +7,8 @@ build
 .npm-cache/
 .claude/
 .agents/
+.tmp/
+.tmp-test-store/
 .env
 .env.production
 .env.local
@@ -24,6 +26,7 @@ apps/*/data/
 test-results/
 playwright-report/
 .local-dev-logs/
+runtime-logs/
 *-dev*.log
 .DS_Store
 Thumbs.db

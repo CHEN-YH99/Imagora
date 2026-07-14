@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createConnection } from "node:net";
 import cors from "@fastify/cors";
 import pino from "pino";
 import { getActiveProviderMetadata, quoteImageGeneration, resolveProviderModel } from "@imagora/ai-providers";
@@ -44,7 +43,33 @@ import {
 } from "@imagora/shared";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
+import {
+  allowBearerSessionAuth,
+  assertEmailVerified,
+  clearSessionCookie,
+  createAuthRuntime,
+  defaultNicknameForEmail,
+  requireEmailVerification,
+  sessionToken,
+  setSessionCookie
+} from "./auth-runtime.js";
+import {
+  captchaChallenges,
+  captchaOptions,
+  captchaVerifications,
+  clearLoginAttempt,
+  consumeLoginAttempt,
+  createCaptchaChallenge,
+  exposeCaptchaAnswerForTests,
+  hashCaptchaAnswer,
+  issueLoginAttempt,
+  pruneCaptchaChallenges,
+  pruneCaptchaVerifications,
+  verifyCaptchaChallenge,
+  verifyCaptchaVerifications
+} from "./captcha-runtime.js";
 import { validateProductionConfig } from "./production-config.js";
+import { createRateLimitRuntime } from "./rate-limit-runtime.js";
 import { registerApiRoutes } from "./routes/index.js";
 import type { ApiRouteContext } from "./routes/index.js";
 import {
@@ -114,6 +139,8 @@ const isProduction = process.env.NODE_ENV === "production";
 validateProductionConfig({ allowBearerSessionAuth, isProduction, requireEmailVerification });
 
 const store = createStore();
+const { requireAuth, requireAdmin } = createAuthRuntime(store);
+const { enforceRateLimit } = createRateLimitRuntime(store);
 const mailer = createMailer();
 const alertNotifier = createAlertNotifier({ mailer });
 const safetyProvider = createSafetyProvider();
@@ -146,82 +173,7 @@ const app = Fastify({
 });
 const serviceStartedAt = Date.now();
 const routeMetrics = new Map<string, RouteMetric>();
-const rateLimitBuckets = new Map<string, RateLimitBucket>();
-const captchaChallenges = new Map<string, CaptchaChallenge>();
-const captchaVerifications = new Map<string, CaptchaVerification>();
-const loginAttempts = new Map<string, LoginAttempt>();
-const rateLimitWindowMs = envNumber("RATE_LIMIT_WINDOW_MS", 60_000);
 const generationMaintenanceIntervalMs = envNumber("GENERATION_MAINTENANCE_INTERVAL_MS", 60_000);
-const rateLimitRules: RateLimitRule[] = [
-  {
-    id: "auth-captcha",
-    method: "GET",
-    pattern: /^\/api\/auth\/captcha$/,
-    max: envNumber("RATE_LIMIT_CAPTCHA_MAX", 60)
-  },
-  { id: "auth-login", method: "POST", pattern: /^\/api\/auth\/login$/, max: envNumber("RATE_LIMIT_AUTH_MAX", 20) },
-  {
-    id: "auth-register",
-    method: "POST",
-    pattern: /^\/api\/auth\/register$/,
-    max: envNumber("RATE_LIMIT_AUTH_MAX", 20)
-  },
-  {
-    id: "auth-password-reset-request",
-    method: "POST",
-    pattern: /^\/api\/auth\/request-password-reset$/,
-    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
-  },
-  {
-    id: "auth-password-reset",
-    method: "POST",
-    pattern: /^\/api\/auth\/reset-password$/,
-    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
-  },
-  {
-    id: "auth-resend-verification",
-    method: "POST",
-    pattern: /^\/api\/auth\/resend-verification$/,
-    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5),
-    keyBy: "user"
-  },
-  {
-    id: "auth-change-password",
-    method: "POST",
-    pattern: /^\/api\/auth\/change-password$/,
-    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
-  },
-  {
-    id: "auth-change-email",
-    method: "POST",
-    pattern: /^\/api\/auth\/change-email$/,
-    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
-  },
-  {
-    id: "generation-create",
-    method: "POST",
-    pattern: /^\/api\/generation\/tasks$/,
-    max: envNumber("RATE_LIMIT_GENERATION_MAX", 30)
-  },
-  {
-    id: "reference-upload",
-    method: "POST",
-    pattern: /^\/api\/uploads\/reference-images$/,
-    max: envNumber("RATE_LIMIT_UPLOAD_MAX", 20)
-  },
-  {
-    id: "download-url",
-    method: "POST",
-    pattern: /^\/api\/images\/[^/]+\/download-url$/,
-    max: envNumber("RATE_LIMIT_DOWNLOAD_MAX", 60)
-  },
-  {
-    id: "preview-url",
-    method: "POST",
-    pattern: /^\/api\/images\/[^/]+\/preview-url$/,
-    max: envNumber("RATE_LIMIT_PREVIEW_MAX", envNumber("RATE_LIMIT_DOWNLOAD_MAX", 60))
-  }
-];
 
 app.removeContentTypeParser("application/json");
 app.addContentTypeParser("application/json", { parseAs: "string" }, (request, body, done) => {
@@ -383,55 +335,6 @@ interface RouteMetric {
   maxDurationMs: number;
 }
 
-interface RateLimitBucket {
-  count: number;
-  resetAt: number;
-}
-
-interface RateLimitRule {
-  id: string;
-  method: string;
-  pattern: RegExp;
-  max: number;
-  // 限流维度：默认按 IP；登录态接口应按 user，避免换 IP 绕过 / 同 NAT 出口互相误伤。
-  keyBy?: "ip" | "user";
-}
-
-interface CaptchaChallenge {
-  answerHash: string;
-  expiresAt: string;
-  createdAt: string;
-}
-
-interface CaptchaVerification {
-  expiresAt: string;
-  createdAt: string;
-}
-
-interface LoginAttempt {
-  remaining: number;
-  expiresAt: string;
-  createdAt: string;
-}
-
-interface CaptchaSelection {
-  x: number;
-  y: number;
-}
-
-interface CaptchaOption {
-  id: string;
-  label: string;
-  fill: string;
-  accent: string;
-}
-
-interface CaptchaTile {
-  option: CaptchaOption;
-  row: number;
-  column: number;
-}
-
 type FeatureName = "generation" | "payments" | "uploads" | "downloads";
 
 interface FeatureFlags {
@@ -533,150 +436,6 @@ async function enqueueGenerationTaskOrFail(taskId: string, userId: string, reque
       taskId
     });
   }
-}
-
-function sessionToken(request: FastifyRequest, optional = false): string {
-  const cookieToken = cookieValue(request.headers.cookie, sessionCookieName());
-  if (cookieToken) {
-    return cookieToken;
-  }
-  const authorization = request.headers.authorization;
-  if (authorization?.startsWith("Bearer ")) {
-    if (allowBearerSessionAuth()) {
-      return authorization.slice("Bearer ".length);
-    }
-    throw new AppError("UNAUTHORIZED", "Bearer session auth is disabled", 401);
-  }
-  if (optional) {
-    return "";
-  }
-  throw new AppError("UNAUTHORIZED", "Missing session token", 401);
-}
-
-function allowBearerSessionAuth(): boolean {
-  return envBool("ALLOW_BEARER_SESSION_AUTH", false);
-}
-
-async function requireAuth(request: FastifyRequest): Promise<{ data: StoreData; user: User }> {
-  const token = sessionToken(request);
-  const data = await store.read();
-  const now = new Date();
-  data.sessions = data.sessions.filter((session) => new Date(session.expiresAt) > now);
-  const session = data.sessions.find((item) => item.token === token);
-  if (!session) {
-    throw new AppError("UNAUTHORIZED", "Invalid or expired session", 401);
-  }
-  const user = data.users.find((item) => item.id === session.userId);
-  if (!user || user.status !== "ACTIVE") {
-    throw new AppError("FORBIDDEN", "User is not active", 403);
-  }
-  return { data, user };
-}
-
-// 邮箱验证门槛：防止一次性邮箱注册即领 120 积分直接消耗。
-// 开发/测试默认关闭（无痛调试）；生产默认开启，且 validateProductionConfig
-// 会拒绝任何显式关闭（REQUIRE_EMAIL_VERIFICATION=false）的生产配置。
-function requireEmailVerification(): boolean {
-  return envBool("REQUIRE_EMAIL_VERIFICATION", process.env.NODE_ENV === "production");
-}
-
-function assertEmailVerified(user: User): void {
-  if (!requireEmailVerification()) {
-    return;
-  }
-  if (!user.emailVerifiedAt) {
-    throw new AppError("EMAIL_NOT_VERIFIED", "Email verification is required before generating images", 403);
-  }
-}
-
-function setSessionCookie(reply: FastifyReply, token: string, expiresAt: string): void {
-  const sessionCookie = serializeCookie(sessionCookieName(), token, {
-    expires: new Date(expiresAt),
-    httpOnly: true,
-    secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-    sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
-    path: "/"
-  });
-  const existing = reply.getHeader("set-cookie");
-  if (existing === undefined) {
-    reply.header("set-cookie", sessionCookie);
-    return;
-  }
-  const existingCookies = Array.isArray(existing) ? existing.map(String) : [String(existing)];
-  reply.header("set-cookie", [
-    sessionCookie,
-    ...existingCookies.filter((cookie) => !cookie.startsWith(`${sessionCookieName()}=`))
-  ]);
-}
-
-function clearSessionCookie(reply: FastifyReply): void {
-  appendSetCookie(
-    reply,
-    serializeCookie(sessionCookieName(), "", {
-      expires: new Date(0),
-      httpOnly: true,
-      secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
-      path: "/"
-    })
-  );
-}
-
-function sessionCookieName(): string {
-  return process.env.SESSION_COOKIE_NAME ?? "imagora_session";
-}
-
-function cookieValue(cookieHeader: string | undefined, name: string): string | null {
-  if (!cookieHeader) {
-    return null;
-  }
-  for (const part of cookieHeader.split(";")) {
-    const [rawKey, ...rawValue] = part.trim().split("=");
-    if (rawKey === name) {
-      return decodeURIComponent(rawValue.join("="));
-    }
-  }
-  return null;
-}
-
-// 追加一个 Set-Cookie 头，避免同一响应里多次 reply.header("set-cookie") 相互覆盖
-// （典型场景：登录成功同时要种 session cookie 并清掉登录尝试令牌 cookie）。
-function appendSetCookie(reply: FastifyReply, cookie: string): void {
-  const existing = reply.getHeader("set-cookie");
-  if (existing === undefined) {
-    reply.header("set-cookie", cookie);
-    return;
-  }
-  const list = Array.isArray(existing) ? [...existing.map(String), cookie] : [String(existing), cookie];
-  reply.header("set-cookie", list);
-}
-
-function serializeCookie(
-  name: string,
-  value: string,
-  options: { expires: Date; httpOnly: boolean; secure: boolean; sameSite: string; path: string }
-): string {
-  const segments = [
-    `${name}=${encodeURIComponent(value)}`,
-    `Expires=${options.expires.toUTCString()}`,
-    `Path=${options.path}`,
-    `SameSite=${options.sameSite}`
-  ];
-  if (options.httpOnly) {
-    segments.push("HttpOnly");
-  }
-  if (options.secure) {
-    segments.push("Secure");
-  }
-  return segments.join("; ");
-}
-
-async function requireAdmin(request: FastifyRequest): Promise<{ data: StoreData; user: User }> {
-  const session = await requireAuth(request);
-  if (session.user.role !== "ADMIN") {
-    throw new AppError("FORBIDDEN", "Admin role is required", 403);
-  }
-  return session;
 }
 
 function quote(input: {
@@ -1686,322 +1445,6 @@ function assertMockPaymentAllowed(): void {
   }
 }
 
-const captchaColumns = 4;
-const captchaRows = 3;
-const captchaOptions: CaptchaOption[] = [
-  { id: "cow", label: "奶牛", fill: "#f8fafc", accent: "#0f172a" },
-  { id: "duck", label: "鸭子", fill: "#fef3c7", accent: "#f59e0b" },
-  { id: "panda", label: "熊猫", fill: "#f8fafc", accent: "#111827" },
-  { id: "rabbit", label: "兔子", fill: "#ffe4e6", accent: "#fb7185" },
-  { id: "fox", label: "狐狸", fill: "#ffedd5", accent: "#f97316" },
-  { id: "seal", label: "海豹", fill: "#e0f2fe", accent: "#0284c7" },
-  { id: "cat", label: "猫", fill: "#fef9c3", accent: "#ca8a04" },
-  { id: "dog", label: "狗", fill: "#f5e8d8", accent: "#92400e" },
-  { id: "owl", label: "猫头鹰", fill: "#ede9fe", accent: "#7c3aed" },
-  { id: "turtle", label: "乌龟", fill: "#dcfce7", accent: "#16a34a" },
-  { id: "sheep", label: "绵羊", fill: "#f8fafc", accent: "#64748b" },
-  { id: "squirrel", label: "松鼠", fill: "#fed7aa", accent: "#ea580c" }
-];
-
-function createCaptchaChallenge(): {
-  answer: CaptchaSelection[];
-  imageSvg: string;
-  targetLabel: string;
-} {
-  const target = captchaOptions[Math.floor(Math.random() * captchaOptions.length)] ?? captchaOptions[0];
-  const targetCount = 2 + Math.floor(Math.random() * 3);
-  const targetIndexes = pickUniqueIndexes(captchaColumns * captchaRows, targetCount);
-  const tiles: CaptchaTile[] = [];
-  for (let index = 0; index < captchaColumns * captchaRows; index += 1) {
-    const option = targetIndexes.has(index) ? target : randomNonTargetCaptchaOption(target.id);
-    tiles.push({
-      option,
-      row: Math.floor(index / captchaColumns),
-      column: index % captchaColumns
-    });
-  }
-  const answer = [...targetIndexes]
-    .sort((left, right) => left - right)
-    .map((index) => ({
-      x: ((index % captchaColumns) + 0.5) / captchaColumns,
-      y: (Math.floor(index / captchaColumns) + 0.5) / captchaRows
-    }));
-
-  return {
-    answer,
-    imageSvg: createCaptchaSvg(tiles, target.label),
-    targetLabel: target.label
-  };
-}
-
-function createCaptchaSvg(tiles: CaptchaTile[], targetLabel: string): string {
-  const width = 360;
-  const height = 260;
-  const cardWidth = 74;
-  const cardHeight = 62;
-  const gap = 10;
-  const offsetX = 18;
-  const offsetY = 48;
-  const tileSvg = tiles
-    .map((tile, index) => {
-      const x = offsetX + tile.column * (cardWidth + gap);
-      const y = offsetY + tile.row * (cardHeight + gap);
-      const noise = index % 2 === 0 ? "#dbeafe" : "#ccfbf1";
-      return `<g><rect x="${x}" y="${y}" width="${cardWidth}" height="${cardHeight}" rx="12" fill="${tile.option.fill}" stroke="#94a3b8" stroke-width="1.5"/>${createCaptchaAnimalSvg(tile.option, x, y)}<circle cx="${x + 10}" cy="${y + 10}" r="2" fill="${noise}"/></g>`;
-    })
-    .join("");
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="请点击图中所有${escapeXml(targetLabel)}"><rect width="${width}" height="${height}" rx="18" fill="#f8fafc"/><rect x="14" y="14" width="332" height="24" rx="12" fill="#0f766e"/><text x="28" y="31" fill="#ffffff" font-family="Arial, sans-serif" font-size="14" font-weight="700">请点击图中所有${escapeXml(targetLabel)}</text><path d="M14 236 C75 214, 134 250, 206 226 S300 214, 346 238" stroke="#99f6e4" stroke-width="3" fill="none" opacity="0.75"/>${tileSvg}</svg>`;
-}
-
-function createCaptchaAnimalSvg(option: CaptchaOption, x: number, y: number): string {
-  const accent = option.accent;
-  const fill = option.fill;
-  switch (option.id) {
-    case "cow":
-      return `<g><ellipse cx="${x + 37}" cy="${y + 35}" rx="24" ry="15" fill="#f8fafc" stroke="${accent}" stroke-width="3"/><path d="M${x + 20} ${y + 22} L${x + 14} ${y + 12} M${x + 54} ${y + 22} L${x + 60} ${y + 12}" stroke="${accent}" stroke-width="3" stroke-linecap="round"/><circle cx="${x + 29}" cy="${y + 32}" r="4" fill="${accent}"/><circle cx="${x + 45}" cy="${y + 32}" r="4" fill="${accent}"/><path d="M${x + 28} ${y + 43} Q${x + 37} ${y + 49}, ${x + 46} ${y + 43}" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="round"/></g>`;
-    case "duck":
-      return `<g><ellipse cx="${x + 37}" cy="${y + 39}" rx="25" ry="14" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 31}" cy="${y + 25}" r="13" fill="${fill}" stroke="${accent}" stroke-width="3"/><path d="M${x + 41} ${y + 26} L${x + 58} ${y + 21} L${x + 48} ${y + 31} Z" fill="#fb923c"/><circle cx="${x + 29}" cy="${y + 23}" r="3" fill="#0f172a"/></g>`;
-    case "panda":
-      return `<g><circle cx="${x + 25}" cy="${y + 20}" r="9" fill="${accent}"/><circle cx="${x + 49}" cy="${y + 20}" r="9" fill="${accent}"/><circle cx="${x + 37}" cy="${y + 34}" r="23" fill="#f8fafc" stroke="${accent}" stroke-width="3"/><ellipse cx="${x + 29}" cy="${y + 33}" rx="7" ry="9" fill="${accent}"/><ellipse cx="${x + 45}" cy="${y + 33}" rx="7" ry="9" fill="${accent}"/><circle cx="${x + 37}" cy="${y + 42}" r="4" fill="${accent}"/></g>`;
-    case "rabbit":
-      return `<g><ellipse cx="${x + 29}" cy="${y + 18}" rx="7" ry="17" fill="${fill}" stroke="${accent}" stroke-width="3" transform="rotate(-12 ${x + 29} ${y + 18})"/><ellipse cx="${x + 46}" cy="${y + 18}" rx="7" ry="17" fill="${fill}" stroke="${accent}" stroke-width="3" transform="rotate(12 ${x + 46} ${y + 18})"/><circle cx="${x + 37}" cy="${y + 39}" r="20" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 30}" cy="${y + 36}" r="3" fill="${accent}"/><circle cx="${x + 44}" cy="${y + 36}" r="3" fill="${accent}"/><path d="M${x + 31} ${y + 45} Q${x + 37} ${y + 50}, ${x + 43} ${y + 45}" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="round"/></g>`;
-    case "fox":
-      return `<g><path d="M${x + 16} ${y + 24} L${x + 25} ${y + 10} L${x + 34} ${y + 26} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><path d="M${x + 58} ${y + 24} L${x + 49} ${y + 10} L${x + 40} ${y + 26} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><path d="M${x + 15} ${y + 28} Q${x + 37} ${y + 8}, ${x + 59} ${y + 28} Q${x + 51} ${y + 53}, ${x + 37} ${y + 54} Q${x + 23} ${y + 53}, ${x + 15} ${y + 28} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 30}" cy="${y + 34}" r="3" fill="${accent}"/><circle cx="${x + 44}" cy="${y + 34}" r="3" fill="${accent}"/><path d="M${x + 37} ${y + 40} L${x + 31} ${y + 47} L${x + 43} ${y + 47} Z" fill="#ffffff"/></g>`;
-    case "cat":
-      return `<g><path d="M${x + 19} ${y + 25} L${x + 27} ${y + 11} L${x + 35} ${y + 26} M${x + 55} ${y + 25} L${x + 47} ${y + 11} L${x + 39} ${y + 26}" fill="none" stroke="${accent}" stroke-width="3" stroke-linejoin="round"/><circle cx="${x + 37}" cy="${y + 37}" r="20" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 30}" cy="${y + 34}" r="3" fill="${accent}"/><circle cx="${x + 44}" cy="${y + 34}" r="3" fill="${accent}"/><path d="M${x + 24} ${y + 43} H${x + 14} M${x + 50} ${y + 43} H${x + 60} M${x + 37} ${y + 40} V${y + 43}" stroke="${accent}" stroke-width="2" stroke-linecap="round"/></g>`;
-    case "dog":
-      return `<g><ellipse cx="${x + 24}" cy="${y + 29}" rx="9" ry="15" fill="${fill}" stroke="${accent}" stroke-width="3" transform="rotate(22 ${x + 24} ${y + 29})"/><ellipse cx="${x + 50}" cy="${y + 29}" rx="9" ry="15" fill="${fill}" stroke="${accent}" stroke-width="3" transform="rotate(-22 ${x + 50} ${y + 29})"/><circle cx="${x + 37}" cy="${y + 38}" r="20" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 31}" cy="${y + 35}" r="3" fill="${accent}"/><circle cx="${x + 43}" cy="${y + 35}" r="3" fill="${accent}"/><ellipse cx="${x + 37}" cy="${y + 44}" rx="7" ry="5" fill="${accent}"/></g>`;
-    case "owl":
-      return `<g><path d="M${x + 16} ${y + 22} Q${x + 37} ${y + 7}, ${x + 58} ${y + 22} V${y + 44} Q${x + 37} ${y + 60}, ${x + 16} ${y + 44} Z" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 29}" cy="${y + 32}" r="8" fill="#ffffff" stroke="${accent}" stroke-width="3"/><circle cx="${x + 45}" cy="${y + 32}" r="8" fill="#ffffff" stroke="${accent}" stroke-width="3"/><path d="M${x + 37} ${y + 39} L${x + 32} ${y + 47} H${x + 42} Z" fill="#f59e0b"/></g>`;
-    case "turtle":
-      return `<g><ellipse cx="${x + 37}" cy="${y + 38}" rx="23" ry="17" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 61}" cy="${y + 36}" r="8" fill="${fill}" stroke="${accent}" stroke-width="3"/><path d="M${x + 23} ${y + 32} Q${x + 37} ${y + 22}, ${x + 51} ${y + 32} M${x + 23} ${y + 44} Q${x + 37} ${y + 54}, ${x + 51} ${y + 44}" stroke="${accent}" stroke-width="2" fill="none"/><circle cx="${x + 64}" cy="${y + 34}" r="2" fill="${accent}"/></g>`;
-    case "sheep":
-      return `<g><circle cx="${x + 24}" cy="${y + 32}" r="10" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 36}" cy="${y + 27}" r="12" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 49}" cy="${y + 33}" r="11" fill="${fill}" stroke="${accent}" stroke-width="3"/><ellipse cx="${x + 38}" cy="${y + 45}" rx="17" ry="11" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 33}" cy="${y + 43}" r="2.5" fill="${accent}"/><circle cx="${x + 43}" cy="${y + 43}" r="2.5" fill="${accent}"/></g>`;
-    case "squirrel":
-      return `<g><path d="M${x + 51} ${y + 42} C${x + 68} ${y + 28}, ${x + 55} ${y + 8}, ${x + 42} ${y + 20}" fill="none" stroke="${accent}" stroke-width="8" stroke-linecap="round"/><ellipse cx="${x + 35}" cy="${y + 39}" rx="18" ry="16" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 25}" cy="${y + 25}" r="10" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 22}" cy="${y + 23}" r="2.5" fill="${accent}"/></g>`;
-    case "seal":
-    default:
-      return `<g><ellipse cx="${x + 38}" cy="${y + 38}" rx="27" ry="15" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 32}" cy="${y + 28}" r="12" fill="${fill}" stroke="${accent}" stroke-width="3"/><circle cx="${x + 28}" cy="${y + 27}" r="3" fill="${accent}"/><path d="M${x + 36} ${y + 32} C${x + 48} ${y + 29}, ${x + 54} ${y + 33}, ${x + 61} ${y + 40}" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="round"/><path d="M${x + 17} ${y + 43} Q${x + 8} ${y + 52}, ${x + 24} ${y + 51}" fill="${fill}" stroke="${accent}" stroke-width="3"/></g>`;
-  }
-}
-
-function verifyCaptchaChallenge(captchaId: string, captchaSelections: CaptchaSelection[]): void {
-  pruneCaptchaChallenges();
-  const challenge = captchaChallenges.get(captchaId);
-  captchaChallenges.delete(captchaId);
-  if (!challenge || new Date(challenge.expiresAt).getTime() <= Date.now()) {
-    throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
-  }
-  const normalizedSelections = normalizeCaptchaSelections(captchaSelections);
-  if (normalizedSelections.length !== captchaSelections.length) {
-    throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
-  }
-  const actualHash = hashCaptchaAnswer(captchaSelections);
-  if (actualHash !== challenge.answerHash) {
-    throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
-  }
-}
-
-function verifyCaptchaVerifications(verificationIds: string[]): void {
-  pruneCaptchaVerifications();
-  const uniqueIds = new Set(verificationIds);
-  if (uniqueIds.size !== captchaRequiredRounds) {
-    throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
-  }
-  const verifications = verificationIds.map((verificationId) => ({
-    verificationId,
-    verification: captchaVerifications.get(verificationId)
-  }));
-  for (const { verificationId } of verifications) {
-    captchaVerifications.delete(verificationId);
-  }
-  const now = Date.now();
-  if (verifications.some(({ verification }) => !verification || new Date(verification.expiresAt).getTime() <= now)) {
-    throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
-  }
-}
-
-function hashCaptchaAnswer(answer: CaptchaSelection[]): string {
-  return createHash("sha256").update(normalizeCaptchaSelections(answer).join("|")).digest("hex");
-}
-
-function normalizeCaptchaSelections(selections: CaptchaSelection[]): string[] {
-  return [...new Set(selections.map(captchaSelectionKey))].sort();
-}
-
-function captchaSelectionKey(selection: CaptchaSelection): string {
-  const column = Math.min(captchaColumns - 1, Math.max(0, Math.floor(selection.x * captchaColumns)));
-  const row = Math.min(captchaRows - 1, Math.max(0, Math.floor(selection.y * captchaRows)));
-  return `${row}:${column}`;
-}
-
-function pickUniqueIndexes(count: number, targetCount: number): Set<number> {
-  const indexes = new Set<number>();
-  while (indexes.size < targetCount) {
-    indexes.add(Math.floor(Math.random() * count));
-  }
-  return indexes;
-}
-
-function randomNonTargetCaptchaOption(targetId: string): CaptchaOption {
-  const options = captchaOptions.filter((option) => option.id !== targetId);
-  return options[Math.floor(Math.random() * options.length)] ?? captchaOptions[0];
-}
-
-function exposeCaptchaAnswerForTests(): boolean {
-  return process.env.NODE_ENV !== "production" && envBool("EXPOSE_CAPTCHA_ANSWER_FOR_TESTS", false);
-}
-
-function pruneCaptchaChallenges(): void {
-  const now = Date.now();
-  for (const [captchaId, challenge] of captchaChallenges) {
-    if (new Date(challenge.expiresAt).getTime() <= now) {
-      captchaChallenges.delete(captchaId);
-    }
-  }
-  const maxChallenges = envNumber("CAPTCHA_MAX_CHALLENGES", 5000);
-  if (captchaChallenges.size <= maxChallenges) {
-    return;
-  }
-  const overflow = [...captchaChallenges.entries()]
-    .sort(([, left], [, right]) => left.createdAt.localeCompare(right.createdAt))
-    .slice(0, captchaChallenges.size - maxChallenges);
-  for (const [captchaId] of overflow) {
-    captchaChallenges.delete(captchaId);
-  }
-}
-
-function pruneCaptchaVerifications(): void {
-  const now = Date.now();
-  for (const [verificationId, verification] of captchaVerifications) {
-    if (new Date(verification.expiresAt).getTime() <= now) {
-      captchaVerifications.delete(verificationId);
-    }
-  }
-  const maxVerifications = envNumber("CAPTCHA_MAX_VERIFICATIONS", 5000);
-  if (captchaVerifications.size <= maxVerifications) {
-    return;
-  }
-  const overflow = [...captchaVerifications.entries()]
-    .sort(([, left], [, right]) => left.createdAt.localeCompare(right.createdAt))
-    .slice(0, captchaVerifications.size - maxVerifications);
-  for (const [verificationId] of overflow) {
-    captchaVerifications.delete(verificationId);
-  }
-}
-
-// 登录尝试令牌名，随会话 cookie 名派生，避免命名冲突。
-function loginAttemptCookieName(): string {
-  return process.env.LOGIN_ATTEMPT_COOKIE_NAME ?? "imagora_login_attempt";
-}
-
-function loginAttemptMaxTries(): number {
-  return envNumber("LOGIN_ATTEMPT_MAX_TRIES", 5);
-}
-
-function loginAttemptTtlMs(): number {
-  return envNumber("LOGIN_ATTEMPT_TTL_SECONDS", 300) * 1000;
-}
-
-// 验证码验过后签发一个带额度的登录尝试令牌，允许在有效期内多次尝试密码而无需重做图片验证。
-function issueLoginAttempt(reply: FastifyReply): void {
-  pruneLoginAttempts();
-  const token = randomUUID();
-  const now = Date.now();
-  const expiresAtMs = now + loginAttemptTtlMs();
-  loginAttempts.set(token, {
-    remaining: loginAttemptMaxTries(),
-    expiresAt: new Date(expiresAtMs).toISOString(),
-    createdAt: new Date(now).toISOString()
-  });
-  appendSetCookie(
-    reply,
-    serializeCookie(loginAttemptCookieName(), token, {
-      expires: new Date(expiresAtMs),
-      httpOnly: true,
-      secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
-      path: "/"
-    })
-  );
-}
-
-// 消费一次登录尝试额度：令牌存在、未过期且有剩余额度则扣 1 并返回 true；否则清理并返回 false。
-function consumeLoginAttempt(request: FastifyRequest): boolean {
-  pruneLoginAttempts();
-  const token = cookieValue(request.headers.cookie, loginAttemptCookieName());
-  if (!token) {
-    return false;
-  }
-  const attempt = loginAttempts.get(token);
-  if (!attempt) {
-    return false;
-  }
-  if (new Date(attempt.expiresAt).getTime() <= Date.now() || attempt.remaining <= 0) {
-    loginAttempts.delete(token);
-    return false;
-  }
-  attempt.remaining -= 1;
-  if (attempt.remaining <= 0) {
-    // 额度用尽：本次仍放行，但令牌作废，下次必须重新做图片验证。
-    loginAttempts.delete(token);
-  }
-  return true;
-}
-
-// 登录成功或需要强制重验时，清掉当前尝试令牌及其 cookie。
-function clearLoginAttempt(request: FastifyRequest, reply: FastifyReply): void {
-  const token = cookieValue(request.headers.cookie, loginAttemptCookieName());
-  if (token) {
-    loginAttempts.delete(token);
-  }
-  appendSetCookie(
-    reply,
-    serializeCookie(loginAttemptCookieName(), "", {
-      expires: new Date(0),
-      httpOnly: true,
-      secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
-      path: "/"
-    })
-  );
-}
-
-function pruneLoginAttempts(): void {
-  const now = Date.now();
-  for (const [token, attempt] of loginAttempts) {
-    if (new Date(attempt.expiresAt).getTime() <= now || attempt.remaining <= 0) {
-      loginAttempts.delete(token);
-    }
-  }
-  const maxAttempts = envNumber("LOGIN_ATTEMPT_MAX_TOKENS", 5000);
-  if (loginAttempts.size <= maxAttempts) {
-    return;
-  }
-  const overflow = [...loginAttempts.entries()]
-    .sort(([, left], [, right]) => left.createdAt.localeCompare(right.createdAt))
-    .slice(0, loginAttempts.size - maxAttempts);
-  for (const [token] of overflow) {
-    loginAttempts.delete(token);
-  }
-}
-
-function defaultNicknameForEmail(email: string): string {
-  const localPart = email.split("@")[0] ?? "";
-  const cleaned = localPart.replace(/[^a-z0-9_-]/gi, "").slice(0, 32);
-  return cleaned || "Imagora 用户";
-}
-
-function escapeXml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
 function applySecurityHeaders(reply: FastifyReply): void {
   reply.header("x-content-type-options", "nosniff");
   reply.header("x-frame-options", "DENY");
@@ -2073,176 +1516,6 @@ function localDevelopmentOriginAlias(origin: string): string | null {
     return null;
   }
   return null;
-}
-
-async function enforceRateLimit(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  const path = pathOnly(request.url);
-  const rule = rateLimitRules.find((item) => item.method === request.method && item.pattern.test(path));
-  if (!rule || rule.max <= 0) {
-    return;
-  }
-
-  const now = Date.now();
-  if (rateLimitBuckets.size > 5000) {
-    pruneRateLimitBuckets(now);
-  }
-
-  const key = `${rule.id}:${await rateLimitScope(request, rule)}`;
-  if ((process.env.RATE_LIMIT_PROVIDER ?? "memory") === "redis") {
-    let redisResult: { count: number; resetAt: number };
-    try {
-      redisResult = await redisFixedWindowIncrement(key, rateLimitWindowMs);
-    } catch (error) {
-      request.log.error({ error, rateLimitRule: rule.id }, "Redis rate limiter unavailable");
-      throw new AppError("RATE_LIMIT_UNAVAILABLE", "Rate limit service is unavailable", 503);
-    }
-    reply.header("x-ratelimit-limit", String(rule.max));
-    reply.header("x-ratelimit-remaining", String(Math.max(rule.max - redisResult.count, 0)));
-    reply.header("x-ratelimit-reset", new Date(redisResult.resetAt).toISOString());
-    if (redisResult.count > rule.max) {
-      throw new AppError("RATE_LIMITED", "Too many requests, please retry later", 429, {
-        limit: rule.max,
-        resetAt: new Date(redisResult.resetAt).toISOString()
-      });
-    }
-    return;
-  }
-
-  const bucket = rateLimitBuckets.get(key);
-  const nextBucket =
-    !bucket || bucket.resetAt <= now
-      ? { count: 1, resetAt: now + rateLimitWindowMs }
-      : { ...bucket, count: bucket.count + 1 };
-  rateLimitBuckets.set(key, nextBucket);
-
-  reply.header("x-ratelimit-limit", String(rule.max));
-  reply.header("x-ratelimit-remaining", String(Math.max(rule.max - nextBucket.count, 0)));
-  reply.header("x-ratelimit-reset", new Date(nextBucket.resetAt).toISOString());
-
-  if (nextBucket.count > rule.max) {
-    throw new AppError("RATE_LIMITED", "Too many requests, please retry later", 429, {
-      limit: rule.max,
-      resetAt: new Date(nextBucket.resetAt).toISOString()
-    });
-  }
-}
-
-// 限流维度：默认按 IP；登录态接口（如重发验证邮件）按 userId，避免换 IP 绕过或同 NAT 出口互相挤占。
-// 取不到有效 session 时退回 IP，保证未登录命中该规则的请求仍受 IP 兜底限制。
-async function rateLimitScope(request: FastifyRequest, rule: RateLimitRule): Promise<string> {
-  if (rule.keyBy !== "user") {
-    return request.ip;
-  }
-  let token: string;
-  try {
-    token = sessionToken(request, true);
-  } catch {
-    return request.ip;
-  }
-  if (!token) {
-    return request.ip;
-  }
-  const data = await store.read();
-  const now = new Date();
-  const session = data.sessions.find((item) => item.token === token && new Date(item.expiresAt) > now);
-  return session ? `user:${session.userId}` : request.ip;
-}
-
-async function redisFixedWindowIncrement(key: string, windowMs: number): Promise<{ count: number; resetAt: number }> {
-  const redisKey = `imagora:ratelimit:${key}`;
-  const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
-  const count = Number(await redisCommand(redisUrl, ["INCR", redisKey]));
-  if (count === 1) {
-    await redisCommand(redisUrl, ["PEXPIRE", redisKey, String(windowMs)]);
-  }
-  const ttl = Number(await redisCommand(redisUrl, ["PTTL", redisKey]));
-  const resetAt = Date.now() + Math.max(ttl, 0);
-  return { count, resetAt };
-}
-
-function redisCommand(redisUrl: string, args: string[]): Promise<string> {
-  const url = new URL(redisUrl);
-  const port = Number(url.port || 6379);
-  const password = decodeURIComponent(url.password);
-  const db = Number(url.pathname.replace("/", "") || 0);
-  const commands: string[][] = [];
-  if (password) {
-    commands.push(["AUTH", password]);
-  }
-  if (db) {
-    commands.push(["SELECT", String(db)]);
-  }
-  commands.push(args);
-
-  return new Promise((resolve, reject) => {
-    const socket = createConnection({ host: url.hostname, port });
-    let buffer = Buffer.alloc(0);
-    const responses: string[] = [];
-    socket.setTimeout(envNumber("REDIS_RATE_LIMIT_TIMEOUT_MS", 500));
-    socket.on("connect", () => {
-      socket.write(commands.map(encodeRedisCommand).join(""));
-    });
-    socket.on("data", (chunk) => {
-      buffer = Buffer.concat([buffer, chunk]);
-      while (buffer.length) {
-        const parsed = parseRedisResponse(buffer);
-        if (!parsed) {
-          break;
-        }
-        responses.push(parsed.value);
-        buffer = buffer.subarray(parsed.bytes);
-        if (responses.length === commands.length) {
-          socket.end();
-          resolve(responses[responses.length - 1] ?? "");
-        }
-      }
-    });
-    socket.on("timeout", () => {
-      socket.destroy();
-      reject(new Error("Redis rate limit command timed out"));
-    });
-    socket.on("error", reject);
-  });
-}
-
-function encodeRedisCommand(args: string[]): string {
-  return `*${args.length}\r\n${args.map((arg) => `$${Buffer.byteLength(arg)}\r\n${arg}\r\n`).join("")}`;
-}
-
-function parseRedisResponse(buffer: Buffer): { value: string; bytes: number } | null {
-  const type = String.fromCharCode(buffer[0] ?? 0);
-  const lineEnd = buffer.indexOf("\r\n");
-  if (lineEnd === -1) {
-    return null;
-  }
-  const line = buffer.subarray(1, lineEnd).toString("utf8");
-  if (type === "+" || type === ":") {
-    return { value: line, bytes: lineEnd + 2 };
-  }
-  if (type === "-") {
-    throw new Error(`Redis error: ${line}`);
-  }
-  if (type === "$") {
-    const length = Number(line);
-    if (length < 0) {
-      return { value: "", bytes: lineEnd + 2 };
-    }
-    const start = lineEnd + 2;
-    const end = start + length;
-    if (buffer.length < end + 2) {
-      return null;
-    }
-    return { value: buffer.subarray(start, end).toString("utf8"), bytes: end + 2 };
-  }
-  throw new Error(`Unsupported Redis response type: ${type}`);
-}
-
-function pruneRateLimitBuckets(now: number): void {
-  for (const [key, bucket] of rateLimitBuckets) {
-    if (bucket.resetAt <= now) {
-      rateLimitBuckets.delete(key);
-    }
-  }
 }
 
 function recordRequestMetric(request: FastifyRequest, statusCode: number): void {
