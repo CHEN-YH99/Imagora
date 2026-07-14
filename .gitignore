@@ -8,6 +8,7 @@ build
 .claude/
 .agents/
 .env
+.env.production
 .env.local
 .env.*.local
 *.log

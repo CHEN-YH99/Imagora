@@ -56,6 +56,26 @@ test("release drill reports external configuration gaps without printing secret 
   assert.doesNotMatch(result.stdout, /sk_live_|whsec_|OPENAI_API_KEY=/);
 });
 
+test("release drill treats replacement placeholders as missing production secrets", async () => {
+  const tempRoot = await createFakeBuildArtifacts();
+  const result = await runNodeScript("infra/scripts/release-drill.mjs", [], {
+    ...productionReadyEnv(),
+    RELEASE_DRILL_ARTIFACT_ROOT: tempRoot,
+    RELEASE_DRILL_STRICT: "1",
+    OPENAI_API_KEY: "sk-live-replace-this",
+    S3_ACCESS_KEY_ID: "replace-r2-access-key",
+    STRIPE_WEBHOOK_SECRET: "whsec_replace_this"
+  });
+
+  assert.equal(result.code, 1, result.stderr);
+  const summary = JSON.parse(result.stdout);
+  const productionConfig = summary.checks.find((check) => check.name === "production-config");
+  assert.equal(productionConfig.status, "fail");
+  assert.match(productionConfig.details.join("\n"), /OPENAI_API_KEY is missing or placeholder/);
+  assert.match(productionConfig.details.join("\n"), /S3_ACCESS_KEY_ID is missing or placeholder/);
+  assert.match(productionConfig.details.join("\n"), /STRIPE_WEBHOOK_SECRET is missing or placeholder/);
+});
+
 test("p0 readiness command fails safely on missing production providers without leaking secret values", async () => {
   const packageJson = JSON.parse(await readFile("package.json", "utf8"));
   assert.equal(packageJson.scripts["p0:check"], "node infra/scripts/p0-readiness.mjs");
@@ -109,6 +129,29 @@ test("p0 readiness passes repo-owned gates with production-shaped config and kee
   assert.deepEqual(externalSmoke.details.requiredProviders, ["openai", "s3-or-r2", "stripe", "smtp", "http-safety"]);
 });
 
+test("p0 external readiness script requires gray-release smoke evidence", async () => {
+  const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+  assert.equal(
+    packageJson.scripts["p0:check:external"],
+    "node infra/scripts/p0-readiness.mjs --require-external-smoke"
+  );
+
+  const tempRoot = await createFakeBuildArtifacts();
+  const result = await runNodeScript("infra/scripts/p0-readiness.mjs", ["--require-external-smoke"], {
+    ...productionReadyEnv(),
+    RELEASE_DRILL_ARTIFACT_ROOT: tempRoot,
+    P0_EXTERNAL_SMOKE_PASSED: "0",
+    P0_EXTERNAL_SMOKE_EVIDENCE: ""
+  });
+
+  assert.equal(result.code, 1, result.stderr);
+  const summary = JSON.parse(result.stdout);
+  assert.equal(summary.passed, false);
+  const externalSmoke = summary.checks.find((check) => check.name === "external-provider-smoke");
+  assert.equal(externalSmoke.status, "fail");
+  assert.match(externalSmoke.message, /真实 OpenAI\/S3\/Stripe\/SMTP\/Safety 联调尚未提供验收证据/);
+});
+
 test("release drill flags production config that explicitly disables email verification", async () => {
   const tempRoot = await createFakeBuildArtifacts();
   const result = await runNodeScript("infra/scripts/release-drill.mjs", [], {
@@ -138,6 +181,45 @@ test("release drill accepts production config that leaves email verification at 
   const productionConfig = summary.checks.find((check) => check.name === "production-config");
   assert.equal(productionConfig.status, "pass");
   assert.doesNotMatch(productionConfig.details.join("\n"), /REQUIRE_EMAIL_VERIFICATION/);
+});
+
+test("production env template documents P0 provider defaults without development fallbacks", async () => {
+  const template = await readFile(".env.production.example", "utf8");
+  const gitignore = await readFile(".gitignore", "utf8");
+  const values = parseEnvTemplate(template);
+
+  assert.equal(values.DATA_STORE, "prisma");
+  assert.equal(values.QUEUE_PROVIDER, "bullmq");
+  assert.match(values.STORAGE_PROVIDER, /^(s3|r2)$/);
+  assert.equal(values.PAYMENT_PROVIDER, "stripe");
+  assert.equal(values.MAILER_PROVIDER, "smtp");
+  assert.equal(values.SAFETY_PROVIDER, "http");
+  assert.equal(values.RATE_LIMIT_PROVIDER, "redis");
+  assert.equal(values.SESSION_COOKIE_SECURE, "true");
+  assert.equal(values.IMAGE_PROVIDER_DEFAULT, "openai");
+  assert.equal(values.OPENAI_TIMEOUT_MS, "300000");
+  assert.equal(values.OPENAI_MAX_RETRIES, "1");
+  assert.equal(values.GENERATION_RUNNING_TIMEOUT_MS, "1800000");
+  assert.ok(values.ALERT_WEBHOOK_URL || values.ALERT_EMAIL_TO);
+
+  for (const name of productionEnvNames()) {
+    assert.ok(Object.hasOwn(values, name), `${name} is missing from .env.production.example`);
+  }
+
+  const forbiddenDevelopmentDefaults = [
+    /^QUEUE_PROVIDER=inline$/m,
+    /^STORAGE_PROVIDER=inline$/m,
+    /^PAYMENT_PROVIDER=mock$/m,
+    /^MAILER_PROVIDER=console$/m,
+    /^SAFETY_PROVIDER=local$/m,
+    /^RATE_LIMIT_PROVIDER=memory$/m,
+    /^SESSION_COOKIE_SECURE=false$/m
+  ];
+  for (const pattern of forbiddenDevelopmentDefaults) {
+    assert.doesNotMatch(template, pattern);
+  }
+
+  assert.match(gitignore, /^\.env\.production$/m);
 });
 
 test("p0 documentation records the command and real external smoke boundary", async () => {
@@ -241,6 +323,24 @@ function productionEnvNames() {
     "GENERATION_RUNNING_TIMEOUT_MS",
     "ALERT_EMAIL_TO"
   ];
+}
+
+function parseEnvTemplate(content) {
+  const values = {};
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const separatorIndex = trimmed.indexOf("=");
+    if (separatorIndex === -1) {
+      continue;
+    }
+    const name = trimmed.slice(0, separatorIndex);
+    const value = trimmed.slice(separatorIndex + 1);
+    values[name] = value;
+  }
+  return values;
 }
 
 function runNodeScript(script, args = [], env = {}) {

@@ -25,3 +25,33 @@ test("maintenance map and quick verification cover modular api routes", async ()
   assert.match(maintenanceScript, /apps", "api", "src", "routes"/);
   assert.doesNotMatch(maintenanceScript, /const apiMain = join\(repoRoot, "apps", "api", "src", "main\.ts"\)/);
 });
+
+test("root typecheck builds shared packages once before application no-emit checks", async () => {
+  const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  const typecheckScript = packageJson.scripts.typecheck;
+
+  assert.match(typecheckScript, /^npm run build:packages && npm --workspace apps\/api run typecheck/);
+  assert.match(typecheckScript, /npm --workspace apps\/worker run typecheck/);
+  assert.match(typecheckScript, /npm --workspace apps\/web run typecheck$/);
+  assert.doesNotMatch(typecheckScript, /packages\/shared run typecheck/);
+  assert.doesNotMatch(typecheckScript, /packages\/database run typecheck/);
+});
+
+test("root runtime dependencies do not include unused local scaffolding CLIs", async () => {
+  const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+
+  assert.ok(!packageJson.dependencies?.["uipro-cli"]);
+});
+
+test("prettier scripts target repo source paths instead of the workspace root", async () => {
+  const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+
+  assert.doesNotMatch(packageJson.scripts.format, /prettier --write \.$/);
+  assert.doesNotMatch(packageJson.scripts["format:check"], /prettier --check \.$/);
+  assert.match(packageJson.scripts.format, /--ignore-unknown/);
+  assert.match(packageJson.scripts["format:check"], /--ignore-unknown/);
+  for (const sourcePath of ["apps", "packages", "infra", "tests"]) {
+    assert.match(packageJson.scripts.format, new RegExp(`${sourcePath}/\\*\\*/`));
+    assert.match(packageJson.scripts["format:check"], new RegExp(`${sourcePath}/\\*\\*/`));
+  }
+});

@@ -208,7 +208,11 @@ function isMissingOrPlaceholder(value) {
   if (!value) {
     return true;
   }
-  return /^(changeme|todo|example|mock|test|placeholder|\.\.\.)$/i.test(value.trim());
+  const normalized = value.trim();
+  return (
+    /^(changeme|todo|example|mock|test|placeholder|\.\.\.)$/i.test(normalized) ||
+    /(^|[_-])replace([_-]|$)/i.test(normalized)
+  );
 }
 
 function readConfiguredImageProvider() {

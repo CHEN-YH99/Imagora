@@ -58,3 +58,68 @@ test("api routes are registered through domain modules instead of main.ts", asyn
   assert.match(adminRoutes, /\/api\/admin\/safety-events/);
   assert.match(adminRoutes, /\/api\/safety-appeals/);
 });
+
+test("api runtime helpers are split out of main entrypoint", async () => {
+  const main = await readProjectFile("apps/api/src/main.ts");
+  const runtime = await readProjectFile("apps/api/src/runtime.ts");
+
+  assert.match(main, /from "\.\/runtime\.js"/);
+  for (const helper of [
+    "addDays",
+    "descCreated",
+    "descUpdated",
+    "envBool",
+    "envNumber",
+    "envString",
+    "errorMessage",
+    "headerValue",
+    "pathOnly",
+    "payloadRecord",
+    "round",
+    "webhookSignature"
+  ]) {
+    assert.match(runtime, new RegExp(`export function ${helper}\\b`));
+    assert.doesNotMatch(main, new RegExp(`function ${helper}\\b`));
+  }
+});
+
+test("api production readiness checks are isolated from main entrypoint", async () => {
+  const main = await readProjectFile("apps/api/src/main.ts");
+  const productionConfig = await readProjectFile("apps/api/src/production-config.ts");
+
+  assert.match(main, /from "\.\/production-config\.js"/);
+  assert.match(productionConfig, /export function validateProductionConfig\b/);
+  for (const helper of [
+    "requireProductionValue",
+    "requireProductionSetting",
+    "requireProductionNumber",
+    "requireProductionImageProvider",
+    "requireProductionImageModel",
+    "requireProductionGenerationRunningTimeout",
+    "rejectLocalhostProductionValue"
+  ]) {
+    assert.match(productionConfig, new RegExp(`function ${helper}\\b`));
+    assert.doesNotMatch(main, new RegExp(`function ${helper}\\b`));
+  }
+});
+
+test("api request schemas are isolated from main entrypoint", async () => {
+  const main = await readProjectFile("apps/api/src/main.ts");
+  const schemas = await readProjectFile("apps/api/src/schemas.ts");
+
+  assert.match(main, /from "\.\/schemas\.js"/);
+  for (const schema of [
+    "registerSchema",
+    "loginSchema",
+    "generationInputSchema",
+    "referenceUploadSchema",
+    "adminUserQuerySchema",
+    "adminTaskQuerySchema",
+    "adminImageQuerySchema",
+    "adminOrderQuerySchema",
+    "safetyAppealReviewSchema"
+  ]) {
+    assert.match(schemas, new RegExp(`export const ${schema}\\b`));
+    assert.doesNotMatch(main, new RegExp(`const ${schema}\\b`));
+  }
+});

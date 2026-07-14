@@ -179,6 +179,7 @@ docker compose -f infra/docker-compose.prod.yml build
 
 生产部署时需要配置：
 
+- 从 `.env.production.example` 复制到部署平台的环境变量/Secret 管理处，并替换所有示例值；不要把真实密钥写回仓库。
 - `DATABASE_URL`：指向生产 PostgreSQL
 - `REDIS_URL`：指向生产 Redis
 - `IMAGE_PROVIDER_DEFAULT=openai` + `OPENAI_API_KEY`
@@ -198,6 +199,14 @@ npm run p0:check
 ```
 
 它会强制执行生产配置、构建产物、备份恢复和灰度清单检查。真实 OpenAI、S3/R2、Stripe、SMTP、第三方安全审核必须在灰度环境拿真实账号与密钥再做 smoke，不能用本地 mock 结果冒充。
+
+最终灰度签收使用强制外部验收入口：
+
+```bash
+npm run p0:check:external
+```
+
+这个命令要求 `P0_EXTERNAL_SMOKE_PASSED=1` 且 `P0_EXTERNAL_SMOKE_EVIDENCE` 指向灰度 smoke/load 运行记录。
 
 ## 测试
 

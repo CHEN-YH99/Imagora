@@ -12,6 +12,14 @@ This is a development runtime. The app still uses the local JSON store by defaul
 
 The production-style Compose file builds immutable images for Web, API, and Worker instead of running `npm install && npm run dev` inside containers.
 
+Use the production template as the deployment environment checklist:
+
+```bash
+cp .env.production.example .env.production
+```
+
+Replace every example value in your deployment platform or secret manager. Do not commit `.env.production` or any real credential file.
+
 ```bash
 npm run deploy:local-prod
 ```
@@ -119,6 +127,12 @@ API_BASE_URL=https://<gray-api> LOAD_MANAGE_API=0 LOAD_FAILURE_RATE_MAX=0 npm ru
 
 ```bash
 P0_REQUIRE_EXTERNAL_SMOKE=1 P0_EXTERNAL_SMOKE_PASSED=1 P0_EXTERNAL_SMOKE_EVIDENCE=<run-id-or-url> npm run p0:check
+```
+
+最终签收也可以使用等价入口：
+
+```bash
+P0_EXTERNAL_SMOKE_PASSED=1 P0_EXTERNAL_SMOKE_EVIDENCE=<run-id-or-url> npm run p0:check:external
 ```
 
 The API health probe is:

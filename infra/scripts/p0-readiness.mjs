@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const requireExternalSmokeFlag = process.argv.includes("--require-external-smoke");
 
 const checks = [];
 
@@ -54,7 +55,7 @@ async function runStrictReleaseDrill() {
 
 function checkExternalProviderSmoke() {
   const requiredProviders = ["openai", "s3-or-r2", "stripe", "smtp", "http-safety"];
-  const requireExternalSmoke = booleanEnv("P0_REQUIRE_EXTERNAL_SMOKE", false);
+  const requireExternalSmoke = requireExternalSmokeFlag || booleanEnv("P0_REQUIRE_EXTERNAL_SMOKE", false);
   const externalSmokePassed = booleanEnv("P0_EXTERNAL_SMOKE_PASSED", false);
   const evidence = process.env.P0_EXTERNAL_SMOKE_EVIDENCE?.trim() ?? "";
   const hasEvidence = evidence.length > 0 && !isPlaceholder(evidence);
@@ -144,5 +145,9 @@ function booleanEnv(name, fallback) {
 }
 
 function isPlaceholder(value) {
-  return /^(changeme|todo|example|mock|test|placeholder|\.\.\.)$/i.test(value.trim());
+  const normalized = value.trim();
+  return (
+    /^(changeme|todo|example|mock|test|placeholder|\.\.\.)$/i.test(normalized) ||
+    /(^|[_-])replace([_-]|$)/i.test(normalized)
+  );
 }

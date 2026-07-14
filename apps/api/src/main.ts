@@ -3,15 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import cors from "@fastify/cors";
 import pino from "pino";
-import {
-  assertProductionOpenAiGenerationConfig,
-  getActiveProviderMetadata,
-  quoteImageGeneration,
-  readOpenAiGenerationRuntimeConfig,
-  resolveDefaultImageModel,
-  resolveDefaultImageProvider,
-  resolveProviderModel
-} from "@imagora/ai-providers";
+import { getActiveProviderMetadata, quoteImageGeneration, resolveProviderModel } from "@imagora/ai-providers";
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
 import { buildVerificationEmail, createMailer } from "@imagora/mailer";
 import { createAlertNotifier } from "@imagora/notifier";
@@ -37,8 +29,6 @@ import {
   groupLedgerByUser,
   type GeneratedImage,
   type GenerationTask,
-  maxPromptLength,
-  maxQuantity,
   type ModelId,
   type Order,
   type PaymentEvent,
@@ -54,13 +44,74 @@ import {
 } from "@imagora/shared";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
+import { validateProductionConfig } from "./production-config.js";
 import { registerApiRoutes } from "./routes/index.js";
 import type { ApiRouteContext } from "./routes/index.js";
+import {
+  adjustCreditSchema,
+  adminAuditQuerySchema,
+  adminImageQuerySchema,
+  adminOrderQuerySchema,
+  adminPlanPatchSchema,
+  adminPlanSchema,
+  adminReasonSchema,
+  adminStatusSchema,
+  adminTaskQuerySchema,
+  adminUserQuerySchema,
+  adminVisibilitySchema,
+  captchaRequiredRounds,
+  captchaVerifySchema,
+  changeEmailSchema,
+  changePasswordSchema,
+  createOrderSchema,
+  deleteAccountSchema,
+  fileSignatureQuerySchema,
+  generationInputSchema,
+  idParamSchema,
+  imageParamSchema,
+  loginSchema,
+  optionalPaginationSchema,
+  orderParamSchema,
+  paginationSchema,
+  paymentWebhookParamSchema,
+  planParamSchema,
+  referenceUploadSchema,
+  registerSchema,
+  requestPasswordResetSchema,
+  resetPasswordSchema,
+  safetyAppealAdminQuerySchema,
+  safetyAppealCreateSchema,
+  safetyAppealParamSchema,
+  safetyAppealReviewSchema,
+  safetyEventParamSchema,
+  safetyEventQuerySchema,
+  safetyEventReviewSchema,
+  safetyRuleParamSchema,
+  safetyRulePatchSchema,
+  safetyRuleSchema,
+  taskQuerySchema,
+  updateProfileSchema,
+  userParamSchema
+} from "./schemas.js";
+import {
+  addDays,
+  descCreated,
+  descUpdated,
+  envBool,
+  envNumber,
+  envString,
+  errorMessage,
+  headerValue,
+  pathOnly,
+  payloadRecord,
+  round,
+  webhookSignature
+} from "./runtime.js";
 
 // Structured logging setup
 const isProduction = process.env.NODE_ENV === "production";
 
-validateProductionConfig();
+validateProductionConfig({ allowBearerSessionAuth, isProduction, requireEmailVerification });
 
 const store = createStore();
 const mailer = createMailer();
@@ -99,7 +150,6 @@ const rateLimitBuckets = new Map<string, RateLimitBucket>();
 const captchaChallenges = new Map<string, CaptchaChallenge>();
 const captchaVerifications = new Map<string, CaptchaVerification>();
 const loginAttempts = new Map<string, LoginAttempt>();
-const captchaRequiredRounds = 2;
 const rateLimitWindowMs = envNumber("RATE_LIMIT_WINDOW_MS", 60_000);
 const generationMaintenanceIntervalMs = envNumber("GENERATION_MAINTENANCE_INTERVAL_MS", 60_000);
 const rateLimitRules: RateLimitRule[] = [
@@ -440,287 +490,8 @@ interface OperationalIncidentInput {
   route?: string | null;
 }
 
-const commonPasswordBlocklist = new Set([
-  "123456",
-  "12345678",
-  "123456789",
-  "admin123",
-  "imagora",
-  "imagora123",
-  "password",
-  "password123",
-  "qwerty123"
-]);
-
-const emailSchema = z.string().trim().toLowerCase().min(1).max(254).email();
-const loginPasswordSchema = z.string().min(1).max(128).refine(hasNoControlCharacters, {
-  message: "Password contains unsupported characters"
-});
-const newPasswordSchema = z
-  .string()
-  .min(12)
-  .max(128)
-  .refine((password) => password.trim() === password, {
-    message: "Password must not start or end with spaces"
-  })
-  .refine(hasNoControlCharacters, {
-    message: "Password contains unsupported characters"
-  })
-  .refine((password) => /[A-Za-z]/.test(password) && /\d/.test(password), {
-    message: "Password must include letters and numbers"
-  })
-  .refine((password) => !commonPasswordBlocklist.has(normalizePasswordForBlocklist(password)), {
-    message: "Password is too common"
-  });
-
-const registerSchema = z
-  .object({
-    email: emailSchema,
-    password: newPasswordSchema
-  })
-  .strict()
-  .superRefine((input, context) => {
-    const emailName = input.email.split("@")[0]?.toLowerCase() ?? "";
-    if (emailName.length >= 4 && input.password.toLowerCase().includes(emailName)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["password"],
-        message: "Password must not include the email name"
-      });
-    }
-  });
-
-// captchaVerificationIds 变为可选：带有效登录尝试令牌重试时前端不再发验证码 ID。
-// 提供时仍必须恰好 captchaRequiredRounds 个，保持首次验证的强度。
-const loginSchema = z
-  .object({
-    email: emailSchema,
-    password: loginPasswordSchema,
-    captchaVerificationIds: z.array(z.string().uuid()).max(captchaRequiredRounds).optional()
-  })
-  .strict();
-
-const captchaVerifySchema = z
-  .object({
-    captchaId: z.string().uuid(),
-    captchaSelections: z
-      .array(
-        z.object({
-          x: z.number().min(0).max(1),
-          y: z.number().min(0).max(1)
-        })
-      )
-      .min(1)
-      .max(6)
-  })
-  .strict();
-
-const requestPasswordResetSchema = z.object({
-  email: emailSchema
-});
-
-const resetPasswordSchema = z
-  .object({
-    token: z.string().min(1),
-    password: newPasswordSchema
-  })
-  .strict();
-
-const updateProfileSchema = z.object({
-  nickname: z.string().min(1).max(80).optional(),
-  avatarUrl: z.string().url().nullable().optional()
-});
-
-const changePasswordSchema = z
-  .object({
-    currentPassword: loginPasswordSchema,
-    newPassword: newPasswordSchema
-  })
-  .strict()
-  .superRefine((input, context) => {
-    if (input.currentPassword === input.newPassword) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["newPassword"],
-        message: "New password must be different from the current password"
-      });
-    }
-  });
-
-const changeEmailSchema = z
-  .object({
-    newEmail: emailSchema,
-    currentPassword: loginPasswordSchema
-  })
-  .strict();
-
-// 注销账户：需要当前密码确认身份，reason 可选用于审计留档。
-const deleteAccountSchema = z
-  .object({
-    currentPassword: loginPasswordSchema,
-    reason: z.string().trim().max(500).optional()
-  })
-  .strict();
-
-const generationInputSchema = z.object({
-  clientRequestId: z
-    .string()
-    .min(8)
-    .max(120)
-    .default(() => randomUUID()),
-  referenceImageId: z.string().min(1).optional(),
-  prompt: z.string().min(1).max(maxPromptLength),
-  negativePrompt: z.string().max(800).optional(),
-  style: z.enum(["realistic", "illustration", "anime", "product_photography", "poster"]),
-  aspectRatio: z.enum(["1:1", "3:4", "4:3", "9:16", "16:9"]),
-  quantity: z.number().int().min(1).max(maxQuantity),
-  quality: z.enum(["draft", "standard", "high"]),
-  model: z.string().trim().min(1).max(80).optional()
-});
-
-const referenceUploadSchema = z.object({
-  fileName: z.string().min(1).max(180),
-  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
-  contentBase64: z.string().min(16).max(envNumber("UPLOAD_MAX_BASE64_CHARS", 8_000_000))
-});
-
-const fileSignatureQuerySchema = z.object({
-  expiresAt: z.string().regex(/^\d+$/, "expiresAt must be a millisecond timestamp"),
-  signature: z.string().regex(/^[a-f0-9]{64}$/, "signature must be a 64-char hex digest")
-});
-
-const paginationSchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(30)
-});
-
-const adminRangeQuerySchema = paginationSchema.extend({
-  createdFrom: z.string().datetime().optional(),
-  createdTo: z.string().datetime().optional()
-});
-
-const optionalPaginationSchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).optional()
-});
-
-const userStatusSchema = z.enum(["ACTIVE", "SUSPENDED", "DELETED"]);
-const userRoleSchema = z.enum(["USER", "ADMIN"]);
-const taskStatusSchema = z.enum(["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"]);
-const imageVisibilitySchema = z.enum(["PRIVATE", "PUBLIC", "HIDDEN"]);
-const orderStatusSchema = z.enum(["PENDING", "PAID", "CANCELED", "REFUNDED", "CLOSED"]);
-
-const taskQuerySchema = paginationSchema.extend({
-  status: taskStatusSchema.optional()
-});
-
-const adminUserQuerySchema = paginationSchema.extend({
-  status: userStatusSchema.optional(),
-  role: userRoleSchema.optional(),
-  search: z.string().trim().max(120).optional()
-});
-
-const adminTaskQuerySchema = adminRangeQuerySchema.extend({
-  status: taskStatusSchema.optional(),
-  userId: z.string().min(1).optional()
-});
-
-const adminImageQuerySchema = adminRangeQuerySchema.extend({
-  visibility: imageVisibilitySchema.optional(),
-  userId: z.string().min(1).optional()
-});
-
-const adminOrderQuerySchema = adminRangeQuerySchema.extend({
-  status: orderStatusSchema.optional(),
-  userId: z.string().min(1).optional(),
-  orderNo: z.string().trim().min(1).max(80).optional()
-});
-
-const adminAuditQuerySchema = paginationSchema.extend({
-  adminUserId: z.string().min(1).optional(),
-  action: z.string().trim().min(1).max(120).optional(),
-  targetType: z.string().trim().min(1).max(80).optional(),
-  targetId: z.string().trim().min(1).max(120).optional()
-});
-
-const idParamSchema = z.object({ taskId: z.string().min(1) });
-const imageParamSchema = z.object({ imageId: z.string().min(1) });
-const orderParamSchema = z.object({ orderId: z.string().min(1) });
-const userParamSchema = z.object({ userId: z.string().min(1) });
-const planParamSchema = z.object({ planId: z.string().min(1) });
-const paymentWebhookParamSchema = z.object({ provider: z.string().min(1) });
-
-const createOrderSchema = z.object({
-  planId: z.string().min(1),
-  paymentProvider: z.enum(["mock", "stripe", "wechat", "alipay"]).default("mock"),
-  clientRequestId: z.string().min(8).max(120).optional()
-});
-
-const adminReasonSchema = z.object({ reason: z.string().trim().min(3).max(240) });
-const statusSchema = z.object({ status: userStatusSchema });
-const visibilitySchema = z.object({ visibility: imageVisibilitySchema });
-const adjustCreditSchema = z.object({
-  amount: z
-    .number()
-    .int()
-    .refine((value) => value !== 0, { message: "amount 不能为 0" })
-    .refine((value) => Math.abs(value) <= 100000, { message: "单次调整不能超过 100000 积分" }),
-  reason: z.string().min(3).max(240),
-  confirm: z.boolean().optional(),
-  // 幂等键由客户端在发起操作时生成一次，防止重复提交/网络重试把同一笔调整叠加执行
-  clientRequestId: z.string().min(8).max(120)
-});
-const planSchema = z.object({
-  name: z.string().min(1).max(80),
-  description: z.string().min(1).max(240),
-  priceCents: z.number().int().min(0),
-  currency: z.string().min(3).max(3),
-  credits: z.number().int().min(1),
-  validDays: z.number().int().min(1).nullable(),
-  status: z.enum(["ACTIVE", "INACTIVE"]),
-  sortOrder: z.number().int()
-});
-const planPatchSchema = planSchema.partial();
-const adminStatusSchema = statusSchema.merge(adminReasonSchema);
-const adminVisibilitySchema = visibilitySchema.merge(adminReasonSchema);
-const adminPlanSchema = planSchema.merge(adminReasonSchema);
-const adminPlanPatchSchema = planPatchSchema.merge(adminReasonSchema);
-const safetyRuleParamSchema = z.object({ ruleId: z.string().min(1) });
-const safetyRuleSchema = z.object({
-  term: z.string().min(2).max(120),
-  action: z.enum(["BLOCK", "REVIEW"]),
-  status: z.enum(["ACTIVE", "INACTIVE"])
-});
-const safetyRulePatchSchema = safetyRuleSchema.partial();
-const safetyEventParamSchema = z.object({ eventId: z.string().min(1) });
-const safetyEventQuerySchema = z.object({
-  status: z.enum(["PASSED", "BLOCKED", "REVIEW_REQUIRED"]).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(30)
-});
-const safetyEventReviewSchema = z.object({ status: z.enum(["PASSED", "BLOCKED"]) }).merge(adminReasonSchema);
-const safetyAppealParamSchema = z.object({ appealId: z.string().min(1) });
-const safetyAppealCreateSchema = z.object({
-  safetyEventId: z.string().min(1),
-  reason: z.string().min(10).max(1000)
-});
-const safetyAppealAdminQuerySchema = z.object({
-  status: z.enum(["PENDING", "APPROVED", "REJECTED"]).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(30)
-});
-const safetyAppealReviewSchema = z.object({
-  status: z.enum(["APPROVED", "REJECTED"]),
-  adminNote: z.string().min(1).max(500).optional()
-});
-
 function envelope<T>(request: FastifyRequest, data: T): ApiEnvelope<T> {
   return { data, requestId: request.requestId ?? randomUUID() };
-}
-
-function envString(name: string, fallback: string): string {
-  return process.env[name] ?? fallback;
-}
-
-function envNumber(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 // trustProxy 决定 request.ip 取值：反代/网关后面必须开启，否则限流按代理 IP 计数直接失效。
@@ -2222,17 +1993,6 @@ function defaultNicknameForEmail(email: string): string {
   return cleaned || "Imagora 用户";
 }
 
-function hasNoControlCharacters(value: string): boolean {
-  return [...value].every((character) => {
-    const code = character.charCodeAt(0);
-    return code > 31 && code !== 127;
-  });
-}
-
-function normalizePasswordForBlocklist(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
 function escapeXml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -2240,128 +2000,6 @@ function escapeXml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
-}
-
-function validateProductionConfig(): void {
-  if (!isProduction) {
-    return;
-  }
-
-  requireProductionValue("WEB_ORIGIN");
-  rejectLocalhostProductionValue("WEB_ORIGIN");
-  requireProductionValue("DATABASE_URL");
-  requireProductionValue("REDIS_URL");
-  requireProductionValue("OPENAI_API_KEY");
-  requireProductionValue("OPENAI_TIMEOUT_MS");
-  requireProductionValue("OPENAI_MAX_RETRIES");
-  requireProductionValue("S3_ENDPOINT");
-  requireProductionValue("S3_BUCKET");
-  requireProductionValue("S3_ACCESS_KEY_ID");
-  requireProductionValue("S3_SECRET_ACCESS_KEY");
-  requireProductionValue("S3_PUBLIC_BASE_URL");
-  requireProductionValue("STRIPE_SECRET_KEY");
-  requireProductionValue("STRIPE_WEBHOOK_SECRET");
-  requireProductionValue("STRIPE_SUCCESS_URL");
-  requireProductionValue("STRIPE_CANCEL_URL");
-  requireProductionValue("SAFETY_TEXT_ENDPOINT");
-  requireProductionValue("SAFETY_IMAGE_ENDPOINT");
-  requireProductionValue("SMTP_HOST");
-  requireProductionValue("SMTP_USER");
-  requireProductionValue("SMTP_PASSWORD");
-  requireProductionValue("SMTP_FROM");
-  if (!requireEmailVerification()) {
-    throw new Error("Unsafe production config: REQUIRE_EMAIL_VERIFICATION must not be disabled in production");
-  }
-  requireProductionValue("GENERATION_RUNNING_TIMEOUT_MS");
-  requireProductionSetting("DATA_STORE", "prisma");
-  requireProductionSetting("QUEUE_PROVIDER", "bullmq");
-  requireProductionImageProvider("openai");
-  requireProductionImageModel();
-  assertProductionOpenAiGenerationConfig();
-  requireProductionGenerationRunningTimeout();
-  requireProductionSetting("STORAGE_PROVIDER", "s3", "r2");
-  requireProductionSetting("PAYMENT_PROVIDER", "stripe");
-  requireProductionSetting("MAILER_PROVIDER", "smtp");
-  requireProductionSetting("SAFETY_PROVIDER", "http");
-  requireProductionSetting("RATE_LIMIT_PROVIDER", "redis");
-  if (allowBearerSessionAuth()) {
-    throw new Error("Unsafe production config: bearer session auth must be disabled");
-  }
-  if (!envBool("SESSION_COOKIE_SECURE", false)) {
-    throw new Error("Unsafe production config: SESSION_COOKIE_SECURE must be true");
-  }
-  if (!process.env.ALERT_WEBHOOK_URL?.trim() && !process.env.ALERT_EMAIL_TO?.trim()) {
-    throw new Error(
-      "Unsafe production config: at least one alert channel is required (set ALERT_WEBHOOK_URL or ALERT_EMAIL_TO)"
-    );
-  }
-}
-
-function requireProductionValue(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) {
-    throw new Error(`Unsafe production config: ${name} is required`);
-  }
-  return value;
-}
-
-function requireProductionSetting(name: string, ...allowedValues: string[]): void {
-  const value = requireProductionValue(name);
-  if (!allowedValues.includes(value)) {
-    throw new Error(`Unsafe production config: ${name} must be ${allowedValues.join(" or ")}`);
-  }
-}
-
-function requireProductionNumber(name: string): number {
-  const value = Number(requireProductionValue(name));
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`Unsafe production config: ${name} must be a positive number`);
-  }
-  return value;
-}
-
-function requireProductionImageProvider(...allowedValues: string[]): void {
-  let value: string;
-  try {
-    value = resolveDefaultImageProvider();
-  } catch (error) {
-    throw new Error(
-      `Unsafe production config: ${error instanceof Error ? error.message : "image provider is not configured"}`
-    );
-  }
-  if (!allowedValues.includes(value)) {
-    throw new Error(
-      `Unsafe production config: IMAGE_PROVIDER_DEFAULT (or legacy AI_PROVIDER) must be ${allowedValues.join(" or ")}`
-    );
-  }
-}
-
-function requireProductionImageModel(): void {
-  try {
-    resolveDefaultImageModel(resolveDefaultImageProvider());
-  } catch (error) {
-    throw new Error(
-      `Unsafe production config: ${error instanceof Error ? error.message : "image model is not configured"}`
-    );
-  }
-}
-
-function requireProductionGenerationRunningTimeout(): void {
-  const runningTimeoutMs = requireProductionNumber("GENERATION_RUNNING_TIMEOUT_MS");
-  const openAiTimeoutMs = readOpenAiGenerationRuntimeConfig().timeoutMs;
-  const minimum = openAiTimeoutMs * maxQuantity + 5 * 60 * 1000;
-  if (runningTimeoutMs < minimum) {
-    throw new Error(
-      `Unsafe production config: GENERATION_RUNNING_TIMEOUT_MS must be at least ${minimum} when OPENAI_TIMEOUT_MS=${openAiTimeoutMs} and max quantity is ${maxQuantity}`
-    );
-  }
-}
-
-function rejectLocalhostProductionValue(name: string): void {
-  const value = requireProductionValue(name);
-  if (/localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(value)) {
-    throw new Error(`Unsafe production config: ${name} must not point at localhost`);
-  }
 }
 
 function applySecurityHeaders(reply: FastifyReply): void {
@@ -3121,67 +2759,6 @@ function countBy<T>(items: T[], selectKey: (item: T) => string): Record<string, 
     result[key] = (result[key] ?? 0) + 1;
     return result;
   }, {});
-}
-
-function pathOnly(url: string): string {
-  return url.split("?")[0] ?? url;
-}
-
-function envBool(name: string, fallback: boolean): boolean {
-  const value = process.env[name];
-  if (value === undefined) {
-    return fallback;
-  }
-  return !["0", "false", "no", "off", "disabled"].includes(value.toLowerCase());
-}
-
-function round(value: number): number {
-  return Number(value.toFixed(2));
-}
-
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function webhookSignature(request: FastifyRequest): string | undefined {
-  return (
-    headerValue(request.headers["stripe-signature"]) ??
-    headerValue(request.headers["x-webhook-signature"]) ??
-    headerValue(request.headers["x-payment-signature"])
-  );
-}
-
-function headerValue(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
-
-function payloadRecord(payload: unknown): Record<string, unknown> {
-  if (typeof payload === "string") {
-    try {
-      const parsed = JSON.parse(payload) as unknown;
-      return payloadRecord(parsed);
-    } catch {
-      return { raw: payload };
-    }
-  }
-  if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
-    return payload as Record<string, unknown>;
-  }
-  return { raw: payload };
-}
-
-function addDays(iso: string, days: number): string {
-  const date = new Date(iso);
-  date.setDate(date.getDate() + days);
-  return date.toISOString();
-}
-
-function descCreated<T extends { createdAt: string }>(a: T, b: T): number {
-  return b.createdAt.localeCompare(a.createdAt);
-}
-
-function descUpdated<T extends { updatedAt: string }>(a: T, b: T): number {
-  return b.updatedAt.localeCompare(a.updatedAt);
 }
 
 function createRouteContext(): ApiRouteContext {

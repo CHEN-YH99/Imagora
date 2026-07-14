@@ -23,6 +23,7 @@ test("web exposes image detail workflow from history and favorites", async () =>
 test("web auth pages validate inputs and registration does not ask for nickname", async () => {
   const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
   const apiMain = await readFile(join(root, "apps/api/src/main.ts"), "utf8");
+  const apiSchemas = await readFile(join(root, "apps/api/src/schemas.ts"), "utf8");
   const apiAuthRoutes = await readFile(join(root, "apps/api/src/routes/auth.ts"), "utf8");
   const appFrame = await readFile(join(root, "apps/web/components/AppFrame.tsx"), "utf8");
   const forgotPasswordPage = await readFile(join(root, "apps/web/app/forgot-password/page.tsx"), "utf8");
@@ -72,7 +73,9 @@ test("web auth pages validate inputs and registration does not ask for nickname"
   assert.match(apiClient, /captchaSelections/);
   assert.match(apiClient, /请求超时，请检查网络后重试。/);
   assert.match(apiClient, /INVALID_RESET_TOKEN/);
-  assert.match(apiMain, /password: newPasswordSchema/);
+  assert.match(apiSchemas, /password: newPasswordSchema/);
+  assert.match(apiSchemas, /export const registerSchema/);
+  assert.match(apiMain, /from "\.\/schemas\.js"/);
   assert.match(apiMain, /captchaVerifications/);
   assert.match(apiMain, /captchaRequiredRounds/);
   assert.match(apiAuthRoutes, /captchaSelections/);
