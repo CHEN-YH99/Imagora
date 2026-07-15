@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { ArrowLeft, Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowLeft, Copy, Download, Heart, Repeat2, RefreshCw, Trash2 } from "lucide-react";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../../components/AppFrame";
 import {
   formatImageAspectRatio,
@@ -17,6 +17,7 @@ import {
   formatStyleLabel,
   resolveSelectableImageModel,
   type GeneratedImage,
+  type GenerationMetadata,
   type Task
 } from "../../../lib/api";
 import { buildGeneratePath, saveGenerationDraft } from "../../../lib/generateDrafts";
@@ -43,17 +44,42 @@ export default function ImageDetailPage() {
   }, [imageId]);
 
   function regenerateTask() {
-    if (!task) {
+    const metadata = image?.generationMetadata ?? (task ? metadataFromTask(task) : null);
+    if (!metadata) {
       router.push("/generate");
       return;
     }
-    saveGenerationDraft(task.prompt);
+    saveImageGenerationDraft(metadata, "reuse");
+  }
+
+  function createVariation() {
+    const metadata = image?.generationMetadata ?? (task ? metadataFromTask(task) : null);
+    if (!metadata) {
+      router.push("/generate");
+      return;
+    }
+    saveImageGenerationDraft(metadata, "variation");
+  }
+
+  function saveImageGenerationDraft(metadata: GenerationMetadata, mode: "reuse" | "variation") {
+    const prompt = mode === "variation" ? `${metadata.prompt}，保持主体一致，生成新的构图与细节变化` : metadata.prompt;
+    saveGenerationDraft({
+      prompt,
+      negativePrompt: metadata.negativePrompt ?? undefined,
+      style: metadata.style,
+      aspectRatio: metadata.aspectRatio,
+      quality: metadata.quality,
+      quantity: mode === "variation" ? 1 : metadata.quantity,
+      model: resolveSelectableImageModel(metadata.modelName),
+      mode
+    });
     router.push(
       buildGeneratePath({
-        aspectRatio: task.aspectRatio,
-        quality: task.quality,
-        quantity: task.quantity,
-        model: resolveSelectableImageModel(task.modelName)
+        style: metadata.style,
+        aspectRatio: metadata.aspectRatio,
+        quality: metadata.quality,
+        quantity: mode === "variation" ? 1 : metadata.quantity,
+        model: resolveSelectableImageModel(metadata.modelName)
       })
     );
   }
@@ -223,6 +249,22 @@ export default function ImageDetailPage() {
                   <Copy className="size-4" aria-hidden="true" />
                 </button>
                 <button
+                  className="focus-ring inline-flex items-center gap-2 rounded-full border border-white/12 px-3 py-2 text-sm text-white/72 transition-colors duration-200 hover:bg-white/10 hover:text-white"
+                  onClick={regenerateTask}
+                  type="button"
+                >
+                  <Copy className="size-4" aria-hidden="true" />
+                  复用参数
+                </button>
+                <button
+                  className="focus-ring inline-flex items-center gap-2 rounded-full border border-mint/36 px-3 py-2 text-sm text-mint transition-colors duration-200 hover:bg-mint/10"
+                  onClick={createVariation}
+                  type="button"
+                >
+                  <Repeat2 className="size-4" aria-hidden="true" />
+                  生成变体
+                </button>
+                <button
                   className="icon-action"
                   type="button"
                   onClick={() => setDeleteConfirmOpen(true)}
@@ -252,11 +294,11 @@ export default function ImageDetailPage() {
               <h2 className="mb-4 text-lg font-semibold">生成参数</h2>
               <dl className="grid gap-3 text-sm text-white/58 sm:grid-cols-2">
                 <DetailItem label="任务状态" value={<StatusPill>{task.status}</StatusPill>} />
-                <DetailItem label="风格" value={formatStyleLabel(task.style)} />
-                <DetailItem label="画面比例" value={task.aspectRatio} />
-                <DetailItem label="质量" value={formatQualityLabel(task.quality)} />
-                <DetailItem label="生成数量" value={`${task.quantity} 张`} />
-                <DetailItem label="积分消耗" value={formatCredits(task.creditCost)} />
+                <DetailItem label="风格" value={formatStyleLabel(image.generationMetadata.style)} />
+                <DetailItem label="画面比例" value={image.generationMetadata.aspectRatio} />
+                <DetailItem label="质量" value={formatQualityLabel(image.generationMetadata.quality)} />
+                <DetailItem label="生成数量" value={`${image.generationMetadata.quantity} 张`} />
+                <DetailItem label="积分消耗" value={formatCredits(image.generationMetadata.creditCost)} />
               </dl>
             </Panel>
 
@@ -350,4 +392,22 @@ function formatFileSize(value: number | undefined): string {
     return `${Math.ceil(value / 1024)} KB`;
   }
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function metadataFromTask(task: Task): GenerationMetadata {
+  return {
+    taskId: task.id,
+    prompt: task.prompt,
+    negativePrompt: task.negativePrompt,
+    style: task.style,
+    aspectRatio: task.aspectRatio,
+    quality: task.quality,
+    quantity: task.quantity,
+    modelProvider: task.modelProvider,
+    modelName: task.modelName,
+    width: task.width,
+    height: task.height,
+    creditCost: task.creditCost,
+    createdAt: task.createdAt
+  };
 }

@@ -558,6 +558,96 @@ test("api and worker complete generation and enforce admin safety rules", async 
     assert.equal(completed.data.images.length, 1);
     const generatedImageId = completed.data.images[0].id;
     assert.equal(completed.data.images[0].publicUrl, "");
+    assert.deepEqual(completed.data.images[0].generationMetadata, {
+      taskId,
+      prompt: generationPayload.prompt,
+      negativePrompt: generationPayload.negativePrompt,
+      style: generationPayload.style,
+      aspectRatio: generationPayload.aspectRatio,
+      quality: generationPayload.quality,
+      quantity: generationPayload.quantity,
+      modelProvider: "mock",
+      modelName: "mock:default",
+      width: completed.data.task.width,
+      height: completed.data.task.height,
+      creditCost: completed.data.task.creditCost,
+      createdAt: completed.data.task.createdAt
+    });
+    assert.equal(completed.data.images[0].projectId, null);
+
+    const projectCreated = await post(
+      baseUrl,
+      "/api/image-projects",
+      {
+        name: "品牌视觉资产",
+        description: "用于管理已确认可复用的品牌生成图"
+      },
+      demoSession
+    );
+    assert.equal(projectCreated.data.project.name, "品牌视觉资产");
+    assert.equal(projectCreated.data.project.description, "用于管理已确认可复用的品牌生成图");
+    assert.equal(projectCreated.data.project.archivedAt, null);
+    assert.equal(projectCreated.data.project.imageCount, 0);
+
+    const movedToProject = await post(
+      baseUrl,
+      `/api/images/${generatedImageId}/project`,
+      { projectId: projectCreated.data.project.id },
+      demoSession
+    );
+    assert.equal(movedToProject.data.image.projectId, projectCreated.data.project.id);
+
+    const projectImages = await get(
+      baseUrl,
+      `/api/images?projectId=${projectCreated.data.project.id}&limit=50`,
+      demoSession
+    );
+    assert.deepEqual(
+      projectImages.data.images.map((image) => image.id),
+      [generatedImageId]
+    );
+    assert.equal(projectImages.data.images[0].generationMetadata.prompt, generationPayload.prompt);
+
+    const projectUpdated = await patch(
+      baseUrl,
+      `/api/image-projects/${projectCreated.data.project.id}`,
+      { name: "品牌主视觉", coverImageId: generatedImageId },
+      demoSession
+    );
+    assert.equal(projectUpdated.data.project.name, "品牌主视觉");
+    assert.equal(projectUpdated.data.project.coverImageId, generatedImageId);
+    assert.equal(projectUpdated.data.project.imageCount, 1);
+
+    const projectList = await get(baseUrl, "/api/image-projects", demoSession);
+    assert.ok(projectList.data.projects.some((project) => project.id === projectCreated.data.project.id));
+    assert.equal(
+      projectList.data.projects.find((project) => project.id === projectCreated.data.project.id).imageCount,
+      1
+    );
+
+    const foreignMove = await fetch(`${baseUrl}/api/images/${generatedImageId}/project`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: otherUserSession
+      },
+      body: JSON.stringify({ projectId: projectCreated.data.project.id })
+    });
+    const foreignMovePayload = await foreignMove.json();
+    assert.equal(foreignMove.status, 404);
+    assert.equal(foreignMovePayload.error.code, "NOT_FOUND");
+
+    const archivedProject = await deleteRequest(
+      baseUrl,
+      `/api/image-projects/${projectCreated.data.project.id}`,
+      demoSession
+    );
+    assert.equal(archivedProject.data.archived, true);
+    const projectsAfterArchive = await get(baseUrl, "/api/image-projects", demoSession);
+    assert.equal(
+      projectsAfterArchive.data.projects.some((project) => project.id === projectCreated.data.project.id),
+      false
+    );
 
     const previewUrl = await post(baseUrl, `/api/images/${generatedImageId}/preview-url`, {}, demoSession);
     assert.match(previewUrl.data.url, /^data:image\/svg\+xml/);
@@ -1963,6 +2053,16 @@ async function patch(baseUrl, path, body, session) {
       ...sessionHeaders(session)
     },
     body: JSON.stringify(body)
+  });
+  const payload = await response.json();
+  assert.equal(response.ok, true, JSON.stringify(payload));
+  return payload;
+}
+
+async function deleteRequest(baseUrl, path, session) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "DELETE",
+    headers: sessionHeaders(session)
   });
   const payload = await response.json();
   assert.equal(response.ok, true, JSON.stringify(payload));

@@ -22,6 +22,7 @@ type MockState = {
   historyTaskDetailPolls: number;
   historyTaskListRequests: number;
   images: GeneratedImage[];
+  projects: ImageProject[];
   orders: Order[];
   rules: SafetyRule[];
   safetyEvents: SafetyEvent[];
@@ -69,14 +70,45 @@ type GeneratedImage = {
   id: string;
   taskId: string;
   userId: string;
+  projectId: string | null;
   thumbnailUrl: string;
   publicUrl: string;
   width: number;
   height: number;
+  generationMetadata: GenerationMetadata;
   visibility: "PRIVATE" | "PUBLIC" | "HIDDEN";
   favorite: boolean;
   deletedAt: string | null;
   createdAt: string;
+};
+
+type GenerationMetadata = {
+  taskId: string;
+  prompt: string;
+  negativePrompt: string | null;
+  style: string;
+  aspectRatio: string;
+  quality: string;
+  quantity: number;
+  modelProvider: string;
+  modelName: string;
+  width: number;
+  height: number;
+  creditCost: number;
+  createdAt: string;
+};
+
+type ImageProject = {
+  id: string;
+  userId: string;
+  name: string;
+  description: string;
+  coverImageId: string | null;
+  coverThumbnailUrl: string | null;
+  imageCount: number;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
 };
 
 type Plan = {
@@ -544,7 +576,24 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
       return;
     }
     if (method === "GET" && path === "/api/images") {
-      await fulfillData(route, { images: state.images });
+      const projectId = url.searchParams.get("projectId");
+      await fulfillData(route, {
+        images: projectId ? state.images.filter((image) => image.projectId === projectId) : state.images
+      });
+      return;
+    }
+    if (method === "GET" && path === "/api/image-projects") {
+      await fulfillData(route, { projects: state.projects });
+      return;
+    }
+    if (method === "POST" && /^\/api\/images\/[^/]+\/project$/.test(path)) {
+      const imageId = path.split("/").at(-2);
+      const body = readJson(route);
+      state.images = state.images.map((image) =>
+        image.id === imageId ? { ...image, projectId: body.projectId ?? null } : image
+      );
+      const image = state.images.find((item) => item.id === imageId);
+      await fulfillData(route, { image });
       return;
     }
     if (method === "POST" && /^\/api\/images\/[^/]+\/favorite$/.test(path)) {
@@ -809,6 +858,7 @@ function createMockState(): MockState {
     historyTaskDetailPolls: 0,
     historyTaskListRequests: 0,
     images: [createGeneratedImage("image-history", "task-history"), createGeneratedImage("image-e2e", "task-e2e")],
+    projects: [],
     orders: [
       createOrder("order-pending", "IG-E2E-PENDING", "PENDING"),
       createOrder("order-paid", "IG-E2E-PAID", "PAID")
@@ -840,14 +890,34 @@ function createMockState(): MockState {
 }
 
 function createGeneratedImage(id: string, taskId: string): GeneratedImage {
+  const task =
+    taskId === "task-history"
+      ? createTask(taskId, "半透明智能相机的电影感产品摄影，薄荷色轮廓光", "SUCCEEDED")
+      : createTask(taskId, "电影感茶杯广告图，薄荷色轮廓光", "SUCCEEDED");
   return {
     id,
     taskId,
     userId: creatorUser.id,
+    projectId: null,
     thumbnailUrl,
     publicUrl: "",
     width: 1024,
     height: 1024,
+    generationMetadata: {
+      taskId: task.id,
+      prompt: task.prompt,
+      negativePrompt: task.negativePrompt,
+      style: task.style,
+      aspectRatio: task.aspectRatio,
+      quality: task.quality,
+      quantity: task.quantity,
+      modelProvider: task.modelProvider,
+      modelName: task.modelName,
+      width: task.width,
+      height: task.height,
+      creditCost: task.creditCost,
+      createdAt: task.createdAt
+    },
     visibility: "PRIVATE",
     favorite: false,
     deletedAt: null,

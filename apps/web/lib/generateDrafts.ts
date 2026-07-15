@@ -6,6 +6,13 @@ export const ACTIVE_GENERATION_TASK_STORAGE_KEY = "imagora:active-generation-tas
 
 export type GenerationDraft = {
   prompt: string;
+  negativePrompt?: string;
+  style?: string;
+  aspectRatio?: string;
+  quality?: string;
+  quantity?: number;
+  model?: string;
+  mode?: "reuse" | "variation";
 };
 
 export type GenerationTaskSnapshot = {
@@ -15,6 +22,7 @@ export type GenerationTaskSnapshot = {
 };
 
 export type GeneratePathParams = {
+  style?: string;
   aspectRatio: string;
   quality: string;
   quantity: number | string;
@@ -28,6 +36,9 @@ export function buildGeneratePath(params: GeneratePathParams): string {
     quantity: String(params.quantity),
     model: params.model
   });
+  if (params.style) {
+    searchParams.set("style", params.style);
+  }
   return `/generate?${searchParams.toString()}`;
 }
 
@@ -36,12 +47,20 @@ export function buildGenerateTaskPath(taskId: string): string {
   return `/generate?${searchParams.toString()}`;
 }
 
-export function saveGenerationDraft(prompt: string): void {
-  const normalizedPrompt = prompt.trim();
+export function saveGenerationDraft(input: string | GenerationDraft): void {
+  const draft = typeof input === "string" ? { prompt: input } : input;
+  const normalizedPrompt = draft.prompt.trim();
   if (!normalizedPrompt || typeof window === "undefined") {
     return;
   }
-  sessionStorage.setItem(GENERATION_DRAFT_STORAGE_KEY, JSON.stringify({ prompt: normalizedPrompt }));
+  sessionStorage.setItem(
+    GENERATION_DRAFT_STORAGE_KEY,
+    JSON.stringify({
+      ...draft,
+      prompt: normalizedPrompt,
+      negativePrompt: draft.negativePrompt?.trim()
+    })
+  );
 }
 
 export function consumeGenerationDraft(): GenerationDraft | null {
@@ -55,7 +74,14 @@ export function consumeGenerationDraft(): GenerationDraft | null {
   }
   try {
     const parsed = JSON.parse(rawDraft) as Partial<GenerationDraft>;
-    return typeof parsed.prompt === "string" && parsed.prompt.trim() ? { prompt: parsed.prompt.trim() } : null;
+    if (typeof parsed.prompt !== "string" || !parsed.prompt.trim()) {
+      return null;
+    }
+    return {
+      ...parsed,
+      prompt: parsed.prompt.trim(),
+      negativePrompt: parsed.negativePrompt?.trim()
+    };
   } catch {
     return null;
   }

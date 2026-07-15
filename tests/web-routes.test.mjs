@@ -227,6 +227,37 @@ test("generate entry flows keep prompt drafts out of URLs", async () => {
   assert.match(generatePage, /consumeGenerationDraft/);
 });
 
+test("generate workspace exposes prompt presets, enhancement, and image parameter reuse", async () => {
+  const detailPage = await readFile(join(root, "apps/web/app/images/[imageId]/page.tsx"), "utf8");
+  const generateDrafts = await readFile(join(root, "apps/web/lib/generateDrafts.ts"), "utf8");
+  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const promptPresets = await readFile(join(root, "apps/web/app/generate/promptPresets.ts"), "utf8");
+  const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
+
+  assert.match(promptPresets, /export const promptPresets/);
+  assert.match(promptPresets, /export function enhancePrompt/);
+  assert.match(generatePage, /selectedPresetId/);
+  assert.match(generatePage, /promptPresets/);
+  assert.match(generatePage, /enhancePrompt/);
+  assert.match(generatePage, /风格预设/);
+  assert.match(generatePage, /增强提示词/);
+  assert.match(generatePage, /高级参数/);
+  assert.match(generatePage, /selectedPreset\.style/);
+  assert.doesNotMatch(generatePage, /style:\s*"realistic"/);
+  assert.match(generatePage, /saveGenerationDraft\(currentGenerationDraft\(\)\)/);
+  assert.match(generatePage, /function currentGenerationDraft\(\)/);
+  assert.match(generatePage, /else if \(draft\.mode === "reuse"\)/);
+  assert.match(generatePage, /applyGenerationMetadata/);
+  assert.match(generatePage, /复用参数/);
+  assert.match(generatePage, /生成变体/);
+  assert.match(generateDrafts, /negativePrompt\?: string/);
+  assert.match(generateDrafts, /style\?: string/);
+  assert.match(detailPage, /image\.generationMetadata/);
+  assert.match(historyPage, /项目工作台/);
+  assert.match(historyPage, /\/api\/image-projects/);
+  assert.match(historyPage, /\/api\/images\/\$\{image\.id\}\/project/);
+});
+
 test("generate page restores browser storage state after hydration", async () => {
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
   const componentStart = generatePage.indexOf("function GenerateExperience()");

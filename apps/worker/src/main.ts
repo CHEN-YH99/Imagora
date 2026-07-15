@@ -18,6 +18,7 @@ import {
   DEFAULT_PENDING_TASK_TIMEOUT_MS,
   DEFAULT_RUNNING_TASK_TIMEOUT_MS,
   expireCredits,
+  generationMetadataFromTask,
   maxQuantity,
   refundTaskCredits,
   runGenerationMaintenance,
@@ -491,6 +492,7 @@ async function createImage(
     id,
     taskId: task.id,
     userId: task.userId,
+    projectId: null,
     storageKey: stored.key,
     thumbnailKey,
     thumbnailUrl,
@@ -501,6 +503,7 @@ async function createImage(
     mimeType,
     safetyStatus: "PASSED",
     visibility: "PRIVATE",
+    generationMetadata: generationMetadataFromTask(task),
     deletedAt: null,
     createdAt: now
   };

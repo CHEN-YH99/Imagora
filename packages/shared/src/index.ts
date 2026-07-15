@@ -114,10 +114,38 @@ export interface GenerationTask {
   updatedAt: string;
 }
 
+export interface GenerationMetadata {
+  taskId: string;
+  prompt: string;
+  negativePrompt: string | null;
+  style: StyleId;
+  aspectRatio: AspectRatio;
+  quality: Quality;
+  quantity: number;
+  modelProvider: string;
+  modelName: string;
+  width: number;
+  height: number;
+  creditCost: number;
+  createdAt: string;
+}
+
+export interface ImageProject {
+  id: string;
+  userId: string;
+  name: string;
+  description: string;
+  coverImageId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+
 export interface GeneratedImage {
   id: string;
   taskId: string;
   userId: string;
+  projectId: string | null;
   storageKey: string;
   thumbnailKey: string;
   thumbnailUrl: string;
@@ -128,6 +156,7 @@ export interface GeneratedImage {
   mimeType: string;
   safetyStatus: SafetyStatus;
   visibility: ImageVisibility;
+  generationMetadata: GenerationMetadata;
   deletedAt: string | null;
   createdAt: string;
 }
@@ -305,6 +334,7 @@ export interface StoreData {
   referenceImages: ReferenceImage[];
   generatedImages: GeneratedImage[];
   imageFavorites: ImageFavorite[];
+  imageProjects: ImageProject[];
   plans: Plan[];
   orders: Order[];
   paymentEvents: PaymentEvent[];
@@ -396,6 +426,24 @@ export function publicUser(user: User): PublicUser {
     emailVerifiedAt: user.emailVerifiedAt,
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt
+  };
+}
+
+export function generationMetadataFromTask(task: GenerationTask): GenerationMetadata {
+  return {
+    taskId: task.id,
+    prompt: task.prompt,
+    negativePrompt: task.negativePrompt,
+    style: task.style,
+    aspectRatio: task.aspectRatio,
+    quality: task.quality,
+    quantity: task.quantity,
+    modelProvider: task.modelProvider,
+    modelName: task.modelName,
+    width: task.width,
+    height: task.height,
+    creditCost: task.creditCost,
+    createdAt: task.createdAt
   };
 }
 

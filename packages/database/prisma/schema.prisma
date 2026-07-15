@@ -98,6 +98,7 @@ model User {
   tasks          GenerationTask[]
   referenceImages ReferenceImage[]
   images         GeneratedImage[]
+  imageProjects  ImageProject[]
   favorites      ImageFavorite[]
   orders         Order[]
   safetyEvents   SafetyEvent[]
@@ -238,6 +239,8 @@ model GeneratedImage {
   task         GenerationTask    @relation(fields: [taskId], references: [id], onDelete: Cascade)
   userId       String            @map("user_id")
   user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId    String?           @map("project_id")
+  project      ImageProject?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
   storageKey   String            @map("storage_key")
   thumbnailKey String            @map("thumbnail_key")
   thumbnailUrl String?           @map("thumbnail_url")
@@ -248,13 +251,32 @@ model GeneratedImage {
   mimeType     String            @map("mime_type")
   safetyStatus SafetyStatus      @default(PASSED) @map("safety_status")
   visibility   ImageVisibility   @default(PRIVATE)
+  generationMetadata Json        @default("{}") @map("generation_metadata")
   deletedAt    DateTime?         @map("deleted_at")
   createdAt    DateTime          @default(now()) @map("created_at")
   favorites    ImageFavorite[]
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([taskId])
+  @@index([projectId, createdAt(sort: Desc)])
   @@map("generated_images")
+}
+
+model ImageProject {
+  id           String           @id @default(uuid())
+  userId       String           @map("user_id")
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String
+  description  String           @default("")
+  coverImageId String?          @map("cover_image_id")
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+  archivedAt   DateTime?        @map("archived_at")
+  images       GeneratedImage[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+  @@index([userId, archivedAt])
+  @@map("image_projects")
 }
 
 model ImageFavorite {

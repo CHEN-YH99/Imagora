@@ -16,6 +16,7 @@ test("api routes are registered through domain modules instead of main.ts", asyn
   const authRoutes = await readProjectFile("apps/api/src/routes/auth.ts");
   const generationRoutes = await readProjectFile("apps/api/src/routes/generation.ts");
   const imageRoutes = await readProjectFile("apps/api/src/routes/images.ts");
+  const imageProjectRoutes = await readProjectFile("apps/api/src/routes/image-projects.ts");
   const orderRoutes = await readProjectFile("apps/api/src/routes/orders.ts");
   const adminRoutes = await readProjectFile("apps/api/src/routes/admin.ts");
 
@@ -33,6 +34,7 @@ test("api routes are registered through domain modules instead of main.ts", asyn
     "registerAuthRoutes",
     "registerGenerationRoutes",
     "registerImageRoutes",
+    "registerImageProjectRoutes",
     "registerOrderRoutes",
     "registerAdminRoutes"
   ]) {
@@ -51,6 +53,9 @@ test("api routes are registered through domain modules instead of main.ts", asyn
   assert.match(generationRoutes, /\/api\/generation\/tasks/);
   assert.match(generationRoutes, /\/api\/uploads\/reference-images/);
   assert.match(imageRoutes, /\/api\/images\/:imageId\/download-url/);
+  assert.match(imageRoutes, /\/api\/images\/:imageId\/project/);
+  assert.match(imageProjectRoutes, /\/api\/image-projects/);
+  assert.match(imageProjectRoutes, /\/api\/image-projects\/:projectId/);
   assert.match(orderRoutes, /\/api\/orders\/:orderId\/pay/);
   assert.match(orderRoutes, /\/api\/payments\/webhooks\/:provider/);
   assert.match(adminRoutes, /\/api\/admin\/dashboard/);

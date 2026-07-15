@@ -170,6 +170,22 @@ export type Task = {
   updatedAt: string;
 };
 
+export type GenerationMetadata = {
+  taskId: string;
+  prompt: string;
+  negativePrompt: string | null;
+  style: string;
+  aspectRatio: string;
+  quality: string;
+  quantity: number;
+  modelProvider: string;
+  modelName: string;
+  width: number;
+  height: number;
+  creditCost: number;
+  createdAt: string;
+};
+
 export type ReferenceImage = {
   id: string;
   publicUrl: string;
@@ -186,6 +202,7 @@ export type GeneratedImage = {
   id: string;
   taskId: string;
   userId: string;
+  projectId: string | null;
   storageKey?: string;
   thumbnailUrl: string;
   publicUrl: string;
@@ -196,9 +213,23 @@ export type GeneratedImage = {
   mimeType?: string;
   safetyStatus?: "PASSED" | "BLOCKED" | "REVIEW_REQUIRED";
   visibility: "PRIVATE" | "PUBLIC" | "HIDDEN";
+  generationMetadata: GenerationMetadata;
   favorite?: boolean;
   deletedAt: string | null;
   createdAt: string;
+};
+
+export type ImageProject = {
+  id: string;
+  userId: string;
+  name: string;
+  description: string;
+  coverImageId: string | null;
+  coverThumbnailUrl?: string | null;
+  imageCount?: number;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
 };
 
 export type Plan = {

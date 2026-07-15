@@ -3,7 +3,8 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Prisma, PrismaClient } from "../generated/client/index.js";
-import type { CreditLedgerEntry, Plan, SafetyAppeal, StoreData, User } from "@imagora/shared";
+import { generationMetadataFromTask } from "@imagora/shared";
+import type { CreditLedgerEntry, GenerationMetadata, Plan, SafetyAppeal, StoreData, User } from "@imagora/shared";
 
 const workspaceRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const defaultPath = resolve(workspaceRoot, "data", "imagora-store.json");
@@ -162,6 +163,7 @@ export class PrismaStore implements Store {
       referenceImages,
       generatedImages,
       imageFavorites,
+      imageProjects,
       plans,
       orders,
       paymentEvents,
@@ -182,6 +184,7 @@ export class PrismaStore implements Store {
       this.prisma.referenceImage.findMany(),
       this.prisma.generatedImage.findMany(),
       this.prisma.imageFavorite.findMany(),
+      this.prisma.imageProject.findMany(),
       this.prisma.plan.findMany(),
       this.prisma.order.findMany(),
       this.prisma.paymentEvent.findMany(),
@@ -192,6 +195,32 @@ export class PrismaStore implements Store {
       this.prisma.operationalIncident.findMany(),
       this.prisma.alertNotification.findMany()
     ]);
+
+    const generationTaskViews: StoreData["generationTasks"] = generationTasks.map((task) => ({
+      id: task.id,
+      userId: task.userId,
+      clientRequestId: task.clientRequestId,
+      referenceImageId: task.referenceImageId,
+      prompt: task.prompt,
+      negativePrompt: task.negativePrompt,
+      style: task.style as StoreData["generationTasks"][number]["style"],
+      aspectRatio: task.aspectRatio as StoreData["generationTasks"][number]["aspectRatio"],
+      width: task.width,
+      height: task.height,
+      quantity: task.quantity,
+      quality: task.quality as StoreData["generationTasks"][number]["quality"],
+      modelProvider: task.modelProvider,
+      modelName: task.modelName,
+      status: task.status,
+      creditCost: task.creditCost,
+      providerCostCents: task.providerCostCents,
+      failureCode: task.failureCode,
+      failureMessage: task.failureMessage,
+      startedAt: task.startedAt?.toISOString() ?? null,
+      completedAt: task.completedAt?.toISOString() ?? null,
+      createdAt: task.createdAt.toISOString(),
+      updatedAt: task.updatedAt.toISOString()
+    }));
 
     return {
       users: users.map((user) => ({
@@ -249,31 +278,7 @@ export class PrismaStore implements Store {
         expiresAt: entry.expiresAt?.toISOString() ?? null,
         createdAt: entry.createdAt.toISOString()
       })),
-      generationTasks: generationTasks.map((task) => ({
-        id: task.id,
-        userId: task.userId,
-        clientRequestId: task.clientRequestId,
-        referenceImageId: task.referenceImageId,
-        prompt: task.prompt,
-        negativePrompt: task.negativePrompt,
-        style: task.style as StoreData["generationTasks"][number]["style"],
-        aspectRatio: task.aspectRatio as StoreData["generationTasks"][number]["aspectRatio"],
-        width: task.width,
-        height: task.height,
-        quantity: task.quantity,
-        quality: task.quality as StoreData["generationTasks"][number]["quality"],
-        modelProvider: task.modelProvider,
-        modelName: task.modelName,
-        status: task.status,
-        creditCost: task.creditCost,
-        providerCostCents: task.providerCostCents,
-        failureCode: task.failureCode,
-        failureMessage: task.failureMessage,
-        startedAt: task.startedAt?.toISOString() ?? null,
-        completedAt: task.completedAt?.toISOString() ?? null,
-        createdAt: task.createdAt.toISOString(),
-        updatedAt: task.updatedAt.toISOString()
-      })),
+      generationTasks: generationTaskViews,
       referenceImages: referenceImages.map((image) => ({
         id: image.id,
         userId: image.userId,
@@ -290,27 +295,46 @@ export class PrismaStore implements Store {
         expiresAt: image.expiresAt.toISOString(),
         deletedAt: image.deletedAt?.toISOString() ?? null
       })),
-      generatedImages: generatedImages.map((image) => ({
-        id: image.id,
-        taskId: image.taskId,
-        userId: image.userId,
-        storageKey: image.storageKey,
-        thumbnailKey: image.thumbnailKey,
-        thumbnailUrl: image.thumbnailUrl ?? image.publicUrl ?? "",
-        publicUrl: image.publicUrl ?? "",
-        width: image.width,
-        height: image.height,
-        fileSize: image.fileSize,
-        mimeType: image.mimeType,
-        safetyStatus: image.safetyStatus,
-        visibility: image.visibility,
-        deletedAt: image.deletedAt?.toISOString() ?? null,
-        createdAt: image.createdAt.toISOString()
-      })),
+      generatedImages: generatedImages.map((image) => {
+        const createdAt = image.createdAt.toISOString();
+        return {
+          id: image.id,
+          taskId: image.taskId,
+          userId: image.userId,
+          projectId: image.projectId,
+          storageKey: image.storageKey,
+          thumbnailKey: image.thumbnailKey,
+          thumbnailUrl: image.thumbnailUrl ?? image.publicUrl ?? "",
+          publicUrl: image.publicUrl ?? "",
+          width: image.width,
+          height: image.height,
+          fileSize: image.fileSize,
+          mimeType: image.mimeType,
+          safetyStatus: image.safetyStatus,
+          visibility: image.visibility,
+          generationMetadata: normalizeGenerationMetadata(
+            image.generationMetadata,
+            generationTaskViews.find((task) => task.id === image.taskId),
+            { taskId: image.taskId, width: image.width, height: image.height, createdAt }
+          ),
+          deletedAt: image.deletedAt?.toISOString() ?? null,
+          createdAt
+        };
+      }),
       imageFavorites: imageFavorites.map((favorite) => ({
         userId: favorite.userId,
         imageId: favorite.imageId,
         createdAt: favorite.createdAt.toISOString()
+      })),
+      imageProjects: imageProjects.map((project) => ({
+        id: project.id,
+        userId: project.userId,
+        name: project.name,
+        description: project.description,
+        coverImageId: project.coverImageId,
+        createdAt: project.createdAt.toISOString(),
+        updatedAt: project.updatedAt.toISOString(),
+        archivedAt: project.archivedAt?.toISOString() ?? null
       })),
       plans: plans.map((plan) => ({
         id: plan.id,
@@ -433,6 +457,7 @@ export class PrismaStore implements Store {
       await tx.order.deleteMany();
       await tx.imageFavorite.deleteMany();
       await tx.generatedImage.deleteMany();
+      await tx.imageProject.deleteMany();
       await tx.generationTask.deleteMany();
       await tx.referenceImage.deleteMany();
       await tx.creditLedgerEntry.deleteMany();
@@ -588,12 +613,27 @@ export class PrismaStore implements Store {
           }))
         });
       }
+      if (data.imageProjects.length) {
+        await tx.imageProject.createMany({
+          data: data.imageProjects.map((project) => ({
+            id: project.id,
+            userId: project.userId,
+            name: project.name,
+            description: project.description,
+            coverImageId: project.coverImageId,
+            createdAt: toDate(project.createdAt),
+            updatedAt: toDate(project.updatedAt),
+            archivedAt: project.archivedAt ? toDate(project.archivedAt) : null
+          }))
+        });
+      }
       if (data.generatedImages.length) {
         await tx.generatedImage.createMany({
           data: data.generatedImages.map((image) => ({
             id: image.id,
             taskId: image.taskId,
             userId: image.userId,
+            projectId: image.projectId,
             storageKey: image.storageKey,
             thumbnailKey: image.thumbnailKey,
             thumbnailUrl: image.thumbnailUrl || null,
@@ -604,6 +644,7 @@ export class PrismaStore implements Store {
             mimeType: image.mimeType,
             safetyStatus: image.safetyStatus,
             visibility: image.visibility,
+            generationMetadata: generationMetadataToJson(image.generationMetadata),
             deletedAt: image.deletedAt ? toDate(image.deletedAt) : null,
             createdAt: toDate(image.createdAt)
           }))
@@ -839,6 +880,7 @@ export function createSeedData(): StoreData {
     referenceImages: [],
     generatedImages: [],
     imageFavorites: [],
+    imageProjects: [],
     plans: seedPlans(now),
     orders: [],
     paymentEvents: [],
@@ -879,6 +921,7 @@ function createBootstrapAdminData(email: string, password: string): StoreData {
     referenceImages: [],
     generatedImages: [],
     imageFavorites: [],
+    imageProjects: [],
     plans: seedPlans(now),
     orders: [],
     paymentEvents: [],
@@ -1011,6 +1054,21 @@ function seedSafetyRules(now: string) {
 
 function normalizeStoreData(data: Partial<StoreData>): StoreData {
   const now = new Date().toISOString();
+  const generationTasks = (data.generationTasks ?? []).map((task) => ({
+    ...task,
+    referenceImageId: task.referenceImageId ?? null,
+    providerCostCents: task.providerCostCents ?? 0
+  }));
+  const generatedImages = (data.generatedImages ?? []).map((image) => {
+    const task = generationTasks.find((item) => item.id === image.taskId);
+    return {
+      ...image,
+      projectId: image.projectId ?? null,
+      thumbnailUrl: image.thumbnailUrl ?? image.publicUrl ?? "",
+      publicUrl: image.publicUrl ?? "",
+      generationMetadata: normalizeGenerationMetadata(image.generationMetadata, task, image)
+    };
+  });
   return {
     users: data.users ?? [],
     sessions: data.sessions ?? [],
@@ -1021,18 +1079,16 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
       ...entry,
       expiresAt: entry.expiresAt ?? null
     })),
-    generationTasks: (data.generationTasks ?? []).map((task) => ({
-      ...task,
-      referenceImageId: task.referenceImageId ?? null,
-      providerCostCents: task.providerCostCents ?? 0
-    })),
+    generationTasks,
     referenceImages: data.referenceImages ?? [],
-    generatedImages: (data.generatedImages ?? []).map((image) => ({
-      ...image,
-      thumbnailUrl: image.thumbnailUrl ?? image.publicUrl ?? "",
-      publicUrl: image.publicUrl ?? ""
-    })),
+    generatedImages,
     imageFavorites: data.imageFavorites ?? [],
+    imageProjects: (data.imageProjects ?? []).map((project) => ({
+      ...project,
+      description: project.description ?? "",
+      coverImageId: project.coverImageId ?? null,
+      archivedAt: project.archivedAt ?? null
+    })),
     plans: data.plans ?? seedPlans(now),
     orders: data.orders ?? [],
     paymentEvents: data.paymentEvents ?? [],
@@ -1055,6 +1111,74 @@ function normalizeStoreData(data: Partial<StoreData>): StoreData {
       resolvedAt: incident.resolvedAt ?? null
     })),
     alertNotifications: data.alertNotifications ?? []
+  };
+}
+
+function normalizeGenerationMetadata(
+  metadata: unknown,
+  task: StoreData["generationTasks"][number] | undefined,
+  image: Pick<StoreData["generatedImages"][number], "taskId" | "width" | "height" | "createdAt">
+): GenerationMetadata {
+  if (isGenerationMetadata(metadata)) {
+    return metadata;
+  }
+  if (task) {
+    return generationMetadataFromTask(task);
+  }
+  return {
+    taskId: image.taskId,
+    prompt: "",
+    negativePrompt: null,
+    style: "realistic",
+    aspectRatio: "1:1",
+    quality: "standard",
+    quantity: 1,
+    modelProvider: "unknown",
+    modelName: "unknown",
+    width: image.width,
+    height: image.height,
+    creditCost: 0,
+    createdAt: image.createdAt
+  };
+}
+
+function isGenerationMetadata(value: unknown): value is GenerationMetadata {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const metadata = value as Partial<GenerationMetadata>;
+  return (
+    typeof metadata.taskId === "string" &&
+    typeof metadata.prompt === "string" &&
+    (typeof metadata.negativePrompt === "string" || metadata.negativePrompt === null) &&
+    typeof metadata.style === "string" &&
+    typeof metadata.aspectRatio === "string" &&
+    typeof metadata.quality === "string" &&
+    typeof metadata.quantity === "number" &&
+    typeof metadata.modelProvider === "string" &&
+    typeof metadata.modelName === "string" &&
+    typeof metadata.width === "number" &&
+    typeof metadata.height === "number" &&
+    typeof metadata.creditCost === "number" &&
+    typeof metadata.createdAt === "string"
+  );
+}
+
+function generationMetadataToJson(metadata: GenerationMetadata): Prisma.InputJsonObject {
+  return {
+    taskId: metadata.taskId,
+    prompt: metadata.prompt,
+    negativePrompt: metadata.negativePrompt,
+    style: metadata.style,
+    aspectRatio: metadata.aspectRatio,
+    quality: metadata.quality,
+    quantity: metadata.quantity,
+    modelProvider: metadata.modelProvider,
+    modelName: metadata.modelName,
+    width: metadata.width,
+    height: metadata.height,
+    creditCost: metadata.creditCost,
+    createdAt: metadata.createdAt
   };
 }
 

@@ -158,6 +158,31 @@ export const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30)
 });
 
+export const imageQuerySchema = paginationSchema.extend({
+  projectId: z.string().min(1).optional()
+});
+
+export const imageProjectCreateSchema = z
+  .object({
+    name: z.string().trim().min(1).max(80),
+    description: z.string().trim().max(240).optional()
+  })
+  .strict();
+
+export const imageProjectPatchSchema = z
+  .object({
+    name: z.string().trim().min(1).max(80).optional(),
+    description: z.string().trim().max(240).optional(),
+    coverImageId: z.string().min(1).nullable().optional()
+  })
+  .strict();
+
+export const imageProjectAssignmentSchema = z
+  .object({
+    projectId: z.string().min(1).nullable()
+  })
+  .strict();
+
 const adminRangeQuerySchema = paginationSchema.extend({
   createdFrom: z.string().datetime().optional(),
   createdTo: z.string().datetime().optional()
@@ -208,6 +233,7 @@ export const adminAuditQuerySchema = paginationSchema.extend({
 
 export const idParamSchema = z.object({ taskId: z.string().min(1) });
 export const imageParamSchema = z.object({ imageId: z.string().min(1) });
+export const imageProjectParamSchema = z.object({ projectId: z.string().min(1) });
 export const orderParamSchema = z.object({ orderId: z.string().min(1) });
 export const userParamSchema = z.object({ userId: z.string().min(1) });
 export const planParamSchema = z.object({ planId: z.string().min(1) });

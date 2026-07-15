@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Coins, Sparkles, Wand2 } from "lucide-react";
+import { Coins, Copy, RefreshCw, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import {
@@ -16,6 +16,7 @@ import {
   submitSafetyAppeal,
   type CreditAccount,
   type GeneratedImage,
+  type GenerationMetadata,
   type SafetyAppeal,
   type SafetyEvent,
   type Task
@@ -37,12 +38,13 @@ import {
   resolveGenerationViewState,
   resolveProcessingPlaceholderCount
 } from "./generationState";
+import { defaultPromptPreset, enhancePrompt, promptPresets, resolvePromptPreset } from "./promptPresets";
 
 const DEFAULT_PROMPT = "半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节";
-const DEFAULT_NEGATIVE_PROMPT = "低质量、模糊、水印、变形";
-const DEFAULT_ASPECT_RATIO = "1:1";
+const DEFAULT_NEGATIVE_PROMPT = defaultPromptPreset.negativePrompt;
+const DEFAULT_ASPECT_RATIO = defaultPromptPreset.aspectRatio;
 const DEFAULT_QUANTITY = 2;
-const DEFAULT_QUALITY = "standard";
+const DEFAULT_QUALITY = defaultPromptPreset.quality;
 const taskSyncPollIntervalMs = 2_000;
 
 const qualityOptions = [
@@ -79,6 +81,7 @@ function GenerateExperience() {
   const initialTaskId = searchParams.get("taskId");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [negativePrompt, setNegativePrompt] = useState(DEFAULT_NEGATIVE_PROMPT);
+  const [selectedPresetId, setSelectedPresetId] = useState(resolveInitialPreset(searchParams.get("style")));
   const [aspectRatio, setAspectRatio] = useState(resolveInitialAspectRatio(searchParams.get("aspectRatio")));
   const [quantity, setQuantity] = useState(resolveInitialQuantity(searchParams.get("quantity")));
   const [quantityInput, setQuantityInput] = useState(String(quantity));
@@ -99,6 +102,7 @@ function GenerateExperience() {
   const [appealStatus, setAppealStatus] = useState<SafetyAppeal | null>(null);
   const [appealLoading, setAppealLoading] = useState(false);
   const [restoringTaskView, setRestoringTaskView] = useState(Boolean(initialTaskId));
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const browserStorageRestoredRef = useRef(false);
   const quoteRequestSequenceRef = useRef(0);
   const restoringTaskIdRef = useRef<string | null>(null);
@@ -106,6 +110,7 @@ function GenerateExperience() {
   const submittingGenerationRef = useRef(false);
   const taskSyncSequenceRef = useRef(0);
   const generationViewState = resolveGenerationViewState({ loading, restoringTaskView, task, images });
+  const selectedPreset = resolvePromptPreset(selectedPresetId);
   const isGenerationProcessing = generationViewState === "submitting" || generationViewState === "processing";
   const processingAspectRatio = task ? `${task.width} / ${task.height}` : aspectRatio.replace(":", " / ");
   const hasPrompt = prompt.trim().length > 0;
@@ -124,7 +129,7 @@ function GenerateExperience() {
     browserStorageRestoredRef.current = true;
     const draft = consumeGenerationDraft();
     if (draft) {
-      setPrompt(draft.prompt);
+      applyGenerationDraft(draft);
     }
   }, [initialTaskId]);
 
@@ -138,6 +143,7 @@ function GenerateExperience() {
     const q = searchParams.get("quality");
     const qty = searchParams.get("quantity");
     const m = searchParams.get("model");
+    const style = searchParams.get("style");
     if (taskId && submittedTaskIdRef.current === taskId) {
       submittingGenerationRef.current = false;
       setActiveGenerationTaskId(taskId);
@@ -205,6 +211,9 @@ function GenerateExperience() {
     if (m) {
       setModel(resolveSelectableImageModel(m));
     }
+    if (style) {
+      setSelectedPresetId(resolveInitialPreset(style));
+    }
   }, [searchParams, task?.id, task?.status]);
 
   useEffect(() => {
@@ -248,7 +257,7 @@ function GenerateExperience() {
         body: {
           prompt,
           negativePrompt,
-          style: "realistic",
+          style: selectedPreset.style,
           aspectRatio,
           quantity,
           quality,
@@ -271,12 +280,13 @@ function GenerateExperience() {
       canceled = true;
       clearTimeout(timeoutId);
     };
-  }, [aspectRatio, hasPrompt, model, quality, quantity]);
+  }, [aspectRatio, hasPrompt, model, quality, quantity, selectedPreset.style]);
 
   async function ensureLoggedIn(): Promise<void> {
     if (account) return;
-    saveGenerationDraft(prompt);
+    saveGenerationDraft(currentGenerationDraft());
     const generatePath = buildGeneratePath({
+      style: selectedPreset.style,
       aspectRatio,
       quality,
       quantity,
@@ -284,6 +294,18 @@ function GenerateExperience() {
     });
     router.push(`/login?next=${encodeURIComponent(generatePath)}`);
     throw new Error("请先登录后再提交生成。");
+  }
+
+  function currentGenerationDraft() {
+    return {
+      prompt,
+      negativePrompt,
+      style: selectedPreset.style,
+      aspectRatio,
+      quality,
+      quantity,
+      model
+    };
   }
 
   async function loadAccount() {
@@ -362,10 +384,81 @@ function GenerateExperience() {
   function applyTaskParameters(nextTask: Task) {
     setPrompt(nextTask.prompt);
     setNegativePrompt(nextTask.negativePrompt ?? "");
+    setSelectedPresetId(resolveInitialPreset(nextTask.style));
     setAspectRatio(nextTask.aspectRatio);
     setClampedQuantity(nextTask.quantity);
     setQuality(nextTask.quality);
     setModel(resolveSelectableImageModel(nextTask.modelName));
+  }
+
+  function applyGenerationDraft(draft: {
+    prompt: string;
+    negativePrompt?: string;
+    style?: string;
+    aspectRatio?: string;
+    quality?: string;
+    quantity?: number;
+    model?: string;
+    mode?: "reuse" | "variation";
+  }) {
+    setPrompt(draft.prompt);
+    if (draft.negativePrompt !== undefined) {
+      setNegativePrompt(draft.negativePrompt);
+    }
+    if (draft.style) {
+      setSelectedPresetId(resolveInitialPreset(draft.style));
+    }
+    if (draft.aspectRatio && aspectRatioOptions.some((item) => item.value === draft.aspectRatio)) {
+      setAspectRatio(draft.aspectRatio);
+    }
+    if (draft.quality && qualityOptions.some((item) => item.value === draft.quality)) {
+      setQuality(draft.quality);
+    }
+    if (draft.quantity) {
+      setClampedQuantity(draft.quantity);
+    }
+    if (draft.model) {
+      setModel(resolveSelectableImageModel(draft.model));
+    }
+    if (draft.mode === "variation") {
+      setMessage("已载入图片参数，可在提示词中微调后生成变体。");
+      setMessageTone("info");
+    } else if (draft.mode === "reuse") {
+      setMessage("已复用历史参数，可直接提交生成。");
+      setMessageTone("info");
+    }
+  }
+
+  function applyGenerationMetadata(metadata: GenerationMetadata, mode: "reuse" | "variation") {
+    const nextPrompt =
+      mode === "variation" ? `${metadata.prompt}，保持主体一致，生成新的构图与细节变化` : metadata.prompt;
+    setPrompt(nextPrompt);
+    setNegativePrompt(metadata.negativePrompt ?? "");
+    setSelectedPresetId(resolveInitialPreset(metadata.style));
+    setAspectRatio(metadata.aspectRatio);
+    setClampedQuantity(mode === "variation" ? 1 : metadata.quantity);
+    setQuality(metadata.quality);
+    setModel(resolveSelectableImageModel(metadata.modelName));
+    setAdvancedOpen(true);
+    setMessage(mode === "variation" ? "已套用图片参数并准备生成变体。" : "已复用该图片的生成参数。");
+    setMessageTone("info");
+  }
+
+  function handlePresetSelect(presetId: string) {
+    const preset = resolvePromptPreset(presetId);
+    setSelectedPresetId(preset.id);
+    setNegativePrompt(preset.negativePrompt);
+    setAspectRatio(preset.aspectRatio);
+    setQuality(preset.quality);
+  }
+
+  function enhanceCurrentPrompt() {
+    setPrompt(enhancePrompt(prompt, selectedPreset.id));
+    if (!negativePrompt.trim()) {
+      setNegativePrompt(selectedPreset.negativePrompt);
+    }
+    setMessage("提示词已按当前风格增强。");
+    setMessageTone("info");
   }
 
   async function pollActiveGenerationTask(
@@ -482,7 +575,9 @@ function GenerateExperience() {
     taskSyncSequenceRef.current += 1;
     setActiveGenerationTaskId(null);
     clearActiveGenerationTaskId();
-    router.replace(buildGeneratePath({ aspectRatio, quality, quantity, model }), { scroll: false });
+    router.replace(buildGeneratePath({ style: selectedPreset.style, aspectRatio, quality, quantity, model }), {
+      scroll: false
+    });
     setLoading(true);
     setMessage("");
     setMessageTone("danger");
@@ -502,7 +597,7 @@ function GenerateExperience() {
           clientRequestId: crypto.randomUUID(),
           prompt,
           negativePrompt,
-          style: "realistic",
+          style: selectedPreset.style,
           aspectRatio,
           quantity,
           quality,
@@ -590,86 +685,125 @@ function GenerateExperience() {
                   />
                 </label>
 
-                {/* 负向提示词 */}
-                <label className="block text-sm text-white/70">
-                  负向提示词
-                  <input
-                    className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                    value={negativePrompt}
-                    onChange={(event) => setNegativePrompt(event.target.value)}
-                  />
-                </label>
-
-                {/* 模型选择下拉 */}
-                <label className="block text-sm text-white/70">
-                  模型
-                  <select
-                    className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
-                    value={model}
-                    onChange={(event) => setModel(event.target.value)}
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="focus-ring inline-flex items-center gap-2 rounded-full border border-mint/40 px-3 py-2 text-sm text-mint transition-colors duration-200 hover:bg-mint/10"
+                    type="button"
+                    onClick={enhanceCurrentPrompt}
                   >
-                    {IMAGE_MODEL_OPTIONS.map((item) => (
-                      <option key={item.value} value={item.value}>
-                        {item.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  {/* 画面比例下拉 */}
-                  <label className="block text-sm text-white/70">
-                    画面比例
-                    <select
-                      className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
-                      value={aspectRatio}
-                      onChange={(event) => setAspectRatio(event.target.value)}
-                    >
-                      {aspectRatioOptions.map((item) => (
-                        <option key={item.value} value={item.value}>
-                          {item.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  {/* 生成数量 */}
-                  <label className="block text-sm text-white/70">
-                    生成数量
-                    <input
-                      className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                      type="number"
-                      min={1}
-                      max={4}
-                      value={quantityInput}
-                      onFocus={(event) => event.target.select()}
-                      onChange={(event) => setQuantityFromInput(event.target.value)}
-                      onBlur={() => setQuantityInput(String(quantity))}
-                    />
-                  </label>
+                    <Sparkles className="size-4" aria-hidden="true" />
+                    增强提示词
+                  </button>
                 </div>
 
-                {/* 画质选择 */}
                 <fieldset>
-                  <legend className="mb-2 text-sm text-white/70">画质</legend>
-                  <div className="grid grid-cols-3 gap-2">
-                    {qualityOptions.map((item) => (
+                  <legend className="mb-2 text-sm text-white/70">风格预设</legend>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {promptPresets.map((preset) => (
                       <button
-                        key={item.value}
+                        key={preset.id}
                         type="button"
-                        onClick={() => setQuality(item.value)}
-                        className={`focus-ring rounded-2xl border px-3 py-3 text-center transition-colors duration-200 ${
-                          quality === item.value
+                        onClick={() => handlePresetSelect(preset.id)}
+                        className={`focus-ring cursor-pointer rounded-2xl border px-3 py-3 text-left transition-colors duration-200 ${
+                          selectedPreset.id === preset.id
                             ? "border-mint/70 bg-mint/10 text-white"
-                            : "border-white/12 bg-black/28 text-white/70 hover:bg-white/8"
+                            : "border-white/12 bg-black/24 text-white/70 hover:bg-white/8"
                         }`}
                       >
-                        <p className="text-base font-bold">{item.label}</p>
-                        <p className="mt-0.5 text-xs opacity-60">{item.desc}</p>
+                        <span className="block text-sm font-semibold">{preset.name}</span>
+                        <span className="mt-1 block text-xs leading-5 text-white/50">{preset.description}</span>
                       </button>
                     ))}
                   </div>
                 </fieldset>
+
+                <details
+                  className="rounded-2xl border border-white/12 bg-black/18 p-4"
+                  open={advancedOpen}
+                  onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+                >
+                  <summary className="focus-ring flex cursor-pointer list-none items-center gap-2 text-sm font-semibold text-white/78">
+                    <SlidersHorizontal className="size-4 text-cyanx" aria-hidden="true" />
+                    高级参数
+                  </summary>
+                  <div className="mt-4 space-y-4">
+                    <label className="block text-sm text-white/70">
+                      负向提示词
+                      <input
+                        className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+                        value={negativePrompt}
+                        onChange={(event) => setNegativePrompt(event.target.value)}
+                      />
+                    </label>
+
+                    <label className="block text-sm text-white/70">
+                      模型
+                      <select
+                        className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                        value={model}
+                        onChange={(event) => setModel(event.target.value)}
+                      >
+                        {IMAGE_MODEL_OPTIONS.map((item) => (
+                          <option key={item.value} value={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="block text-sm text-white/70">
+                        画面比例
+                        <select
+                          className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                          value={aspectRatio}
+                          onChange={(event) => setAspectRatio(event.target.value)}
+                        >
+                          {aspectRatioOptions.map((item) => (
+                            <option key={item.value} value={item.value}>
+                              {item.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className="block text-sm text-white/70">
+                        生成数量
+                        <input
+                          className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+                          type="number"
+                          min={1}
+                          max={4}
+                          value={quantityInput}
+                          onFocus={(event) => event.target.select()}
+                          onChange={(event) => setQuantityFromInput(event.target.value)}
+                          onBlur={() => setQuantityInput(String(quantity))}
+                        />
+                      </label>
+                    </div>
+
+                    <fieldset>
+                      <legend className="mb-2 text-sm text-white/70">画质</legend>
+                      <div className="grid grid-cols-3 gap-2">
+                        {qualityOptions.map((item) => (
+                          <button
+                            key={item.value}
+                            type="button"
+                            onClick={() => setQuality(item.value)}
+                            className={`focus-ring rounded-2xl border px-3 py-3 text-center transition-colors duration-200 ${
+                              quality === item.value
+                                ? "border-mint/70 bg-mint/10 text-white"
+                                : "border-white/12 bg-black/28 text-white/70 hover:bg-white/8"
+                            }`}
+                          >
+                            <p className="text-base font-bold">{item.label}</p>
+                            <p className="mt-0.5 text-xs opacity-60">{item.desc}</p>
+                          </button>
+                        ))}
+                      </div>
+                    </fieldset>
+                  </div>
+                </details>
 
                 {/* 积分预估 */}
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/12 bg-black/24 p-4">
@@ -802,13 +936,47 @@ function GenerateExperience() {
                     ))
                   : null}
                 {images.map((image, index) => (
-                  <GeneratedImagePreviewButton
-                    key={image.id}
-                    alt="生成图片结果"
-                    ariaLabel={`预览第 ${index + 1} 张生成图片`}
-                    image={image}
-                    onOpen={() => setSelectedPreviewImage(image)}
-                  />
+                  <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/18">
+                    <GeneratedImagePreviewButton
+                      alt="生成图片结果"
+                      ariaLabel={`预览第 ${index + 1} 张生成图片`}
+                      className="rounded-none border-0 border-b border-white/10 bg-transparent hover:translate-y-0"
+                      image={image}
+                      onOpen={() => setSelectedPreviewImage(image)}
+                    />
+                    <div className="space-y-3 p-3">
+                      <dl className="grid gap-2 text-xs text-white/52 sm:grid-cols-2">
+                        <div>
+                          <dt>风格</dt>
+                          <dd className="mt-0.5 text-white/78">
+                            {resolvePromptPreset(image.generationMetadata.style).name}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>模型</dt>
+                          <dd className="mt-0.5 truncate text-white/78">{image.generationMetadata.modelName}</dd>
+                        </div>
+                      </dl>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          className="focus-ring inline-flex items-center gap-1.5 rounded-full border border-white/12 px-3 py-2 text-xs text-white/70 transition-colors duration-200 hover:bg-white/10 hover:text-white"
+                          type="button"
+                          onClick={() => applyGenerationMetadata(image.generationMetadata, "reuse")}
+                        >
+                          <Copy className="size-3.5" aria-hidden="true" />
+                          复用参数
+                        </button>
+                        <button
+                          className="focus-ring inline-flex items-center gap-1.5 rounded-full border border-mint/36 px-3 py-2 text-xs text-mint transition-colors duration-200 hover:bg-mint/10"
+                          type="button"
+                          onClick={() => applyGenerationMetadata(image.generationMetadata, "variation")}
+                        >
+                          <RefreshCw className="size-3.5" aria-hidden="true" />
+                          生成变体
+                        </button>
+                      </div>
+                    </div>
+                  </article>
                 ))}
                 {!terminalGenerationFailureMessage && !isGenerationProcessing && images.length === 0 ? (
                   <div className="sm:col-span-2">
@@ -828,6 +996,10 @@ function GenerateExperience() {
       <GeneratedImageLightbox image={selectedPreviewImage} onClose={() => setSelectedPreviewImage(null)} />
     </AppFrame>
   );
+}
+
+function resolveInitialPreset(value: string | null): string {
+  return resolvePromptPreset(value).id;
 }
 
 function resolveInitialAspectRatio(value: string | null): string {

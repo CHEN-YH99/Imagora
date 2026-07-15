@@ -1,3 +1,4 @@
+import type { ImageProject, StoreData } from "@imagora/shared";
 import type { ApiRouteApp, ApiRouteContext } from "./types.js";
 
 export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext): void {
@@ -7,9 +8,11 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
     envelope,
     envNumber,
     extensionForMimeType,
+    imageProjectAssignmentSchema,
+    imageQuerySchema,
     imageParamSchema,
+    AppError,
     mustFindOwnImage,
-    paginationSchema,
     requireAuth,
     resolveInlineDataUrl,
     storage,
@@ -19,9 +22,13 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
 
   app.get("/api/images", async (request) => {
     const { user, data } = await requireAuth(request);
-    const query = paginationSchema.parse(request.query);
+    const query = imageQuerySchema.parse(request.query);
+    if (query.projectId) {
+      mustFindOwnActiveProject(data, user.id, query.projectId, AppError);
+    }
     const images = data.generatedImages
       .filter((image) => image.userId === user.id && !image.deletedAt && image.visibility !== "HIDDEN")
+      .filter((image) => (query.projectId ? image.projectId === query.projectId : true))
       .sort(descCreated)
       .slice(0, query.limit)
       .map((image) => withFavorite(data, user.id, image));
@@ -65,6 +72,40 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
     });
   });
 
+  app.post("/api/images/:imageId/project", async (request) => {
+    const { user } = await requireAuth(request);
+    const { imageId } = imageParamSchema.parse(request.params);
+    const input = imageProjectAssignmentSchema.parse(request.body);
+    const image = await store.update((data) => {
+      const target = mustFindOwnImage(data, user.id, imageId);
+      const previousProjectId = target.projectId;
+      if (input.projectId) {
+        const project = mustFindOwnActiveProject(data, user.id, input.projectId, AppError);
+        target.projectId = project.id;
+        project.coverImageId ??= target.id;
+        project.updatedAt = new Date().toISOString();
+      } else {
+        target.projectId = null;
+      }
+      if (previousProjectId && previousProjectId !== target.projectId) {
+        const previousProject = data.imageProjects.find((project) => project.id === previousProjectId);
+        if (previousProject?.coverImageId === target.id) {
+          previousProject.coverImageId =
+            data.generatedImages.find(
+              (candidate) =>
+                candidate.userId === user.id &&
+                candidate.projectId === previousProject.id &&
+                candidate.id !== target.id &&
+                !candidate.deletedAt
+            )?.id ?? null;
+          previousProject.updatedAt = new Date().toISOString();
+        }
+      }
+      return withFavorite(data, user.id, target);
+    });
+    return envelope(request, { image });
+  });
+
   app.delete("/api/images/:imageId/favorite", async (request) => {
     const { user } = await requireAuth(request);
     const { imageId } = imageParamSchema.parse(request.params);
@@ -102,7 +143,35 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
     return store.update((data) => {
       const image = mustFindOwnImage(data, user.id, imageId);
       image.deletedAt = new Date().toISOString();
+      for (const project of data.imageProjects) {
+        if (project.userId === user.id && project.coverImageId === image.id) {
+          project.coverImageId =
+            data.generatedImages.find(
+              (candidate) =>
+                candidate.userId === user.id &&
+                candidate.projectId === project.id &&
+                candidate.id !== image.id &&
+                !candidate.deletedAt
+            )?.id ?? null;
+          project.updatedAt = image.deletedAt;
+        }
+      }
       return envelope(request, { imageId, deleted: true });
     });
   });
+}
+
+function mustFindOwnActiveProject(
+  data: StoreData,
+  userId: string,
+  projectId: string,
+  AppError: ApiRouteContext["AppError"]
+): ImageProject {
+  const project = data.imageProjects.find(
+    (item) => item.id === projectId && item.userId === userId && !item.archivedAt
+  );
+  if (!project) {
+    throw new AppError("NOT_FOUND", "Image project was not found", 404);
+  }
+  return project;
 }

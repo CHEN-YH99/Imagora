@@ -5,13 +5,14 @@ import { useEffect, useState } from "react";
 import { ArrowUpRight, Heart } from "lucide-react";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel } from "../../components/AppFrame";
 import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
-import { apiFetch, type GeneratedImage } from "../../lib/api";
+import { apiFetch, type GeneratedImage, type ImageProject } from "../../lib/api";
 
 export default function FavoritesPage() {
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [message, setMessage] = useState("");
   const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
   const [pendingRemove, setPendingRemove] = useState<GeneratedImage | null>(null);
+  const [projects, setProjects] = useState<ImageProject[]>([]);
   const [removing, setRemoving] = useState(false);
 
   useEffect(() => {
@@ -20,8 +21,14 @@ export default function FavoritesPage() {
 
   async function loadFavorites() {
     setMessage("");
-    apiFetch<{ images: GeneratedImage[] }>("/api/images?limit=100")
-      .then((result) => setImages(result.images.filter((image) => image.favorite)))
+    Promise.all([
+      apiFetch<{ images: GeneratedImage[] }>("/api/images?limit=100"),
+      apiFetch<{ projects: ImageProject[] }>("/api/image-projects")
+    ])
+      .then(([imageResult, projectResult]) => {
+        setImages(imageResult.images.filter((image) => image.favorite));
+        setProjects(projectResult.projects);
+      })
       .catch((error) => setMessage(error instanceof Error ? error.message : "收藏加载失败，请稍后重试。"));
   }
 
@@ -43,6 +50,19 @@ export default function FavoritesPage() {
       setMessage(error instanceof Error ? error.message : "取消收藏失败，请稍后重试。");
     } finally {
       setRemoving(false);
+    }
+  }
+
+  async function assignImageProject(image: GeneratedImage, projectId: string | null) {
+    try {
+      const result = await apiFetch<{ image: GeneratedImage }>(`/api/images/${image.id}/project`, {
+        method: "POST",
+        body: { projectId }
+      });
+      setImages((items) => items.map((item) => (item.id === image.id ? { ...result.image, favorite: true } : item)));
+      setMessage(projectId ? "收藏图片已保存到项目。" : "收藏图片已移出项目。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "项目移动失败，请稍后重试。");
     }
   }
 
@@ -96,6 +116,21 @@ export default function FavoritesPage() {
                   </button>
                 </div>
               </div>
+              <label className="mt-3 block text-xs text-white/50">
+                项目
+                <select
+                  className="focus-ring mt-1 w-full rounded-full border border-white/12 bg-black px-3 py-2 text-xs text-white/72"
+                  value={image.projectId ?? ""}
+                  onChange={(event) => void assignImageProject(image, event.target.value || null)}
+                >
+                  <option value="">未分组</option>
+                  {projects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </article>
           ))}
           {images.length === 0 ? (

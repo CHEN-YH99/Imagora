@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { ArrowUpRight, Copy, Download, Heart, RefreshCw, Trash2 } from "lucide-react";
+import { Archive, ArrowUpRight, Copy, Download, FolderPlus, Heart, RefreshCw, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
@@ -13,6 +13,7 @@ import {
   formatStyleLabel,
   resolveSelectableImageModel,
   type GeneratedImage,
+  type ImageProject,
   type Task
 } from "../../lib/api";
 import { buildGeneratePath, saveGenerationDraft } from "../../lib/generateDrafts";
@@ -33,11 +34,17 @@ export default function HistoryPage() {
   const [message, setMessage] = useState("");
   const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
   const [pendingDeleteImage, setPendingDeleteImage] = useState<GeneratedImage | null>(null);
+  const [projects, setProjects] = useState<ImageProject[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [pendingArchiveProject, setPendingArchiveProject] = useState<ImageProject | null>(null);
+  const [archivingProject, setArchivingProject] = useState(false);
   const [deletingImage, setDeletingImage] = useState(false);
 
   useEffect(() => {
     void loadHistory();
-  }, []);
+  }, [selectedProjectId]);
 
   useEffect(() => {
     if (!selectedTaskId) {
@@ -92,12 +99,20 @@ export default function HistoryPage() {
       setMessage("");
     }
     try {
-      const [taskResult, imageResult] = await Promise.all([
+      const imagesPath = selectedProjectId
+        ? `/api/images?projectId=${encodeURIComponent(selectedProjectId)}&limit=50`
+        : "/api/images?limit=50";
+      const [taskResult, imageResult, projectResult] = await Promise.all([
         apiFetch<{ tasks: Task[] }>("/api/generation/tasks?limit=50"),
-        apiFetch<{ images: GeneratedImage[] }>("/api/images?limit=50")
+        apiFetch<{ images: GeneratedImage[] }>(imagesPath),
+        apiFetch<{ projects: ImageProject[] }>("/api/image-projects")
       ]);
       setTasks(taskResult.tasks);
       setImages(imageResult.images);
+      setProjects(projectResult.projects);
+      if (selectedProjectId && !projectResult.projects.some((project) => project.id === selectedProjectId)) {
+        setSelectedProjectId(null);
+      }
       setSelectedTaskId((value) => value ?? taskResult.tasks[0]?.id ?? null);
     } catch (error) {
       if (!options.quiet) {
@@ -182,10 +197,101 @@ export default function HistoryPage() {
     }
   }
 
+  async function createProject() {
+    const name = newProjectName.trim();
+    if (!name) {
+      setMessage("请输入项目名称。");
+      return;
+    }
+    setCreatingProject(true);
+    try {
+      const result = await apiFetch<{ project: ImageProject }>("/api/image-projects", {
+        method: "POST",
+        body: { name, description: "从历史资产工作台创建" }
+      });
+      setProjects((items) => [result.project, ...items]);
+      setSelectedProjectId(result.project.id);
+      setNewProjectName("");
+      setMessage("项目已创建。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "项目创建失败，请稍后重试。");
+    } finally {
+      setCreatingProject(false);
+    }
+  }
+
+  async function assignImageProject(image: GeneratedImage, projectId: string | null) {
+    try {
+      const result = await apiFetch<{ image: GeneratedImage }>(`/api/images/${image.id}/project`, {
+        method: "POST",
+        body: { projectId }
+      });
+      setImages((items) =>
+        selectedProjectId && projectId !== selectedProjectId
+          ? items.filter((item) => item.id !== image.id)
+          : items.map((item) => (item.id === image.id ? result.image : item))
+      );
+      setDetail((value) =>
+        value
+          ? {
+              ...value,
+              images: value.images.map((item) => (item.id === image.id ? result.image : item))
+            }
+          : value
+      );
+      await loadProjectsQuietly();
+      setMessage(projectId ? "图片已保存到项目。" : "图片已移出项目。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "项目移动失败，请稍后重试。");
+    }
+  }
+
+  async function loadProjectsQuietly() {
+    try {
+      const result = await apiFetch<{ projects: ImageProject[] }>("/api/image-projects");
+      setProjects(result.projects);
+    } catch {
+      // 项目计数刷新失败不应覆盖刚完成的图片操作提示。
+    }
+  }
+
+  async function confirmArchiveProject() {
+    if (!pendingArchiveProject) {
+      return;
+    }
+    setArchivingProject(true);
+    try {
+      await apiFetch<{ projectId: string; archived: boolean }>(`/api/image-projects/${pendingArchiveProject.id}`, {
+        method: "DELETE"
+      });
+      setProjects((items) => items.filter((project) => project.id !== pendingArchiveProject.id));
+      if (selectedProjectId === pendingArchiveProject.id) {
+        setSelectedProjectId(null);
+      }
+      setPendingArchiveProject(null);
+      setMessage("项目已归档，图片已回到未分组状态。");
+      void loadHistory({ quiet: true });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "项目归档失败，请稍后重试。");
+    } finally {
+      setArchivingProject(false);
+    }
+  }
+
   function regenerateTask(task: Task) {
-    saveGenerationDraft(task.prompt);
+    saveGenerationDraft({
+      prompt: task.prompt,
+      negativePrompt: task.negativePrompt ?? undefined,
+      style: task.style,
+      aspectRatio: task.aspectRatio,
+      quality: task.quality,
+      quantity: task.quantity,
+      model: resolveSelectableImageModel(task.modelName),
+      mode: "reuse"
+    });
     router.push(
       buildGeneratePath({
+        style: task.style,
         aspectRatio: task.aspectRatio,
         quality: task.quality,
         quantity: task.quantity,
@@ -208,6 +314,68 @@ export default function HistoryPage() {
           </InlineNotice>
         </div>
       ) : null}
+      <Panel className="mb-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-semibold">项目工作台</h2>
+            <p className="mt-1 text-sm text-white/52">按项目集整理历史图片，确认可复用素材后再收藏、下载或生成变体。</p>
+          </div>
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-72">
+            <div className="flex gap-2">
+              <input
+                className="focus-ring min-w-0 flex-1 rounded-2xl border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                value={newProjectName}
+                onChange={(event) => setNewProjectName(event.target.value)}
+                placeholder="新项目名称"
+              />
+              <button
+                className="focus-ring inline-flex items-center gap-2 rounded-full bg-mint px-3 py-2 text-sm font-semibold text-ink hover:bg-volt disabled:opacity-60"
+                type="button"
+                disabled={creatingProject || !newProjectName.trim()}
+                onClick={() => void createProject()}
+              >
+                <FolderPlus className="size-4" aria-hidden="true" />
+                创建
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            className={`focus-ring rounded-full border px-3 py-2 text-sm transition-colors duration-200 ${
+              selectedProjectId === null
+                ? "border-mint/70 bg-mint/10 text-white"
+                : "border-white/12 text-white/68 hover:bg-white/10"
+            }`}
+            type="button"
+            onClick={() => setSelectedProjectId(null)}
+          >
+            全部资产 · {images.length}
+          </button>
+          {projects.map((project) => (
+            <span key={project.id} className="inline-flex items-center gap-1 rounded-full border border-white/12">
+              <button
+                className={`focus-ring rounded-l-full px-3 py-2 text-sm transition-colors duration-200 ${
+                  selectedProjectId === project.id ? "bg-mint/10 text-white" : "text-white/68 hover:bg-white/10"
+                }`}
+                type="button"
+                onClick={() => setSelectedProjectId(project.id)}
+              >
+                {project.name} · {project.imageCount ?? 0}
+              </button>
+              <button
+                className="focus-ring rounded-r-full px-2 py-2 text-white/48 transition-colors hover:bg-white/10 hover:text-white"
+                type="button"
+                aria-label={`归档项目 ${project.name}`}
+                title="归档项目"
+                onClick={() => setPendingArchiveProject(project)}
+              >
+                <Archive className="size-3.5" aria-hidden="true" />
+              </button>
+            </span>
+          ))}
+        </div>
+      </Panel>
       <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
         <Panel>
           <div className="mb-4 flex items-center justify-between gap-3">
@@ -359,6 +527,21 @@ export default function HistoryPage() {
                     >
                       <Download className="size-4" aria-hidden="true" />
                     </button>
+                    <label className="min-w-36 flex-1 text-xs text-white/50">
+                      项目
+                      <select
+                        className="focus-ring mt-1 w-full rounded-full border border-white/12 bg-black px-3 py-2 text-xs text-white/72"
+                        value={image.projectId ?? ""}
+                        onChange={(event) => void assignImageProject(image, event.target.value || null)}
+                      >
+                        <option value="">未分组</option>
+                        {projects.map((project) => (
+                          <option key={project.id} value={project.id}>
+                            {project.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     <button
                       className="icon-action"
                       type="button"
@@ -382,6 +565,15 @@ export default function HistoryPage() {
         loading={deletingImage}
         onCancel={() => setPendingDeleteImage(null)}
         onConfirm={() => void confirmDeleteImage()}
+      />
+      <ConfirmDialog
+        open={Boolean(pendingArchiveProject)}
+        title="确认归档项目？"
+        description="归档后项目会从工作台隐藏，项目内图片不会删除，会回到未分组状态。"
+        confirmLabel="归档项目"
+        loading={archivingProject}
+        onCancel={() => setPendingArchiveProject(null)}
+        onConfirm={() => void confirmArchiveProject()}
       />
       <GeneratedImageLightbox image={selectedPreviewImage} onClose={() => setSelectedPreviewImage(null)} />
     </AppFrame>
