@@ -185,7 +185,7 @@ export function GeneratedImageLightbox({
         onClick={(event) => event.stopPropagation()}
       >
         <div
-          className="relative flex max-h-[82vh] max-w-[96vw] items-center justify-center overflow-hidden rounded-2xl border border-white/16 bg-black/30 shadow-glow"
+          className="relative flex max-h-[82vh] max-w-[96vw] items-center justify-center overflow-hidden"
           style={lightboxFrameStyle(image.width, image.height)}
         >
           {lightboxSrc && !imageLoadFailed ? (

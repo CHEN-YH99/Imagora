@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Coins, Copy, RefreshCw, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
+import { Coins, Copy, Download, RefreshCw, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import {
@@ -459,6 +459,23 @@ function GenerateExperience() {
     }
     setMessage("提示词已按当前风格增强。");
     setMessageTone("info");
+  }
+
+  async function downloadImage(image: GeneratedImage) {
+    try {
+      const result = await apiFetch<{ url: string; fileName: string }>(`/api/images/${image.id}/download-url`, {
+        method: "POST",
+        body: {}
+      });
+      const anchor = document.createElement("a");
+      anchor.href = result.url;
+      anchor.download = result.fileName;
+      anchor.rel = "noreferrer";
+      anchor.click();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "下载链接获取失败，请稍后重试。");
+      setMessageTone("danger");
+    }
   }
 
   async function pollActiveGenerationTask(
@@ -936,7 +953,7 @@ function GenerateExperience() {
                     ))
                   : null}
                 {images.map((image, index) => (
-                  <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/18">
+                  <article key={image.id} className="relative overflow-hidden rounded-2xl border border-white/12 bg-black/18">
                     <GeneratedImagePreviewButton
                       alt="生成图片结果"
                       ariaLabel={`预览第 ${index + 1} 张生成图片`}
@@ -944,6 +961,15 @@ function GenerateExperience() {
                       image={image}
                       onOpen={() => setSelectedPreviewImage(image)}
                     />
+                    <button
+                      className="focus-ring group/download absolute right-3 top-3 z-10 inline-flex size-9 items-center justify-center rounded-full border border-white/16 bg-ink/70 text-white/80 backdrop-blur-md transition duration-200 motion-reduce:transform-none motion-reduce:transition-none hover:-translate-y-0.5 hover:scale-105 hover:border-mint/70 hover:bg-ink/85 hover:text-mint hover:shadow-glow"
+                      type="button"
+                      aria-label={`下载第 ${index + 1} 张生成图片`}
+                      title="下载图片"
+                      onClick={() => void downloadImage(image)}
+                    >
+                      <Download className="size-4 transition-transform duration-200 motion-reduce:transform-none group-hover/download:translate-y-0.5" aria-hidden="true" />
+                    </button>
                     <div className="space-y-3 p-3">
                       <dl className="grid gap-2 text-xs text-white/52 sm:grid-cols-2">
                         <div>
