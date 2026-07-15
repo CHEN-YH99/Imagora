@@ -21,6 +21,18 @@ services:
       timeout: 5s
       retries: 10
 
+  migrate:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
+    command: ["npm", "--workspace", "@imagora/database", "run", "prisma:migrate-deploy"]
+    restart: "no"
+
   api:
     build:
       context: ..
@@ -30,6 +42,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 4100
@@ -98,6 +112,13 @@ services:
       ALERT_PENDING_ORDERS_MAX: ${ALERT_PENDING_ORDERS_MAX:-50}
       ALERT_PAYMENT_AMOUNT_MISMATCH_MAX: ${ALERT_PAYMENT_AMOUNT_MISMATCH_MAX:-0}
       ALERT_HTTP_FAILURE_RATE: ${ALERT_HTTP_FAILURE_RATE:-0.05}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      ALERT_WEBHOOK_TIMEOUT_MS: ${ALERT_WEBHOOK_TIMEOUT_MS:-10000}
+      ALERT_WEBHOOK_MAX_ATTEMPTS: ${ALERT_WEBHOOK_MAX_ATTEMPTS:-3}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      ALERT_COOLDOWN_MS: ${ALERT_COOLDOWN_MS:-1800000}
+      ALERT_EVALUATION_INTERVAL_MS: ${ALERT_EVALUATION_INTERVAL_MS:-60000}
+      ALERT_NOTIFICATION_RETENTION_MAX: ${ALERT_NOTIFICATION_RETENTION_MAX:-100}
     healthcheck:
       test:
         [
@@ -117,6 +138,8 @@ services:
       context: ..
       dockerfile: infra/Dockerfile.worker
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       api:
         condition: service_healthy
     environment:
