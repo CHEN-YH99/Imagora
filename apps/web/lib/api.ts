@@ -47,6 +47,36 @@ export function resolveImageSrc(...candidates: Array<string | null | undefined>)
   return null;
 }
 
+// 触发生成图片下载。filesystem 存储签出的是 /api/files 相对路径，需补全到 API 域名；
+// 且 API 与 web 跨域，<a download> 的 download 属性会被浏览器忽略，故先 fetch 成同源 blob
+// 再触发下载。返回下载的文件名供调用方提示。签名 URL 自带 HMAC 校验，无需附带 cookie。
+export async function downloadGeneratedImage(imageId: string): Promise<string> {
+  const result = await apiFetch<{ url: string; fileName: string }>(`/api/images/${imageId}/download-url`, {
+    method: "POST",
+    body: {}
+  });
+  const downloadSrc = resolveImageSrc(result.url);
+  if (!downloadSrc) {
+    throw new Error("下载链接无效，请稍后重试。");
+  }
+  const response = await fetch(downloadSrc);
+  if (!response.ok) {
+    throw new Error("下载失败，请稍后重试。");
+  }
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = result.fileName;
+    anchor.rel = "noreferrer";
+    anchor.click();
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+  return result.fileName;
+}
+
 function isAuthEndpoint(path: string): boolean {
   return path.startsWith("/api/auth/");
 }

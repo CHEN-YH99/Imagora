@@ -12,7 +12,7 @@ test("web exposes image detail workflow from history and favorites", async () =>
 
   assert.match(detailPage, /\/api\/images\/\$\{imageId\}/);
   assert.match(detailPage, /\/api\/generation\/tasks\/\$\{(?:image|imageResult\.image)\.taskId\}/);
-  assert.match(detailPage, /download-url/);
+  assert.match(detailPage, /downloadGeneratedImage/);
   assert.match(detailPage, /favorite/);
   assert.match(detailPage, /再次生成/);
   assert.match(detailPage, /删除图片/);
@@ -33,6 +33,8 @@ test("web auth pages validate inputs and registration does not ask for nickname"
   const resetPasswordPage = await readFile(join(root, "apps/web/app/reset-password/page.tsx"), "utf8");
   const verifyEmailPage = await readFile(join(root, "apps/web/app/verify-email/page.tsx"), "utf8");
 
+  assert.match(apiClient, /downloadGeneratedImage/);
+  assert.match(apiClient, /download-url/);
   assert.match(appFrame, /role="dialog"/);
   assert.match(appFrame, /确认退出/);
   assert.match(appFrame, /await apiLogout/);

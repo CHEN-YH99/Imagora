@@ -8,6 +8,7 @@ import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } 
 import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import {
   apiFetch,
+  downloadGeneratedImage,
   formatCredits,
   formatQualityLabel,
   formatStyleLabel,
@@ -163,15 +164,12 @@ export default function HistoryPage() {
   }
 
   async function downloadImage(image: GeneratedImage) {
-    const result = await apiFetch<{ url: string; fileName: string }>(`/api/images/${image.id}/download-url`, {
-      method: "POST",
-      body: {}
-    });
-    const anchor = document.createElement("a");
-    anchor.href = result.url;
-    anchor.download = result.fileName;
-    anchor.rel = "noreferrer";
-    anchor.click();
+    try {
+      const fileName = await downloadGeneratedImage(image.id);
+      setMessage(`已开始下载 ${fileName}`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "下载失败，请稍后重试。");
+    }
   }
 
   async function confirmDeleteImage() {

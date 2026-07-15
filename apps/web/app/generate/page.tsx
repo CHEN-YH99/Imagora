@@ -12,6 +12,7 @@ import {
   apiFetch,
   formatCredits,
   getSafetyAppeals,
+  downloadGeneratedImage,
   resolveSelectableImageModel,
   submitSafetyAppeal,
   type CreditAccount,
@@ -463,15 +464,7 @@ function GenerateExperience() {
 
   async function downloadImage(image: GeneratedImage) {
     try {
-      const result = await apiFetch<{ url: string; fileName: string }>(`/api/images/${image.id}/download-url`, {
-        method: "POST",
-        body: {}
-      });
-      const anchor = document.createElement("a");
-      anchor.href = result.url;
-      anchor.download = result.fileName;
-      anchor.rel = "noreferrer";
-      anchor.click();
+      await downloadGeneratedImage(image.id);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "下载链接获取失败，请稍后重试。");
       setMessageTone("danger");
