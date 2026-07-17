@@ -249,6 +249,13 @@ export type GeneratedImage = {
   createdAt: string;
 };
 
+export type PageInfo = {
+  offset: number;
+  limit: number;
+  total: number;
+  hasMore: boolean;
+};
+
 export type ImageProject = {
   id: string;
   userId: string;
@@ -552,6 +559,15 @@ async function readApiPayload<T>(
   }
 }
 
+export type CaptchaConfig = {
+  mode: "builtin" | "turnstile";
+  turnstile: { enabled: boolean; siteKey: string };
+};
+
+export async function getCaptchaConfig(): Promise<CaptchaConfig> {
+  return apiFetch<CaptchaConfig>("/api/auth/captcha-config");
+}
+
 export async function getLoginCaptcha(): Promise<CaptchaChallenge> {
   return apiFetch<CaptchaChallenge>("/api/auth/captcha");
 }
@@ -569,20 +585,29 @@ export async function verifyLoginCaptcha(
 export async function login(
   email: string,
   password: string,
-  captchaVerificationIds: string[]
+  options: { captchaVerificationIds?: string[]; turnstileToken?: string } = {}
 ): Promise<{ user: User }> {
   const result = await apiFetch<{ user: User }>("/api/auth/login", {
     method: "POST",
-    body: { email, password, captchaVerificationIds }
+    body: {
+      email,
+      password,
+      captchaVerificationIds: options.captchaVerificationIds,
+      turnstileToken: options.turnstileToken
+    }
   });
   setCurrentUser(result.user);
   return result;
 }
 
-export async function register(email: string, password: string): Promise<{ user: User; emailDelivered: boolean }> {
+export async function register(
+  email: string,
+  password: string,
+  options?: { turnstileToken?: string }
+): Promise<{ user: User; emailDelivered: boolean }> {
   const result = await apiFetch<{ user: User; emailDelivered: boolean }>("/api/auth/register", {
     method: "POST",
-    body: { email, password }
+    body: { email, password, turnstileToken: options?.turnstileToken }
   });
   setCurrentUser(result.user);
   return result;
@@ -687,6 +712,7 @@ const labelMap: Record<string, string> = {
   ADMIN: "管理员",
   ADJUST: "人工调整",
   ACKNOWLEDGED: "已确认",
+  APPROVED: "已通过",
   BLOCK: "拦截",
   BLOCKED: "已拦截",
   CANCELED: "已取消",
@@ -708,6 +734,7 @@ const labelMap: Record<string, string> = {
   PUBLIC: "公开",
   REFUND: "退回",
   REFUNDED: "已退款",
+  REJECTED: "已驳回",
   RESOLVED: "已解决",
   REVIEW: "复核",
   REVIEW_REQUIRED: "待复核",
@@ -765,6 +792,7 @@ const auditActionMap: Record<string, string> = {
   "maintenance.reconcile": "订单对账",
   "plan.create": "创建套餐",
   "plan.update": "更新套餐",
+  "safety-appeal.review": "安全申诉处理",
   "safety-rule.create": "新增安全规则",
   "safety-rule.update": "更新安全规则",
   "safety-event.review": "安全事件复核",
@@ -779,6 +807,7 @@ const targetTypeMap: Record<string, string> = {
   PROMPT: "提示词",
   SAFETY_RULE: "安全规则",
   SAFETY_EVENT: "安全事件",
+  SAFETY_APPEAL: "安全申诉",
   SYSTEM: "系统",
   TASK: "任务",
   UPLOAD_IMAGE: "参考图",

@@ -78,13 +78,41 @@ test("web auth pages validate inputs and registration does not ask for nickname"
   assert.match(apiSchemas, /password: newPasswordSchema/);
   assert.match(apiSchemas, /export const registerSchema/);
   assert.match(apiMain, /from "\.\/schemas\.js"/);
-  assert.match(apiMain, /captchaVerifications/);
+  assert.match(apiMain, /saveCaptchaVerification/);
   assert.match(apiMain, /captchaRequiredRounds/);
   assert.match(apiAuthRoutes, /captchaSelections/);
   assert.match(apiAuthRoutes, /createCaptchaChallenge/);
   assert.match(nextConfig, /X-Content-Type-Options/);
   assert.match(nextConfig, /X-Frame-Options/);
   assert.match(nextConfig, /Permissions-Policy/);
+});
+
+test("web auth pages wire Turnstile tokens through the configured captcha mode", async () => {
+  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const apiAuthRoutes = await readFile(join(root, "apps/api/src/routes/auth.ts"), "utf8");
+  const loginPage = await readFile(join(root, "apps/web/app/login/page.tsx"), "utf8");
+  const registerPage = await readFile(join(root, "apps/web/app/register/page.tsx"), "utf8");
+
+  assert.match(apiAuthRoutes, /\/api\/auth\/captcha-config/);
+  assert.match(apiClient, /\/api\/auth\/captcha-config/);
+  assert.doesNotMatch(apiClient, /\/api\/auth\/captcha\/config/);
+
+  assert.match(apiClient, /turnstileToken\?: string/);
+  assert.match(apiClient, /captchaVerificationIds\?: string\[\]/);
+  assert.match(apiClient, /turnstileToken: options\.turnstileToken/);
+  assert.match(apiClient, /captchaVerificationIds: options\.captchaVerificationIds/);
+
+  assert.match(loginPage, /validateLoginForm\(\s*email,\s*password,\s*\{/);
+  assert.match(loginPage, /turnstileEnabled,/);
+  assert.match(loginPage, /turnstileToken,/);
+  assert.match(loginPage, /turnstileEnabled \? \{ turnstileToken \} : \{ captchaVerificationIds \}/);
+  assert.match(loginPage, /请先完成人机验证。/);
+  assert.match(loginPage, /setTurnstileResetKey\(\(key\) => key \+ 1\)/);
+
+  assert.match(registerPage, /const \[turnstileResetKey, setTurnstileResetKey\] = useState\(0\);/);
+  assert.match(registerPage, /turnstileEnabled \? \{ turnstileToken \} : undefined/);
+  assert.match(registerPage, /setTurnstileResetKey\(\(key\) => key \+ 1\)/);
+  assert.doesNotMatch(registerPage, /handleToken = useCallback/);
 });
 
 test("web falls back to login globally when a protected request returns 401", async () => {
@@ -111,6 +139,7 @@ test("web falls back to login globally when a protected request returns 401", as
 });
 
 test("web core pages expose recoverable empty states and confirm destructive actions", async () => {
+  const apiSchemas = await readFile(join(root, "apps/api/src/schemas.ts"), "utf8");
   const accountPage = await readFile(join(root, "apps/web/app/account/page.tsx"), "utf8");
   const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
   const appFrame = await readFile(join(root, "apps/web/components/AppFrame.tsx"), "utf8");
@@ -173,6 +202,12 @@ test("web core pages expose recoverable empty states and confirm destructive act
   assert.match(pricingPage, /router\.replace/);
   assert.match(pricingPage, /buyingPlanId/);
   assert.match(pricingPage, /clientRequestId: crypto\.randomUUID\(\)/);
+  assert.match(apiSchemas, /export const createOrderSchema/);
+  assert.match(apiSchemas, /clientRequestId: z\.string\(\)\.min\(8\)\.max\(120\)/);
+  assert.doesNotMatch(
+    apiSchemas,
+    /export const createOrderSchema[\s\S]{0,300}clientRequestId: z\.string\(\)\.min\(8\)\.max\(120\)\.optional\(\)/
+  );
   assert.match(favoritesPage, /重新加载收藏/);
   assert.match(favoritesPage, /取消收藏/);
   assert.match(ordersPage, /重新加载订单/);
@@ -346,6 +381,24 @@ test("admin console exposes safety review queue and manual handling actions", as
   assert.match(apiClient, /reviewRequiredSafetyEvents/);
 });
 
+test("admin console exposes safety appeal queue and review actions", async () => {
+  const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
+  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+
+  assert.match(adminPage, /申诉处理/);
+  assert.match(adminPage, /safetyAppeals/);
+  assert.match(adminPage, /safetyAppealStatusFilter/);
+  assert.match(adminPage, /\/api\/admin\/safety-appeals/);
+  assert.match(adminPage, /requestSafetyAppealReview/);
+  assert.match(adminPage, /批准申诉/);
+  assert.match(adminPage, /驳回申诉/);
+  assert.match(adminPage, /safety-appeal/);
+
+  assert.match(apiClient, /export type SafetyAppeal/);
+  assert.match(apiClient, /APPROVED/);
+  assert.match(apiClient, /REJECTED/);
+});
+
 test("generate page exposes safety appeal entry after direct content blocking", async () => {
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
   const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
@@ -473,4 +526,32 @@ test("generate page centralizes view state decisions in a state helper", async (
   assert.match(stateFile, /task\.status === "CANCELED"/);
   assert.doesNotMatch(generatePage, /const isGenerationProcessing =\s*\n\s*images\.length === 0/);
   assert.doesNotMatch(generatePage, /const processingPlaceholderCount = Math\.max/);
+});
+
+test("favorites and history use server-side offset pagination without polling away loaded pages", async () => {
+  const favoritesPage = await readFile(join(root, "apps/web/app/favorites/page.tsx"), "utf8");
+  const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
+
+  assert.match(favoritesPage, /\/api\/images\?favorite=true&limit=\$\{favoritesPageSize\}&offset=\$\{offset\}/);
+  assert.doesNotMatch(favoritesPage, /filter\(\(image\) => image\.favorite\)/);
+  assert.match(favoritesPage, /pageInfo\?\.hasMore/);
+  assert.match(favoritesPage, /加载更多/);
+
+  assert.match(historyPage, /\/api\/generation\/tasks\?limit=\$\{historyPageSize\}&offset=\$\{tasks\.length\}/);
+  assert.match(historyPage, /加载更多任务/);
+  assert.match(historyPage, /imagePageInfo\?\.total \?\? images\.length/);
+  assert.match(historyPage, /function loadMoreImages\(\)/);
+  assert.match(historyPage, /buildImagesPath\(selectedProjectId, nextOffset\)/);
+  assert.match(historyPage, /const nextOffset = imagePageInfo\.offset \+ imagePageInfo\.limit/);
+  assert.doesNotMatch(historyPage, /buildImagesPath\(selectedProjectId, images\.length\)/);
+  assert.match(historyPage, /projectId=\$\{encodeURIComponent\(projectId\)\}&/);
+  assert.match(historyPage, /加载更多资产/);
+  assert.match(historyPage, /detail\?\.task\.id === selectedTaskId/);
+  assert.match(historyPage, /detail && detail\.task\.id === selectedTask\?\.id/);
+  const pollingSection = historyPage.slice(
+    historyPage.indexOf("const refreshActiveTasks"),
+    historyPage.indexOf("async function loadHistory")
+  );
+  assert.doesNotMatch(pollingSection, /loadHistory\(/);
+  assert.match(pollingSection, /activeTaskIds\.map/);
 });

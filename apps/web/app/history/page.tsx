@@ -15,6 +15,7 @@ import {
   resolveSelectableImageModel,
   type GeneratedImage,
   type ImageProject,
+  type PageInfo,
   type Task
 } from "../../lib/api";
 import { buildGeneratePath, saveGenerationDraft } from "../../lib/generateDrafts";
@@ -25,11 +26,14 @@ type TaskDetail = {
 };
 
 const historyTaskPollIntervalMs = 2_000;
+const historyPageSize = 50;
 
 export default function HistoryPage() {
   const router = useRouter();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [images, setImages] = useState<GeneratedImage[]>([]);
+  const [taskPageInfo, setTaskPageInfo] = useState<PageInfo | null>(null);
+  const [imagePageInfo, setImagePageInfo] = useState<PageInfo | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [message, setMessage] = useState("");
@@ -42,6 +46,8 @@ export default function HistoryPage() {
   const [pendingArchiveProject, setPendingArchiveProject] = useState<ImageProject | null>(null);
   const [archivingProject, setArchivingProject] = useState(false);
   const [deletingImage, setDeletingImage] = useState(false);
+  const [loadingMoreTasks, setLoadingMoreTasks] = useState(false);
+  const [loadingMoreImages, setLoadingMoreImages] = useState(false);
 
   useEffect(() => {
     void loadHistory();
@@ -59,30 +65,46 @@ export default function HistoryPage() {
   }, [selectedTaskId]);
 
   const selectedTask = useMemo(
-    () => detail?.task ?? tasks.find((task) => task.id === selectedTaskId) ?? tasks[0] ?? null,
+    () =>
+      (detail?.task.id === selectedTaskId ? detail.task : null) ??
+      tasks.find((task) => task.id === selectedTaskId) ??
+      tasks[0] ??
+      null,
     [detail?.task, selectedTaskId, tasks]
+  );
+  const selectedTaskImages = useMemo(
+    () =>
+      detail && detail.task.id === selectedTask?.id
+        ? detail.images
+        : images.filter((image) => image.taskId === selectedTask?.id),
+    [detail, images, selectedTask?.id]
   );
   const activeTaskIds = useMemo(
     () => tasks.filter((task) => isActiveTaskStatus(task.status)).map((task) => task.id),
     [tasks]
   );
   const activeTaskIdsKey = activeTaskIds.join("|");
+  const loadedImagePageCount = imagePageInfo
+    ? Math.min(imagePageInfo.total, imagePageInfo.offset + imagePageInfo.limit)
+    : images.length;
 
   useEffect(() => {
     const activeSelectedTaskId = selectedTask && isActiveTaskStatus(selectedTask.status) ? selectedTask.id : null;
-    const activeBackgroundTaskIds = activeTaskIds.filter((taskId) => taskId !== activeSelectedTaskId);
-    if (!activeSelectedTaskId && activeBackgroundTaskIds.length === 0) {
+    if (activeTaskIds.length === 0) {
       return;
     }
 
     let canceled = false;
     const refreshActiveTasks = async () => {
-      if (activeSelectedTaskId) {
-        await loadTaskDetail(activeSelectedTaskId, { quiet: true, isCanceled: () => canceled });
-      }
-      if (!canceled && activeBackgroundTaskIds.length > 0) {
-        await loadHistory({ quiet: true });
-      }
+      await Promise.all(
+        activeTaskIds.map((taskId) =>
+          loadTaskDetail(taskId, {
+            quiet: true,
+            setSelectedDetail: taskId === activeSelectedTaskId,
+            isCanceled: () => canceled
+          })
+        )
+      );
     };
     void refreshActiveTasks();
     const intervalId = window.setInterval(() => {
@@ -95,21 +117,39 @@ export default function HistoryPage() {
     };
   }, [activeTaskIdsKey, selectedTask?.id, selectedTask?.status]);
 
-  async function loadHistory(options: { quiet?: boolean } = {}) {
+  async function loadHistory(options: { append?: boolean; quiet?: boolean } = {}) {
+    const append = options.append ?? false;
+    if (append) {
+      if (loadingMoreTasks || !taskPageInfo?.hasMore) {
+        return;
+      }
+      setLoadingMoreTasks(true);
+      try {
+        const taskResult = await apiFetch<{ tasks: Task[]; pageInfo: PageInfo }>(
+          `/api/generation/tasks?limit=${historyPageSize}&offset=${tasks.length}`
+        );
+        setTasks((current) => mergeTasks(current, taskResult.tasks));
+        setTaskPageInfo(taskResult.pageInfo);
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : "更多生成任务加载失败，请稍后重试。");
+      } finally {
+        setLoadingMoreTasks(false);
+      }
+      return;
+    }
     if (!options.quiet) {
       setMessage("");
     }
     try {
-      const imagesPath = selectedProjectId
-        ? `/api/images?projectId=${encodeURIComponent(selectedProjectId)}&limit=50`
-        : "/api/images?limit=50";
       const [taskResult, imageResult, projectResult] = await Promise.all([
-        apiFetch<{ tasks: Task[] }>("/api/generation/tasks?limit=50"),
-        apiFetch<{ images: GeneratedImage[] }>(imagesPath),
+        apiFetch<{ tasks: Task[]; pageInfo: PageInfo }>(`/api/generation/tasks?limit=${historyPageSize}&offset=0`),
+        apiFetch<{ images: GeneratedImage[]; pageInfo: PageInfo }>(buildImagesPath(selectedProjectId, 0)),
         apiFetch<{ projects: ImageProject[] }>("/api/image-projects")
       ]);
       setTasks(taskResult.tasks);
       setImages(imageResult.images);
+      setTaskPageInfo(taskResult.pageInfo);
+      setImagePageInfo(imageResult.pageInfo);
       setProjects(projectResult.projects);
       if (selectedProjectId && !projectResult.projects.some((project) => project.id === selectedProjectId)) {
         setSelectedProjectId(null);
@@ -122,16 +162,37 @@ export default function HistoryPage() {
     }
   }
 
+  async function loadMoreImages() {
+    if (loadingMoreImages || !imagePageInfo?.hasMore) {
+      return;
+    }
+    setLoadingMoreImages(true);
+    try {
+      const nextOffset = imagePageInfo.offset + imagePageInfo.limit;
+      const imageResult = await apiFetch<{ images: GeneratedImage[]; pageInfo: PageInfo }>(
+        buildImagesPath(selectedProjectId, nextOffset)
+      );
+      setImages((current) => appendImages(current, imageResult.images));
+      setImagePageInfo(imageResult.pageInfo);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "更多项目资产加载失败，请稍后重试。");
+    } finally {
+      setLoadingMoreImages(false);
+    }
+  }
+
   async function loadTaskDetail(
     taskId: string,
-    options: { quiet?: boolean; isCanceled?: () => boolean } = {}
+    options: { quiet?: boolean; isCanceled?: () => boolean; setSelectedDetail?: boolean } = {}
   ): Promise<TaskDetail | null> {
     try {
       const result = await apiFetch<TaskDetail>(`/api/generation/tasks/${taskId}`);
       if (options.isCanceled?.()) {
         return null;
       }
-      setDetail(result);
+      if (options.setSelectedDetail !== false) {
+        setDetail(result);
+      }
       setTasks((items) => mergeTaskIntoList(items, result.task));
       setImages((items) => mergeImagesIntoList(items, result.images));
       return result;
@@ -348,7 +409,7 @@ export default function HistoryPage() {
             type="button"
             onClick={() => setSelectedProjectId(null)}
           >
-            全部资产 · {images.length}
+            全部资产 · {imagePageInfo?.total ?? images.length}
           </button>
           {projects.map((project) => (
             <span key={project.id} className="inline-flex items-center gap-1 rounded-full border border-white/12">
@@ -373,6 +434,20 @@ export default function HistoryPage() {
             </span>
           ))}
         </div>
+        {imagePageInfo?.hasMore ? (
+          <div className="mt-4 flex justify-end">
+            <button
+              className="focus-ring rounded-full border border-white/12 px-4 py-2 text-sm text-white/72 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={loadingMoreImages}
+              onClick={() => void loadMoreImages()}
+              type="button"
+            >
+              {loadingMoreImages
+                ? "正在加载…"
+                : `加载更多资产（已载入 ${loadedImagePageCount}/${imagePageInfo.total}）`}
+            </button>
+          </div>
+        ) : null}
       </Panel>
       <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
         <Panel>
@@ -409,6 +484,16 @@ export default function HistoryPage() {
                 </p>
               </button>
             ))}
+            {taskPageInfo?.hasMore ? (
+              <button
+                className="focus-ring w-full rounded-2xl border border-white/12 px-4 py-3 text-sm text-white/72 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={loadingMoreTasks}
+                onClick={() => void loadHistory({ append: true })}
+                type="button"
+              >
+                {loadingMoreTasks ? "正在加载…" : `加载更多任务（已显示 ${tasks.length}/${taskPageInfo.total}）`}
+              </button>
+            ) : null}
             {tasks.length === 0 ? (
               <EmptyState
                 title="暂无生成任务"
@@ -488,70 +573,65 @@ export default function HistoryPage() {
           ) : null}
 
           <div className="grid gap-3 sm:grid-cols-2">
-            {(detail?.images.length ? detail.images : images.filter((image) => image.taskId === selectedTask?.id)).map(
-              (image, index) => (
-                <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/20">
-                  <GeneratedImagePreviewButton
-                    alt="历史生成图片"
-                    ariaLabel={`预览历史第 ${index + 1} 张生成图片`}
-                    className="rounded-none border-0 border-b border-white/10 bg-transparent hover:translate-y-0 hover:border-b-mint/60"
-                    image={image}
-                    onOpen={() => setSelectedPreviewImage(image)}
-                  />
-                  <div className="flex flex-wrap gap-2 p-3">
-                    <Link
-                      className="focus-ring inline-flex items-center gap-1.5 rounded-full border border-white/12 px-3 py-2 text-xs text-white/68 transition-colors duration-200 hover:bg-white/10 hover:text-white"
-                      href={`/images/${image.id}`}
+            {selectedTaskImages.map((image, index) => (
+              <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/20">
+                <GeneratedImagePreviewButton
+                  alt="历史生成图片"
+                  ariaLabel={`预览历史第 ${index + 1} 张生成图片`}
+                  className="rounded-none border-0 border-b border-white/10 bg-transparent hover:translate-y-0 hover:border-b-mint/60"
+                  image={image}
+                  onOpen={() => setSelectedPreviewImage(image)}
+                />
+                <div className="flex flex-wrap gap-2 p-3">
+                  <Link
+                    className="focus-ring inline-flex items-center gap-1.5 rounded-full border border-white/12 px-3 py-2 text-xs text-white/68 transition-colors duration-200 hover:bg-white/10 hover:text-white"
+                    href={`/images/${image.id}`}
+                  >
+                    <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                    详情
+                  </Link>
+                  <button
+                    className="icon-action"
+                    type="button"
+                    onClick={() => void toggleFavorite(image)}
+                    aria-label="切换收藏"
+                  >
+                    <Heart className={`size-4 ${image.favorite ? "fill-current text-ember" : ""}`} aria-hidden="true" />
+                  </button>
+                  <button
+                    className="icon-action"
+                    type="button"
+                    onClick={() => void downloadImage(image)}
+                    aria-label="下载图片"
+                  >
+                    <Download className="size-4" aria-hidden="true" />
+                  </button>
+                  <label className="min-w-36 flex-1 text-xs text-white/50">
+                    项目
+                    <select
+                      className="focus-ring mt-1 w-full rounded-full border border-white/12 bg-black px-3 py-2 text-xs text-white/72"
+                      value={image.projectId ?? ""}
+                      onChange={(event) => void assignImageProject(image, event.target.value || null)}
                     >
-                      <ArrowUpRight className="size-3.5" aria-hidden="true" />
-                      详情
-                    </Link>
-                    <button
-                      className="icon-action"
-                      type="button"
-                      onClick={() => void toggleFavorite(image)}
-                      aria-label="切换收藏"
-                    >
-                      <Heart
-                        className={`size-4 ${image.favorite ? "fill-current text-ember" : ""}`}
-                        aria-hidden="true"
-                      />
-                    </button>
-                    <button
-                      className="icon-action"
-                      type="button"
-                      onClick={() => void downloadImage(image)}
-                      aria-label="下载图片"
-                    >
-                      <Download className="size-4" aria-hidden="true" />
-                    </button>
-                    <label className="min-w-36 flex-1 text-xs text-white/50">
-                      项目
-                      <select
-                        className="focus-ring mt-1 w-full rounded-full border border-white/12 bg-black px-3 py-2 text-xs text-white/72"
-                        value={image.projectId ?? ""}
-                        onChange={(event) => void assignImageProject(image, event.target.value || null)}
-                      >
-                        <option value="">未分组</option>
-                        {projects.map((project) => (
-                          <option key={project.id} value={project.id}>
-                            {project.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <button
-                      className="icon-action"
-                      type="button"
-                      onClick={() => setPendingDeleteImage(image)}
-                      aria-label="删除图片"
-                    >
-                      <Trash2 className="size-4" aria-hidden="true" />
-                    </button>
-                  </div>
-                </article>
-              )
-            )}
+                      <option value="">未分组</option>
+                      {projects.map((project) => (
+                        <option key={project.id} value={project.id}>
+                          {project.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    className="icon-action"
+                    type="button"
+                    onClick={() => setPendingDeleteImage(image)}
+                    aria-label="删除图片"
+                  >
+                    <Trash2 className="size-4" aria-hidden="true" />
+                  </button>
+                </div>
+              </article>
+            ))}
           </div>
         </Panel>
       </div>
@@ -595,6 +675,21 @@ function mergeImagesIntoList(images: GeneratedImage[], nextImages: GeneratedImag
   }
   const nextImageIds = new Set(nextImages.map((image) => image.id));
   return [...nextImages, ...images.filter((image) => !nextImageIds.has(image.id))];
+}
+
+function mergeTasks(current: Task[], next: Task[]): Task[] {
+  const currentIds = new Set(current.map((task) => task.id));
+  return [...current, ...next.filter((task) => !currentIds.has(task.id))];
+}
+
+function appendImages(current: GeneratedImage[], next: GeneratedImage[]): GeneratedImage[] {
+  const currentIds = new Set(current.map((image) => image.id));
+  return [...current, ...next.filter((image) => !currentIds.has(image.id))];
+}
+
+function buildImagesPath(projectId: string | null, offset: number): string {
+  const projectQuery = projectId ? `projectId=${encodeURIComponent(projectId)}&` : "";
+  return `/api/images?${projectQuery}limit=${historyPageSize}&offset=${offset}`;
 }
 
 function formatTaskTimestamp(value: string | null | undefined): string {

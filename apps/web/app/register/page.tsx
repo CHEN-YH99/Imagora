@@ -1,11 +1,12 @@
 "use client";
 
-import { type ClipboardEvent, type FormEvent, Suspense, useState } from "react";
+import { type ClipboardEvent, type FormEvent, Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { UserPlus } from "lucide-react";
-import { register } from "../../lib/api";
+import { getCaptchaConfig, register, type CaptchaConfig } from "../../lib/api";
 import { PasswordInput } from "../../components/PasswordInput";
+import { TurnstileWidget } from "../../components/TurnstileWidget";
 
 export default function RegisterPage() {
   return (
@@ -30,8 +31,31 @@ function RegisterForm() {
   const [loading, setLoading] = useState(false);
   const [registered, setRegistered] = useState(false);
   const [emailDelivered, setEmailDelivered] = useState(true);
+  const [captchaConfig, setCaptchaConfig] = useState<CaptchaConfig | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState("");
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
 
   const fromDemo = searchParams.get("from") === "demo";
+  const turnstileEnabled = captchaConfig?.turnstile.enabled ?? false;
+
+  useEffect(() => {
+    let cancelled = false;
+    getCaptchaConfig()
+      .then((config) => {
+        if (!cancelled) {
+          setCaptchaConfig(config);
+        }
+      })
+      .catch(() => {
+        // 拉配置失败时按 builtin 处理（不挡注册）；生产环境后端仍会强制校验 token。
+        if (!cancelled) {
+          setCaptchaConfig({ mode: "builtin", turnstile: { enabled: false, siteKey: "" } });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -40,15 +64,27 @@ function RegisterForm() {
       setMessage(validationMessage);
       return;
     }
+    if (turnstileEnabled && !turnstileToken) {
+      setMessage("请先完成人机验证。");
+      return;
+    }
 
     setLoading(true);
     setMessage("");
     try {
-      const result = await register(email.trim().toLowerCase(), password);
+      const result = await register(
+        email.trim().toLowerCase(),
+        password,
+        turnstileEnabled ? { turnstileToken } : undefined
+      );
       setEmailDelivered(result.emailDelivered);
       setRegistered(true);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "注册失败，请检查信息后重试。");
+      if (turnstileEnabled) {
+        setTurnstileToken("");
+        setTurnstileResetKey((key) => key + 1);
+      }
     } finally {
       setLoading(false);
     }
@@ -147,6 +183,20 @@ function RegisterForm() {
               required
             />
           </label>
+          {turnstileEnabled && captchaConfig ? (
+            <div className="flex flex-col gap-2">
+              <span className="text-sm text-white/70">人机验证</span>
+              <TurnstileWidget
+                key={turnstileResetKey}
+                siteKey={captchaConfig.turnstile.siteKey}
+                onToken={(token) => setTurnstileToken(token ?? "")}
+                onError={() => {
+                  setTurnstileToken("");
+                  setMessage("人机验证加载失败，请刷新页面重试。");
+                }}
+              />
+            </div>
+          ) : null}
           {message ? (
             <p
               aria-live="polite"
@@ -159,7 +209,9 @@ function RegisterForm() {
           <button
             className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
             type="submit"
-            disabled={loading || !email.trim() || !password || !confirmPassword}
+            disabled={
+              loading || !email.trim() || !password || !confirmPassword || (turnstileEnabled && !turnstileToken)
+            }
           >
             <UserPlus className="size-4" aria-hidden="true" />
             {loading ? "创建中..." : "创建账号"}

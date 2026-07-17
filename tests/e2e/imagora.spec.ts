@@ -26,6 +26,7 @@ type MockState = {
   orders: Order[];
   rules: SafetyRule[];
   safetyEvents: SafetyEvent[];
+  safetyAppeals: SafetyAppeal[];
   tasks: Task[];
 };
 
@@ -156,6 +157,17 @@ type SafetyEvent = {
   reasonMessage: string;
   provider: string;
   createdAt: string;
+};
+
+type SafetyAppeal = {
+  id: string;
+  userId: string;
+  safetyEventId: string;
+  reason: string;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  adminNote: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
 };
 
 const adminUser: User = {
@@ -334,6 +346,32 @@ test("历史、收藏、下载、删除和再次生成链路可回归", async ({
   expect(state.images.some((image) => image.id === "image-history")).toBe(false);
 });
 
+test("收藏与历史任务可以加载后续页，活动任务轮询不会清掉已加载内容", async ({ page }) => {
+  const state = await setupApiMocks(page);
+  state.images = Array.from({ length: 51 }, (_, index) => ({
+    ...createGeneratedImage(`favorite-page-${index + 1}`, "task-history"),
+    favorite: true
+  }));
+
+  await page.goto("/favorites");
+  await expect(page.getByText("已收藏", { exact: true })).toHaveCount(50);
+  await page.getByRole("button", { name: /加载更多/ }).click();
+  await expect(page.getByText("已收藏", { exact: true })).toHaveCount(51);
+
+  state.tasks = Array.from({ length: 52 }, (_, index) =>
+    createTask(`history-page-${index + 1}`, `分页历史任务 ${index + 1}`, index === 0 ? "RUNNING" : "SUCCEEDED")
+  );
+  state.images = [createGeneratedImage("history-pagination-image", state.tasks[0].id)];
+
+  await page.goto("/history");
+  await page.getByRole("button", { name: /加载更多任务/ }).click();
+  await expect(page.getByText("分页历史任务 52", { exact: true })).toBeVisible();
+  const listRequestsAfterLoadingMore = state.historyTaskListRequests;
+  await expect.poll(() => state.generationTaskPolls, { timeout: 5000 }).toBeGreaterThan(1);
+  await expect(page.getByText("分页历史任务 52", { exact: true })).toBeVisible();
+  expect(state.historyTaskListRequests).toBe(listRequestsAfterLoadingMore);
+});
+
 test("历史页图片支持 hover 预览大图并显示实际比例", async ({ page }) => {
   await setupApiMocks(page);
 
@@ -403,6 +441,13 @@ test("管理后台关键操作覆盖详情、对账和安全规则", async ({ pa
   await page.getByRole("dialog").getByLabel("处理原因").fill("E2E 人工复核通过");
   await page.getByRole("dialog").getByRole("button", { name: "复核通过" }).click();
   await expect(page.getByText("安全事件已标记为已通过。")).toBeVisible();
+
+  const safetyAppealPanel = page.getByRole("heading", { name: "申诉处理" }).locator("xpath=ancestor::section[1]");
+  await expect(safetyAppealPanel.getByText("e2e 用户申诉复核结果").first()).toBeVisible();
+  await safetyAppealPanel.getByRole("button", { name: "批准申诉" }).click();
+  await page.getByRole("dialog").getByLabel("处理原因").fill("E2E 批准安全申诉");
+  await page.getByRole("dialog").getByRole("button", { name: "批准申诉" }).click();
+  await expect(page.getByText("安全申诉已批准。")).toBeVisible();
 });
 
 test("核心页面在 375、768、1440 视口保持可访问且无页面级横向溢出", async ({ page }) => {
@@ -514,10 +559,19 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
       return;
     }
     if (method === "GET" && path === "/api/generation/tasks") {
-      if (generationOutcome === "historyCompletesAfterNavigation") {
-        state.historyTaskListRequests += 1;
-      }
-      await fulfillData(route, { tasks: state.tasks });
+      state.historyTaskListRequests += 1;
+      const offset = parsePaginationNumber(url.searchParams.get("offset"), 0);
+      const limit = parsePaginationNumber(url.searchParams.get("limit"), 30);
+      const tasks = state.tasks.slice(offset, offset + limit);
+      await fulfillData(route, {
+        tasks,
+        pageInfo: {
+          offset,
+          limit,
+          total: state.tasks.length,
+          hasMore: offset + tasks.length < state.tasks.length
+        }
+      });
       return;
     }
     if (method === "GET" && /^\/api\/generation\/tasks\/[^/]+$/.test(path)) {
@@ -577,8 +631,21 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
     }
     if (method === "GET" && path === "/api/images") {
       const projectId = url.searchParams.get("projectId");
+      const favorite = url.searchParams.get("favorite");
+      const offset = parsePaginationNumber(url.searchParams.get("offset"), 0);
+      const limit = parsePaginationNumber(url.searchParams.get("limit"), 30);
+      const filteredImages = state.images
+        .filter((image) => (projectId ? image.projectId === projectId : true))
+        .filter((image) => (favorite === null ? true : image.favorite === (favorite === "true")));
+      const images = filteredImages.slice(offset, offset + limit);
       await fulfillData(route, {
-        images: projectId ? state.images.filter((image) => image.projectId === projectId) : state.images
+        images,
+        pageInfo: {
+          offset,
+          limit,
+          total: filteredImages.length,
+          hasMore: offset + images.length < filteredImages.length
+        }
       });
       return;
     }
@@ -792,6 +859,32 @@ async function handleAdminRoute(route: Route, state: MockState, path: string, me
     await fulfillData(route, { events: state.safetyEvents });
     return true;
   }
+  if (method === "GET" && path === "/api/admin/safety-appeals") {
+    const url = new URL(route.request().url());
+    const status = url.searchParams.get("status");
+    const limit = Number(url.searchParams.get("limit") ?? state.safetyAppeals.length);
+    const appeals = state.safetyAppeals
+      .filter((appeal) =>
+        status !== "PENDING" && status !== "APPROVED" && status !== "REJECTED" ? true : appeal.status === status
+      )
+      .slice(0, Number.isFinite(limit) && limit > 0 ? limit : state.safetyAppeals.length);
+    await fulfillData(route, { appeals });
+    return true;
+  }
+  if (method === "PATCH" && /^\/api\/admin\/safety-appeals\/[^/]+$/.test(path)) {
+    const body = readJson(route);
+    const appealId = path.split("/").at(-1);
+    const appeal = state.safetyAppeals.find((item) => item.id === appealId);
+    if (!appeal) {
+      await fulfillError(route, "Appeal was not found", 404);
+      return true;
+    }
+    appeal.status = body.status === "REJECTED" ? "REJECTED" : "APPROVED";
+    appeal.adminNote = typeof body.adminNote === "string" ? body.adminNote : null;
+    appeal.resolvedAt = now;
+    await fulfillData(route, { appeal });
+    return true;
+  }
   if (method === "PATCH" && /^\/api\/admin\/safety-events\/[^/]+$/.test(path)) {
     const body = readJson(route);
     const eventId = path.split("/").at(-1);
@@ -885,6 +978,18 @@ function createMockState(): MockState {
         createdAt: now
       }
     ],
+    safetyAppeals: [
+      {
+        id: "safety-appeal-1",
+        userId: creatorUser.id,
+        safetyEventId: "safety-event-1",
+        reason: "e2e 用户申诉复核结果",
+        status: "PENDING",
+        adminNote: null,
+        createdAt: now,
+        resolvedAt: null
+      }
+    ],
     tasks: [createTask("task-history", "半透明智能相机的电影感产品摄影，薄荷色轮廓光", "SUCCEEDED")]
   };
 }
@@ -976,6 +1081,11 @@ function readJson(route: Route): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function parsePaginationNumber(value: string | null, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 async function fulfillData(route: Route, data: unknown): Promise<void> {

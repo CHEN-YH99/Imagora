@@ -5,13 +5,16 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { LogIn, RefreshCw, UserRound } from "lucide-react";
 import {
+  getCaptchaConfig,
   getLoginCaptcha,
   login,
   verifyLoginCaptcha,
   type CaptchaChallenge,
+  type CaptchaConfig,
   type CaptchaSelection
 } from "../../lib/api";
 import { PasswordInput } from "../../components/PasswordInput";
+import { TurnstileWidget } from "../../components/TurnstileWidget";
 
 const requiredCaptchaRounds = 2;
 
@@ -43,9 +46,36 @@ function LoginForm() {
   const [message, setMessage] = useState("");
   const [captchaLoading, setCaptchaLoading] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [captchaConfig, setCaptchaConfig] = useState<CaptchaConfig | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState("");
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+
+  const turnstileEnabled = captchaConfig?.turnstile.enabled ?? false;
 
   useEffect(() => {
-    void refreshCaptcha();
+    let cancelled = false;
+    getCaptchaConfig()
+      .then((config) => {
+        if (cancelled) {
+          return;
+        }
+        setCaptchaConfig(config);
+        // Turnstile 模式无需拉取内置图片验证码，直接结束 loading。
+        if (config.turnstile.enabled) {
+          setCaptchaLoading(false);
+        } else {
+          void refreshCaptcha();
+        }
+      })
+      .catch(() => {
+        // config 拉取失败：退回内置图片验证码兜底。
+        if (!cancelled) {
+          void refreshCaptcha();
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function refreshCaptcha() {
@@ -63,7 +93,12 @@ function LoginForm() {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const validationMessage = validateLoginForm(email, password, captchaVerificationIds, acceptLoginRules);
+    const validationMessage = validateLoginForm(email, password, {
+      turnstileEnabled,
+      turnstileToken,
+      captchaVerificationIds,
+      acceptLoginRules
+    });
     if (validationMessage) {
       setMessage(validationMessage);
       return;
@@ -72,15 +107,24 @@ function LoginForm() {
     setLoading(true);
     setMessage("");
     try {
-      await login(email.trim().toLowerCase(), password, captchaVerificationIds);
+      await login(
+        email.trim().toLowerCase(),
+        password,
+        turnstileEnabled ? { turnstileToken } : { captchaVerificationIds }
+      );
       router.push(safeNextPath(searchParams.get("next")) ?? "/generate");
     } catch (error) {
-      // 后端在校验密码前已一次性消费掉验证 ID（verifyCaptchaVerifications 会 delete），
-      // 因此登录失败后验证态在服务端必然已失效，前端只能重做，明确告知用户避免困惑。
+      // 后端在校验密码前会消费一次性验证材料；失败后前端必须重置对应验证态。
       const baseMessage = error instanceof Error ? error.message : "登录失败，请检查账号信息后重试。";
-      setMessage(`${baseMessage}（图片验证已失效，请重新完成验证后再登录）`);
       setCaptchaVerificationIds([]);
-      await refreshCaptcha();
+      setTurnstileToken("");
+      if (turnstileEnabled) {
+        setMessage(`${baseMessage}（人机验证已失效，请重新完成验证后再登录）`);
+        setTurnstileResetKey((key) => key + 1);
+      } else {
+        setMessage(`${baseMessage}（图片验证已失效，请重新完成验证后再登录）`);
+        await refreshCaptcha();
+      }
     } finally {
       setLoading(false);
     }
@@ -173,33 +217,48 @@ function LoginForm() {
               required
             />
           </label>
-          <div className="space-y-3 rounded-2xl border border-white/12 bg-black/18 p-4 text-sm text-white/70">
-            <label className="flex items-start gap-3">
-              <input
-                checked={acceptLoginRules}
-                className="mt-1 size-4 accent-mint"
-                onChange={(event) => setAcceptLoginRules(event.target.checked)}
-                type="checkbox"
+          {turnstileEnabled && captchaConfig ? (
+            <div className="flex flex-col gap-2 rounded-2xl border border-white/12 bg-black/18 p-4">
+              <span className="text-sm text-white/70">人机验证</span>
+              <TurnstileWidget
+                key={turnstileResetKey}
+                siteKey={captchaConfig.turnstile.siteKey}
+                onToken={(token) => setTurnstileToken(token ?? "")}
+                onError={() => {
+                  setTurnstileToken("");
+                  setMessage("人机验证加载失败，请刷新重试。");
+                }}
               />
-              <span>我已阅读并同意登录安全准则，确认本次登录由本人操作。</span>
-            </label>
-            <button
-              className="focus-ring w-full rounded-2xl border border-mint/60 bg-mint/12 px-4 py-3 text-left font-semibold text-mint transition-colors duration-200 hover:bg-mint/18 disabled:cursor-not-allowed disabled:border-white/12 disabled:bg-white/5 disabled:text-white/38"
-              disabled={!acceptLoginRules || loading}
-              onClick={openCaptchaPanel}
-              type="button"
-            >
-              {captchaVerificationIds.length >= requiredCaptchaRounds
-                ? "图片验证已完成"
-                : captchaVerificationIds.length > 0
-                  ? "继续完成图片验证"
-                  : "点击文字进行图片验证"}
-            </button>
-            <p className="text-xs leading-5 text-white/48">
-              必须先勾选安全准则，并连续通过 {requiredCaptchaRounds} 次随机图片验证，系统才会放行登录。
-            </p>
-          </div>
-          {captchaPanelOpen ? (
+            </div>
+          ) : (
+            <div className="space-y-3 rounded-2xl border border-white/12 bg-black/18 p-4 text-sm text-white/70">
+              <label className="flex items-start gap-3">
+                <input
+                  checked={acceptLoginRules}
+                  className="mt-1 size-4 accent-mint"
+                  onChange={(event) => setAcceptLoginRules(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>我已阅读并同意登录安全准则，确认本次登录由本人操作。</span>
+              </label>
+              <button
+                className="focus-ring w-full rounded-2xl border border-mint/60 bg-mint/12 px-4 py-3 text-left font-semibold text-mint transition-colors duration-200 hover:bg-mint/18 disabled:cursor-not-allowed disabled:border-white/12 disabled:bg-white/5 disabled:text-white/38"
+                disabled={!acceptLoginRules || loading}
+                onClick={openCaptchaPanel}
+                type="button"
+              >
+                {captchaVerificationIds.length >= requiredCaptchaRounds
+                  ? "图片验证已完成"
+                  : captchaVerificationIds.length > 0
+                    ? "继续完成图片验证"
+                    : "点击文字进行图片验证"}
+              </button>
+              <p className="text-xs leading-5 text-white/48">
+                必须先勾选安全准则，并连续通过 {requiredCaptchaRounds} 次随机图片验证，系统才会放行登录。
+              </p>
+            </div>
+          )}
+          {!turnstileEnabled && captchaPanelOpen ? (
             <div
               aria-modal="true"
               className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6"
@@ -311,11 +370,11 @@ function LoginForm() {
             type="submit"
             disabled={
               loading ||
-              captchaLoading ||
-              !acceptLoginRules ||
               !email.trim() ||
               !password ||
-              captchaVerificationIds.length < requiredCaptchaRounds
+              (turnstileEnabled
+                ? !turnstileToken
+                : captchaLoading || !acceptLoginRules || captchaVerificationIds.length < requiredCaptchaRounds)
             }
           >
             <LogIn className="size-4" aria-hidden="true" />
@@ -336,8 +395,12 @@ function LoginForm() {
 function validateLoginForm(
   email: string,
   password: string,
-  captchaVerificationIds: string[],
-  acceptLoginRules: boolean
+  options: {
+    turnstileEnabled: boolean;
+    turnstileToken: string;
+    captchaVerificationIds: string[];
+    acceptLoginRules: boolean;
+  }
 ): string | null {
   const normalizedEmail = email.trim();
   if (!normalizedEmail) {
@@ -352,10 +415,16 @@ function validateLoginForm(
   if (password.length > 128) {
     return "密码长度不能超过 128 位。";
   }
-  if (!acceptLoginRules) {
+  if (options.turnstileEnabled) {
+    if (!options.turnstileToken) {
+      return "请先完成人机验证。";
+    }
+    return null;
+  }
+  if (!options.acceptLoginRules) {
     return "请先阅读并勾选登录安全准则。";
   }
-  if (captchaVerificationIds.length < requiredCaptchaRounds) {
+  if (options.captchaVerificationIds.length < requiredCaptchaRounds) {
     return `请先完成 ${requiredCaptchaRounds} 次图片验证。`;
   }
   return null;

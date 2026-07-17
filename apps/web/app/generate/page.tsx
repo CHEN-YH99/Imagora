@@ -946,7 +946,10 @@ function GenerateExperience() {
                     ))
                   : null}
                 {images.map((image, index) => (
-                  <article key={image.id} className="relative overflow-hidden rounded-2xl border border-white/12 bg-black/18">
+                  <article
+                    key={image.id}
+                    className="relative overflow-hidden rounded-2xl border border-white/12 bg-black/18"
+                  >
                     <GeneratedImagePreviewButton
                       alt="生成图片结果"
                       ariaLabel={`预览第 ${index + 1} 张生成图片`}
@@ -961,7 +964,10 @@ function GenerateExperience() {
                       title="下载图片"
                       onClick={() => void downloadImage(image)}
                     >
-                      <Download className="size-4 transition-transform duration-200 motion-reduce:transform-none group-hover/download:translate-y-0.5" aria-hidden="true" />
+                      <Download
+                        className="size-4 transition-transform duration-200 motion-reduce:transform-none group-hover/download:translate-y-0.5"
+                        aria-hidden="true"
+                      />
                     </button>
                     <div className="space-y-3 p-3">
                       <dl className="grid gap-2 text-xs text-white/52 sm:grid-cols-2">

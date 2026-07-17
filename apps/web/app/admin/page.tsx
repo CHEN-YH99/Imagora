@@ -31,6 +31,7 @@ import {
   type OrderMaintenance,
   type PaymentEvent,
   type Plan,
+  type SafetyAppeal,
   type SafetyEvent,
   type SafetyRule,
   type Task,
@@ -125,6 +126,14 @@ type ConfirmState =
       nextVisibility: GeneratedImage["visibility"];
     }
   | { kind: "plan-status"; planId: string; planName: string; nextStatus: Plan["status"] }
+  | {
+      kind: "order-refund";
+      orderId: string;
+      orderNo: string;
+      amountCents: number;
+      currency: string;
+      clientRequestId: string;
+    }
   | { kind: "plan-create"; plan: PlanPayload }
   | {
       kind: "plan-save";
@@ -132,7 +141,8 @@ type ConfirmState =
       planName: string;
       patch: Pick<PlanPayload, "priceCents" | "credits" | "sortOrder">;
     }
-  | { kind: "safety-event"; eventId: string; nextStatus: Exclude<SafetyEvent["status"], "REVIEW_REQUIRED"> };
+  | { kind: "safety-event"; eventId: string; nextStatus: Exclude<SafetyEvent["status"], "REVIEW_REQUIRED"> }
+  | { kind: "safety-appeal"; appealId: string; nextStatus: Exclude<SafetyAppeal["status"], "PENDING"> };
 
 const emptyPlanForm: PlanFormState = {
   name: "",
@@ -206,6 +216,7 @@ export default function AdminPage() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [rules, setRules] = useState<SafetyRule[]>([]);
   const [safetyEvents, setSafetyEvents] = useState<SafetyEvent[]>([]);
+  const [safetyAppeals, setSafetyAppeals] = useState<SafetyAppeal[]>([]);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [newRule, setNewRule] = useState("");
   const [newRuleAction, setNewRuleAction] = useState<"BLOCK" | "REVIEW">("BLOCK");
@@ -214,6 +225,7 @@ export default function AdminPage() {
   const [taskStatusFilter, setTaskStatusFilter] = useState<"ALL" | Task["status"]>("ALL");
   const [orderStatusFilter, setOrderStatusFilter] = useState<"ALL" | Order["status"]>("ALL");
   const [imageVisibilityFilter, setImageVisibilityFilter] = useState<"ALL" | GeneratedImage["visibility"]>("ALL");
+  const [safetyAppealStatusFilter, setSafetyAppealStatusFilter] = useState<"ALL" | SafetyAppeal["status"]>("ALL");
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdTo, setCreatedTo] = useState("");
   const [userIdFilter, setUserIdFilter] = useState("");
@@ -311,6 +323,7 @@ export default function AdminPage() {
     taskStatusFilter,
     orderStatusFilter,
     imageVisibilityFilter,
+    safetyAppealStatusFilter,
     createdFrom,
     createdTo,
     userIdFilter,
@@ -342,6 +355,7 @@ export default function AdminPage() {
   const visibleOrders = useMemo(() => orders.slice(0, 12), [orders]);
 
   const visibleSafetyEvents = useMemo(() => safetyEvents.slice(0, 8), [safetyEvents]);
+  const visibleSafetyAppeals = useMemo(() => safetyAppeals.slice(0, 8), [safetyAppeals]);
 
   async function openUserDetail(userId: string) {
     setDetailLoading(true);
@@ -410,6 +424,7 @@ export default function AdminPage() {
         planResult,
         ruleResult,
         safetyEventResult,
+        safetyAppealResult,
         logResult
       ] = await Promise.all([
         apiFetch<{ metrics: AdminMetrics }>("/api/admin/dashboard"),
@@ -446,6 +461,12 @@ export default function AdminPage() {
         apiFetch<{ plans: Plan[] }>("/api/admin/plans"),
         apiFetch<{ rules: SafetyRule[] }>("/api/admin/safety-rules"),
         apiFetch<{ events: SafetyEvent[] }>("/api/admin/safety-events?limit=12"),
+        apiFetch<{ appeals: SafetyAppeal[] }>(
+          withQuery("/api/admin/safety-appeals", {
+            limit: 12,
+            status: safetyAppealStatusFilter === "ALL" ? undefined : safetyAppealStatusFilter
+          })
+        ),
         apiFetch<{ logs: AuditLog[] }>(
           withQuery("/api/admin/audit-logs", {
             limit: 30,
@@ -477,6 +498,7 @@ export default function AdminPage() {
       );
       setRules(ruleResult.rules.slice(0, 12));
       setSafetyEvents(safetyEventResult.events.slice(0, 12));
+      setSafetyAppeals(safetyAppealResult.appeals.slice(0, 12));
       setLogs(logResult.logs.slice(0, 12));
       if (!preserveNotice) {
         setNotice(null);
@@ -639,6 +661,10 @@ export default function AdminPage() {
     openConfirm({ kind: "safety-event", eventId: event.id, nextStatus });
   }
 
+  function requestSafetyAppealReview(appeal: SafetyAppeal, nextStatus: Exclude<SafetyAppeal["status"], "PENDING">) {
+    openConfirm({ kind: "safety-appeal", appealId: appeal.id, nextStatus });
+  }
+
   async function addRule() {
     if (newRule.trim().length < 2) {
       setNotice({ tone: "danger", text: "安全规则至少填写 2 个字符，别拿空气当规则。" });
@@ -774,6 +800,39 @@ export default function AdminPage() {
           });
           break;
         }
+        case "safety-appeal": {
+          await apiFetch<{ appeal: SafetyAppeal }>(`/api/admin/safety-appeals/${confirmState.appealId}`, {
+            method: "PATCH",
+            body: { status: confirmState.nextStatus, adminNote: reason }
+          });
+          await load(true);
+          setNotice({
+            tone: "success",
+            text: `安全申诉已${confirmState.nextStatus === "APPROVED" ? "批准" : "驳回"}。`
+          });
+          break;
+        }
+        case "order-refund": {
+          const result = await apiFetch<{ order: Order; balanceAfter: number; refundId: string | null }>(
+            `/api/admin/orders/${confirmState.orderId}/refund`,
+            {
+              method: "POST",
+              body: { reason, confirm: true, clientRequestId: confirmState.clientRequestId }
+            }
+          );
+          await load(true);
+          // 详情面板正开着这笔订单时同步刷新其状态，避免用户看到过期的 PAID。
+          setSelectedDetail((current) =>
+            current && current.kind === "order" && current.data.order.id === result.order.id
+              ? { ...current, data: { ...current.data, order: result.order } }
+              : current
+          );
+          setNotice({
+            tone: "success",
+            text: `订单 ${confirmState.orderNo} 已退款，用户余额回收后为 ${formatCredits(result.balanceAfter)}。`
+          });
+          break;
+        }
         default:
           break;
       }
@@ -850,6 +909,20 @@ export default function AdminPage() {
           description: `该安全事件将被标记为${formatStatusLabel(confirmState.nextStatus)}，请填写人工复核原因。`,
           confirmLabel: confirmState.nextStatus === "PASSED" ? "复核通过" : "确认拦截",
           tone: confirmState.nextStatus === "BLOCKED" ? ("danger" as const) : ("default" as const)
+        };
+      case "safety-appeal":
+        return {
+          title: "确认处理安全申诉？",
+          description: `该申诉将被${confirmState.nextStatus === "APPROVED" ? "批准" : "驳回"}，处理备注会进入审计链路。`,
+          confirmLabel: confirmState.nextStatus === "APPROVED" ? "批准申诉" : "驳回申诉",
+          tone: confirmState.nextStatus === "REJECTED" ? ("danger" as const) : ("default" as const)
+        };
+      case "order-refund":
+        return {
+          title: "确认退款？",
+          description: `将对订单 ${confirmState.orderNo}（${formatMoney(confirmState.amountCents, confirmState.currency)}）发起全额退款：先向支付方真实退款，成功后订单转 REFUNDED 并回收当初发放的积分（余额可被扣为负）。此操作不可撤销，请填写退款原因。`,
+          confirmLabel: "确认退款",
+          tone: "danger" as const
         };
       default:
         return null;
@@ -1651,6 +1724,83 @@ export default function AdminPage() {
         </Panel>
 
         <Panel>
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="text-xl font-semibold">申诉处理</h2>
+            <Field className="sm:w-40" label="申诉状态">
+              <select
+                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                value={safetyAppealStatusFilter}
+                onChange={(event) =>
+                  setSafetyAppealStatusFilter(
+                    event.target.value === "APPROVED" || event.target.value === "REJECTED"
+                      ? event.target.value
+                      : event.target.value === "PENDING"
+                        ? "PENDING"
+                        : "ALL"
+                  )
+                }
+              >
+                <option value="ALL">全部</option>
+                <option value="PENDING">待处理</option>
+                <option value="APPROVED">已通过</option>
+                <option value="REJECTED">已驳回</option>
+              </select>
+            </Field>
+          </div>
+          <div className="space-y-3">
+            {visibleSafetyAppeals.map((appeal) => (
+              <article key={appeal.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StatusPill>{formatStatusLabel(appeal.status)}</StatusPill>
+                      <span className="font-mono text-xs text-white/42">safety-appeal / {appeal.id}</span>
+                    </div>
+                    <p className="mt-2 text-sm text-white/72">{appeal.reason}</p>
+                    <p className="mt-2 break-all text-xs text-white/42">
+                      用户 {appeal.userId} · 安全事件 {appeal.safetyEventId}
+                    </p>
+                    <p className="mt-1 text-xs text-white/42">
+                      提交于 {new Date(appeal.createdAt).toLocaleString("zh-CN")}
+                      {appeal.resolvedAt ? ` · 处理于 ${new Date(appeal.resolvedAt).toLocaleString("zh-CN")}` : ""}
+                    </p>
+                    {appeal.adminNote ? (
+                      <p className="mt-2 text-xs text-white/52">处理备注：{appeal.adminNote}</p>
+                    ) : null}
+                  </div>
+                  {appeal.status === "PENDING" ? (
+                    <div className="flex shrink-0 flex-wrap gap-2">
+                      <button
+                        className="focus-ring rounded-full border border-mint/50 px-3 py-2 text-xs font-semibold text-mint hover:bg-mint/10"
+                        onClick={() => requestSafetyAppealReview(appeal, "APPROVED")}
+                        type="button"
+                      >
+                        批准申诉
+                      </button>
+                      <button
+                        className="focus-ring rounded-full border border-red-300/40 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-400/10"
+                        onClick={() => requestSafetyAppealReview(appeal, "REJECTED")}
+                        type="button"
+                      >
+                        驳回申诉
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            ))}
+            {visibleSafetyAppeals.length === 0 ? (
+              <EmptyState
+                title="暂无安全申诉"
+                description="用户对安全拦截或人工复核结果发起申诉后，会进入这里等待管理员处理。"
+                actionLabel="刷新申诉"
+                onAction={() => void load()}
+              />
+            ) : null}
+          </div>
+        </Panel>
+
+        <Panel>
           <h2 className="mb-4 text-xl font-semibold">审计日志</h2>
           <div className="mb-4 grid gap-3 md:grid-cols-4">
             <Field label="管理员 ID">
@@ -1933,6 +2083,25 @@ export default function AdminPage() {
                     <StatusPill>{selectedDetail.data.order.status}</StatusPill>
                     <StatusPill>{selectedDetail.data.plan.name}</StatusPill>
                   </div>
+                  {selectedDetail.data.order.status === "PAID" ? (
+                    <button
+                      className="focus-ring mt-3 inline-flex items-center gap-2 rounded-full border border-ember/50 bg-ember/12 px-4 py-2 text-xs font-semibold text-ember transition-colors hover:bg-ember/20 disabled:opacity-60"
+                      disabled={confirmLoading}
+                      onClick={() =>
+                        openConfirm({
+                          kind: "order-refund",
+                          orderId: selectedDetail.data.order.id,
+                          orderNo: selectedDetail.data.order.orderNo,
+                          amountCents: selectedDetail.data.order.amountCents,
+                          currency: selectedDetail.data.order.currency,
+                          clientRequestId: crypto.randomUUID()
+                        })
+                      }
+                      type="button"
+                    >
+                      发起退款
+                    </button>
+                  ) : null}
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-white/70">
                   <p>用户：{selectedDetail.data.user.email}</p>
