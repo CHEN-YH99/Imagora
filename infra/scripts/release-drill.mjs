@@ -77,6 +77,9 @@ async function checkProductionConfig() {
       problems.push(`${name} must be ${accepted.join(" or ")}`);
     }
   }
+  if (process.env.SESSION_COOKIE_SAMESITE?.trim().toLowerCase() !== "strict") {
+    problems.push("SESSION_COOKIE_SAMESITE must be Strict");
+  }
   const imageProvider = readConfiguredImageProvider();
   if (imageProvider !== "openai") {
     problems.push("IMAGE_PROVIDER_DEFAULT (or legacy AI_PROVIDER) must be openai");

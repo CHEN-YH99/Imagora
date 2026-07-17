@@ -23,6 +23,8 @@ __pycache__/
 *.py[cod]
 data/
 apps/*/data/
+backups/
+*.dump
 test-results/
 playwright-report/
 .local-dev-logs/

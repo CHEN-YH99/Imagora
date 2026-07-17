@@ -29,6 +29,8 @@
     "load:smoke": "node infra/scripts/load-smoke.mjs",
     "backup:json": "node infra/scripts/backup-json-store.mjs",
     "restore:json": "node infra/scripts/restore-json-store.mjs",
+    "backup:postgres": "node infra/scripts/backup-postgres.mjs",
+    "restore:postgres": "node infra/scripts/restore-postgres.mjs",
     "deploy:local-prod": "node infra/scripts/deploy-local-prod.mjs",
     "release:drill": "node infra/scripts/release-drill.mjs",
     "p0:check": "node infra/scripts/p0-readiness.mjs",

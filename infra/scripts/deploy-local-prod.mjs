@@ -18,16 +18,7 @@ if (!existsSync(envFilePath)) {
 
 // docker compose 默认只自动读取 cwd 下的 .env，不会读 .env.production。
 // compose 文件里大量 ${VAR:?} 强制替换，不显式 --env-file 会直接中断。
-const args = [
-  "compose",
-  "--env-file",
-  envFile,
-  "-f",
-  composeFile,
-  "up",
-  "-d",
-  "--build"
-];
+const args = ["compose", "--env-file", envFile, "-f", composeFile, "up", "-d", "--build"];
 
 const child = spawn("docker", args, {
   stdio: "inherit",

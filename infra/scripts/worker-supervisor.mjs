@@ -16,30 +16,37 @@
 //   node infra/scripts/worker-supervisor.mjs
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(scriptDir, "..", "..");
 const workerDir = join(repoRoot, "apps", "worker");
-const logDir = join(repoRoot, ".local-dev-logs");
+const logDir = resolve(process.env.WORKER_SUPERVISOR_LOG_DIR ?? join(repoRoot, ".local-dev-logs"));
 const logFile = join(logDir, "worker.log");
-const statusFile = join(logDir, "worker-supervisor.status.json");
+const statusFile = resolve(process.env.WORKER_SUPERVISOR_STATUS_FILE ?? join(logDir, "worker-supervisor.status.json"));
 const envFile = join(repoRoot, ".env");
+const healthcheckMode = process.argv.includes("--healthcheck");
 
 // 退避策略：连续崩溃时逐步拉长间隔，避免瞬时崩溃打成 busy-loop 打满 CPU。
 const MIN_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 // worker 稳定存活超过这个时长，视为"健康启动"，重置退避계数。
 const HEALTHY_UPTIME_MS = 60_000;
+const HEARTBEAT_INTERVAL_MS = readPositiveIntegerEnv("WORKER_SUPERVISOR_HEARTBEAT_MS", 10_000);
+const HEALTHCHECK_MAX_AGE_MS = readPositiveIntegerEnv("WORKER_SUPERVISOR_HEALTH_MAX_AGE_MS", 45_000);
+const SHUTDOWN_TIMEOUT_MS = readPositiveIntegerEnv(
+  "WORKER_SUPERVISOR_SHUTDOWN_TIMEOUT_MS",
+  readPositiveIntegerEnv("GENERATION_RUNNING_TIMEOUT_MS", 1_800_000) + 60_000
+);
 
 let stopping = false;
 let child = null;
 let restartCount = 0;
 let consecutiveFailures = 0;
-
-mkdirSync(logDir, { recursive: true });
+let heartbeatTimer = null;
+let shutdownTimer = null;
 
 function supervisorLog(message) {
   const line = `[${new Date().toISOString()}] [supervisor] ${message}\n`;
@@ -50,6 +57,59 @@ function supervisorLog(message) {
   } catch {
     // 日志写失败不应影响保活主逻辑
   }
+}
+
+function runHealthcheck() {
+  let status;
+  try {
+    status = JSON.parse(readFileSync(statusFile, "utf8"));
+  } catch (error) {
+    healthcheckFail("status-unreadable", error instanceof Error ? error.message : String(error));
+    return;
+  }
+
+  const updatedAt = Date.parse(status.updatedAt ?? "");
+  if (!Number.isFinite(updatedAt)) {
+    healthcheckFail("status-invalid-updatedAt", { state: status.state ?? null });
+    return;
+  }
+
+  const ageMs = Date.now() - updatedAt;
+  const workerPid = Number(status.workerPid);
+  if (status.state !== "running" || !Number.isInteger(workerPid) || workerPid <= 0) {
+    healthcheckFail("worker-not-running", { state: status.state ?? null, workerPid: status.workerPid ?? null, ageMs });
+    return;
+  }
+  if (ageMs > HEALTHCHECK_MAX_AGE_MS) {
+    healthcheckFail("heartbeat-stale", { state: status.state, workerPid, ageMs, maxAgeMs: HEALTHCHECK_MAX_AGE_MS });
+    return;
+  }
+
+  console.log(JSON.stringify({ ok: true, state: status.state, workerPid, ageMs }));
+}
+
+function healthcheckFail(reason, details) {
+  console.error(JSON.stringify({ ok: false, reason, details }));
+  process.exit(1);
+}
+
+function startHeartbeat(startedAt) {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (!child || stopping) {
+      return;
+    }
+    writeStatus({ state: "running", startedAt: new Date(startedAt).toISOString() });
+  }, HEARTBEAT_INTERVAL_MS);
+  heartbeatTimer.unref?.();
+}
+
+function stopHeartbeat() {
+  if (!heartbeatTimer) {
+    return;
+  }
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
 }
 
 function writeStatus(extra) {
@@ -101,22 +161,29 @@ function startWorker() {
   restartCount += 1;
   supervisorLog(`拉起 worker（第 ${restartCount} 次），cwd=${workerDir}`);
 
-  child = spawn(process.execPath, [`--env-file=${envFile}`, join("dist", "main.js")], {
+  const workerArgs = existsSync(envFile)
+    ? [`--env-file=${envFile}`, join("dist", "main.js")]
+    : [join("dist", "main.js")];
+  child = spawn(process.execPath, workerArgs, {
     cwd: workerDir,
     stdio: ["ignore", out, err],
     env: process.env,
     windowsHide: true
   });
+  closeSync(out);
+  closeSync(err);
 
   writeStatus({ state: "running", startedAt: new Date(startedAt).toISOString() });
+  startHeartbeat(startedAt);
 
   child.on("exit", (code, signal) => {
     child = null;
+    stopHeartbeat();
     const uptime = Date.now() - startedAt;
     supervisorLog(`worker 退出：code=${code} signal=${signal ?? "none"} 存活=${Math.round(uptime / 1000)}s`);
 
     if (stopping) {
-      writeStatus({ state: "stopped" });
+      finishShutdown();
       return;
     }
 
@@ -135,35 +202,64 @@ function startWorker() {
 
   child.on("error", (error) => {
     supervisorLog(`spawn worker 失败：${error.message}`);
+    if (stopping) {
+      finishShutdown();
+    }
   });
 }
 
 function shutdown(signal) {
   if (stopping) return;
   stopping = true;
+  stopHeartbeat();
   supervisorLog(`收到 ${signal}，正在停止 worker 并退出 supervisor`);
   writeStatus({ state: "stopping" });
   if (child) {
-    child.kill();
-    // 给 worker 一点优雅退出时间，之后强杀
-    setTimeout(() => {
+    child.kill(signal === "SIGINT" ? "SIGINT" : "SIGTERM");
+    shutdownTimer = setTimeout(() => {
       if (child) {
+        supervisorLog(`worker 在 ${SHUTDOWN_TIMEOUT_MS}ms 内未退出，执行强制终止`);
+        writeStatus({ state: "force-stopping", shutdownTimeoutMs: SHUTDOWN_TIMEOUT_MS });
         try {
           child.kill("SIGKILL");
         } catch {
           // 已退出
         }
       }
-      process.exit(0);
-    }, 3_000);
+      process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS);
   } else {
-    process.exit(0);
+    finishShutdown();
   }
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+function finishShutdown() {
+  if (shutdownTimer) {
+    clearTimeout(shutdownTimer);
+    shutdownTimer = null;
+  }
+  writeStatus({ state: "stopped" });
+  process.exitCode = 0;
+}
 
-supervisorLog(`supervisor 启动，pid=${process.pid}`);
-writeStatus({ state: "starting" });
-startWorker();
+function readPositiveIntegerEnv(name, fallback) {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+if (healthcheckMode) {
+  runHealthcheck();
+} else {
+  mkdirSync(logDir, { recursive: true });
+  mkdirSync(dirname(statusFile), { recursive: true });
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+  supervisorLog(`supervisor 启动，pid=${process.pid}`);
+  writeStatus({ state: "starting" });
+  startWorker();
+}

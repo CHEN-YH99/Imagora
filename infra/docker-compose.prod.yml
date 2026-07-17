@@ -137,11 +137,14 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.worker
+    command: ["node", "infra/scripts/worker-supervisor.mjs"]
+    stop_grace_period: ${WORKER_STOP_GRACE_PERIOD:-32m}
     depends_on:
       migrate:
         condition: service_completed_successfully
       api:
         condition: service_healthy
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
       REDIS_URL: redis://redis:6379
@@ -166,6 +169,13 @@ services:
       SAFETY_PROVIDER_TOKEN: ${SAFETY_PROVIDER_TOKEN:-}
       GENERATION_RUNNING_TIMEOUT_MS: ${GENERATION_RUNNING_TIMEOUT_MS:-1800000}
       WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-2500}
+      WORKER_SUPERVISOR_SHUTDOWN_TIMEOUT_MS: ${WORKER_SUPERVISOR_SHUTDOWN_TIMEOUT_MS:-1860000}
+    healthcheck:
+      test: ["CMD", "node", "infra/scripts/worker-supervisor.mjs", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   web:
     build:

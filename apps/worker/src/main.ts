@@ -11,7 +11,7 @@ import {
   resolveDefaultImageProvider
 } from "@imagora/ai-providers";
 import { createStore } from "@imagora/database";
-import { startGenerationWorker, type GenerationQueueJob } from "@imagora/queue";
+import { startGenerationWorker, type GenerationQueueJob, type GenerationWorkerHandle } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
 import { createObjectStorage } from "@imagora/storage";
 import {
@@ -26,6 +26,8 @@ import {
   type GenerationTask,
   type StoreData
 } from "@imagora/shared";
+import { createWorkerMaintenanceGate } from "./maintenance-runtime.js";
+import { createWorkerShutdownController } from "./shutdown-runtime.js";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -51,7 +53,42 @@ const storage = createObjectStorage();
 const safety = createSafetyProvider();
 const queueProvider = process.env.QUEUE_PROVIDER ?? "inline";
 const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 2500);
+const workerMaintenanceGate = createWorkerMaintenanceGate(envNumber("WORKER_MAINTENANCE_INTERVAL_MS", 60_000));
 let inlineTickPromise: Promise<void> | null = null;
+let inlineTimer: NodeJS.Timeout | null = null;
+let generationWorker: GenerationWorkerHandle | null = null;
+const shutdownController = createWorkerShutdownController({
+  stopAcceptingWork() {
+    if (inlineTimer) {
+      clearInterval(inlineTimer);
+      inlineTimer = null;
+    }
+  },
+  async closeGenerationWorker() {
+    const activeWorker = generationWorker;
+    generationWorker = null;
+    if (activeWorker) {
+      await activeWorker.close();
+    }
+  },
+  async waitForInlineWork() {
+    const activeTick = inlineTickPromise;
+    if (activeTick) {
+      await activeTick;
+    }
+  },
+  onStarted(signal) {
+    logger.info({ signal }, "worker shutdown started");
+  },
+  onCompleted(signal) {
+    logger.info({ signal }, "worker shutdown completed");
+    process.exitCode = 0;
+  },
+  onFailed(error, signal) {
+    logger.error({ err: error, signal }, "worker shutdown failed");
+    process.exitCode = 1;
+  }
+});
 
 interface ClaimedTask {
   task: GenerationTask;
@@ -81,19 +118,31 @@ type TaskExecutionResult =
 
 logger.info({ queueProvider, provider: provider.name, modelName: provider.modelName }, "worker started");
 
+process.on("SIGINT", () => {
+  void shutdownController.shutdown("SIGINT");
+});
+process.on("SIGTERM", () => {
+  void shutdownController.shutdown("SIGTERM");
+});
+
 if (queueProvider === "bullmq") {
-  startGenerationWorker(processQueuedJob);
+  generationWorker = startGenerationWorker(processQueuedJob);
 } else {
   logger.info({ pollIntervalMs }, "worker polling enabled");
   await runInlineTick();
-  setInterval(() => {
-    runInlineTick().catch((error) => {
-      logger.error({ err: error }, "worker tick failed");
-    });
-  }, pollIntervalMs);
+  if (!shutdownController.isShuttingDown()) {
+    inlineTimer = setInterval(() => {
+      runInlineTick().catch((error) => {
+        logger.error({ err: error }, "worker tick failed");
+      });
+    }, pollIntervalMs);
+  }
 }
 
 function runInlineTick(): Promise<void> {
+  if (shutdownController.isShuttingDown() && !inlineTickPromise) {
+    return Promise.resolve();
+  }
   if (inlineTickPromise) {
     return inlineTickPromise;
   }
@@ -129,7 +178,9 @@ async function claimTaskById(taskId: string): Promise<ClaimedTask | null> {
 
 async function claimTask(selectTask: (data: StoreData) => GenerationTask | undefined): Promise<ClaimedTask | null> {
   return store.update((data) => {
-    runWorkerMaintenance(data);
+    if (workerMaintenanceGate.shouldRun()) {
+      runWorkerMaintenance(data);
+    }
     const task = selectTask(data);
     if (!task) {
       return null;

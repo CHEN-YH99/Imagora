@@ -5,11 +5,19 @@ ARG NEXT_PUBLIC_PAYMENT_PROVIDER=mock
 ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
 ENV NEXT_PUBLIC_PAYMENT_PROVIDER=${NEXT_PUBLIC_PAYMENT_PROVIDER}
 
+# 默认走淘宝镜像源，国内构建无需代理即可拉包；如需官方源，构建时传 --build-arg NPM_REGISTRY=https://registry.npmjs.org
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps ./apps
 COPY packages ./packages
-RUN npm ci
+RUN npm config set registry "$NPM_REGISTRY" \
+    && npm config set fetch-retries 5 \
+    && npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 180000 \
+    && npm config set fetch-timeout 600000 \
+    && npm ci
 RUN npm run build:packages && npm --workspace apps/web run build
 
 FROM node:24-alpine AS runtime
