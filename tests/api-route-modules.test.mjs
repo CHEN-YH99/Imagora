@@ -227,3 +227,42 @@ test("api rate limit helpers are isolated from main entrypoint", async () => {
     assert.doesNotMatch(main, new RegExp(`function ${helper}\\b`));
   }
 });
+
+test("p2 rate limits cover email verification and payment webhooks", async () => {
+  const rateLimitRuntime = await readProjectFile("apps/api/src/rate-limit-runtime.ts");
+
+  assert.match(rateLimitRuntime, /id: "auth-verify-email"/);
+  assert.ok(rateLimitRuntime.includes("pattern: /^\\/api\\/auth\\/verify-email$/"));
+  assert.match(rateLimitRuntime, /id: "payment-webhook"/);
+  assert.ok(rateLimitRuntime.includes("pattern: /^\\/api\\/payments\\/webhooks\\/[^/]+$/"));
+  assert.match(rateLimitRuntime, /RATE_LIMIT_WEBHOOK_MAX/);
+});
+
+test("p2 admin list endpoints authenticate before parsing query strings", async () => {
+  const adminRoutes = await readProjectFile("apps/api/src/routes/admin.ts");
+  const protectedListRoutes = [
+    { route: "/api/admin/users", schema: "adminUserQuerySchema" },
+    { route: "/api/admin/generation/tasks", schema: "adminTaskQuerySchema" },
+    { route: "/api/admin/images", schema: "adminImageQuerySchema" },
+    { route: "/api/admin/orders", schema: "adminOrderQuerySchema" },
+    { route: "/api/admin/audit-logs", schema: "adminAuditQuerySchema" },
+    { route: "/api/admin/safety-events", schema: "safetyEventQuerySchema" },
+    { route: "/api/admin/safety-appeals", schema: "safetyAppealAdminQuerySchema" }
+  ];
+
+  for (const { route, schema } of protectedListRoutes) {
+    const block = routeBlock(adminRoutes, `app.get("${route}"`);
+    const authIndex = block.indexOf("requireAdmin(request)");
+    const queryIndex = block.indexOf(`${schema}.parse(request.query)`);
+    assert.ok(authIndex >= 0, `${route} should call requireAdmin`);
+    assert.ok(queryIndex >= 0, `${route} should parse ${schema}`);
+    assert.ok(authIndex < queryIndex, `${route} should authenticate before parsing query`);
+  }
+});
+
+function routeBlock(source, signature) {
+  const start = source.indexOf(signature);
+  assert.ok(start >= 0, `${signature} should exist`);
+  const next = source.indexOf("\n  app.", start + signature.length);
+  return source.slice(start, next === -1 ? source.length : next);
+}

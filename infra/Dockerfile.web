@@ -22,14 +22,24 @@ RUN npm run build:packages && npm --workspace apps/web run build
 
 FROM node:24-alpine AS runtime
 
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
 ENV NODE_ENV=production \
     NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:4100 \
     NEXT_PUBLIC_PAYMENT_PROVIDER=mock
 
 WORKDIR /app
 COPY --from=builder /app/package.json /app/package-lock.json ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/apps/web ./apps/web
+COPY --from=builder /app/apps/web/package.json ./apps/web/package.json
+RUN npm config set registry "$NPM_REGISTRY" \
+    && npm config set fetch-retries 5 \
+    && npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 180000 \
+    && npm config set fetch-timeout 600000 \
+    && npm ci --omit=dev --workspace apps/web --include-workspace-root
+COPY --from=builder /app/apps/web/.next ./apps/web/.next
+COPY --from=builder /app/apps/web/public ./apps/web/public
+COPY --from=builder /app/apps/web/next.config.mjs ./apps/web/next.config.mjs
 RUN chown -R node:node /app
 
 USER node

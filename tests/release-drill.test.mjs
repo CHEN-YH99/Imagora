@@ -369,6 +369,25 @@ test("production env template documents P0 provider defaults without development
   assert.match(gitignore, /^\.env\.production$/m);
 });
 
+test("p2 runtime Dockerfiles install production dependencies without copying builder dev node_modules", async () => {
+  const dockerfiles = [
+    { path: "infra/Dockerfile.api", workspace: "apps/api" },
+    { path: "infra/Dockerfile.worker", workspace: "apps/worker" },
+    { path: "infra/Dockerfile.web", workspace: "apps/web" }
+  ];
+
+  for (const dockerfile of dockerfiles) {
+    const content = await readFile(dockerfile.path, "utf8");
+    assert.doesNotMatch(content, /COPY --from=builder \/app\/node_modules \.\/node_modules/);
+    assert.match(content, new RegExp(`npm ci --omit=dev --workspace ${escapeRegExp(dockerfile.workspace)}`));
+    assert.match(content, /ARG NPM_REGISTRY=https:\/\/registry\.npmmirror\.com/);
+  }
+
+  const databasePackage = JSON.parse(await readFile("packages/database/package.json", "utf8"));
+  assert.ok(databasePackage.dependencies.prisma, "Prisma CLI is required by the production migration container");
+  assert.equal(databasePackage.devDependencies.prisma, undefined);
+});
+
 test("p0 documentation records the command and real external smoke boundary", async () => {
   const readme = await readFile("README.md", "utf8");
   const infraReadme = await readFile("infra/README.md", "utf8");
@@ -490,6 +509,10 @@ function parseEnvTemplate(content) {
     values[name] = value;
   }
   return values;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function writeFakePgDump(tempRoot) {

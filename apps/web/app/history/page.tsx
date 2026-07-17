@@ -205,23 +205,32 @@ export default function HistoryPage() {
   }
 
   async function copyPrompt(prompt: string) {
-    await navigator.clipboard.writeText(prompt);
-    setMessage("提示词已复制。");
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setMessage("提示词已复制。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "复制失败，请手动选择提示词后复制。");
+    }
   }
 
   async function toggleFavorite(image: GeneratedImage) {
-    await apiFetch<{ imageId: string; favorite: boolean }>(`/api/images/${image.id}/favorite`, {
-      method: image.favorite ? "DELETE" : "POST"
-    });
-    setImages((items) => items.map((item) => (item.id === image.id ? { ...item, favorite: !image.favorite } : item)));
-    setDetail((value) =>
-      value
-        ? {
-            ...value,
-            images: value.images.map((item) => (item.id === image.id ? { ...item, favorite: !image.favorite } : item))
-          }
-        : value
-    );
+    try {
+      const result = await apiFetch<{ imageId: string; favorite: boolean }>(`/api/images/${image.id}/favorite`, {
+        method: image.favorite ? "DELETE" : "POST"
+      });
+      setImages((items) => items.map((item) => (item.id === image.id ? { ...item, favorite: result.favorite } : item)));
+      setDetail((value) =>
+        value
+          ? {
+              ...value,
+              images: value.images.map((item) => (item.id === image.id ? { ...item, favorite: result.favorite } : item))
+            }
+          : value
+      );
+      setMessage(result.favorite ? "图片已收藏。" : "图片已取消收藏。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "收藏状态更新失败，请稍后重试。");
+    }
   }
 
   async function downloadImage(image: GeneratedImage) {

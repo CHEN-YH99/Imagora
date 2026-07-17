@@ -392,25 +392,26 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
 
   app.post("/api/auth/request-password-reset", async (request) => {
     const input = requestPasswordResetSchema.parse(request.body);
-    const data = await store.read();
-    const user = data.users.find((u) => u.email === input.email.toLowerCase());
-
-    // Always return success to prevent email enumeration
-    if (!user) {
-      return envelope(request, { ok: true, message: "If email exists, reset link will be sent" });
-    }
 
     return store.update(async (data) => {
+      const user = data.users.find((u) => u.email === input.email.toLowerCase());
+
+      // Always return success to prevent email enumeration
+      if (!user) {
+        return envelope(request, { ok: true, message: "If email exists, reset link will be sent" });
+      }
+
       const now = new Date().toISOString();
       const ttlMinutes = envNumber("PASSWORD_RESET_TOKEN_TTL_MINUTES", 30);
       const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
       const resetToken = randomUUID();
       const tokenHash = createHash("sha256").update(resetToken).digest("hex");
 
-      // Clean up old reset tokens for this user
-      data.passwordResetTokens = data.passwordResetTokens.filter(
-        (t) => t.userId !== user.id || new Date(t.expiresAt) > new Date()
-      );
+      for (const token of data.passwordResetTokens) {
+        if (token.userId === user.id && !token.usedAt) {
+          token.usedAt = now;
+        }
+      }
 
       // Add new reset token
       data.passwordResetTokens.push({

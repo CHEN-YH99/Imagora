@@ -17,14 +17,22 @@ RUN npm run build:packages && npm --workspace apps/worker run build
 
 FROM node:24-alpine AS runtime
 
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
 ENV NODE_ENV=production \
     IMAGORA_STORE_PATH=/data/imagora-store.json
 
 WORKDIR /app
 COPY --from=builder /app/package.json /app/package-lock.json ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/apps/worker ./apps/worker
 COPY --from=builder /app/packages ./packages
+COPY --from=builder /app/apps/worker/package.json ./apps/worker/package.json
+RUN npm config set registry "$NPM_REGISTRY" \
+    && npm config set fetch-retries 5 \
+    && npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 180000 \
+    && npm config set fetch-timeout 600000 \
+    && npm ci --omit=dev --workspace apps/worker --include-workspace-root
+COPY --from=builder /app/apps/worker/dist ./apps/worker/dist
 COPY infra/scripts/worker-supervisor.mjs ./infra/scripts/worker-supervisor.mjs
 RUN mkdir -p /data && chown -R node:node /data /app
 

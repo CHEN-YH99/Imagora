@@ -51,6 +51,12 @@ export const rateLimitRules: RateLimitRule[] = [
     max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
   },
   {
+    id: "auth-verify-email",
+    method: "POST",
+    pattern: /^\/api\/auth\/verify-email$/,
+    max: envNumber("RATE_LIMIT_PASSWORD_RESET_MAX", 5)
+  },
+  {
     id: "auth-resend-verification",
     method: "POST",
     pattern: /^\/api\/auth\/resend-verification$/,
@@ -92,6 +98,12 @@ export const rateLimitRules: RateLimitRule[] = [
     method: "POST",
     pattern: /^\/api\/images\/[^/]+\/preview-url$/,
     max: envNumber("RATE_LIMIT_PREVIEW_MAX", envNumber("RATE_LIMIT_DOWNLOAD_MAX", 60))
+  },
+  {
+    id: "payment-webhook",
+    method: "POST",
+    pattern: /^\/api\/payments\/webhooks\/[^/]+$/,
+    max: envNumber("RATE_LIMIT_WEBHOOK_MAX", 120)
   }
 ];
 

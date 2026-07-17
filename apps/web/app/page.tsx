@@ -33,13 +33,16 @@ import {
   IMAGE_MODEL_OPTIONS,
   peekCurrentUser
 } from "../lib/api";
-import { buildGeneratePath, saveGenerationDraft } from "../lib/generateDrafts";
+import { buildGeneratePath, saveGenerationDraft, type GenerationDraft } from "../lib/generateDrafts";
+import type { PromptPresetId } from "./generate/promptPresets";
 
 type StyleOption = {
-  id: string;
+  id: PromptPresetId;
   name: string;
   label: string;
   description: string;
+  prompt: string;
+  aspectRatio: "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
   cost: number;
   artClass: string;
   accentClass: string;
@@ -58,19 +61,23 @@ const aspectRatioOptions = [
 
 const styleOptions: StyleOption[] = [
   {
-    id: "cinematic",
-    name: "电影写实",
-    label: "电影写实",
+    id: "realistic",
+    name: "写实质感",
+    label: "写实质感",
     description: "强调镜头语言、景深层次和叙事氛围",
+    prompt: "雨夜城市街角，霓虹反射在湿润路面，35mm 电影镜头，自然景深，高级写实影像质感",
+    aspectRatio: "16:9",
     cost: 8,
     artClass: "art-cinematic",
     accentClass: "from-ember to-cyanx"
   },
   {
-    id: "product",
+    id: "product_photography",
     name: "产品摄影",
     label: "产品摄影",
     description: "适合电商主图、材质表现和棚拍质感",
+    prompt: "白瓷质感无线耳机置于干净亚克力台面，柔和棚拍布光，真实反射，商业级产品摄影",
+    aspectRatio: "1:1",
     cost: 7,
     artClass: "art-product",
     accentClass: "from-mint to-cyanx"
@@ -80,6 +87,8 @@ const styleOptions: StyleOption[] = [
     name: "动漫插画",
     label: "动漫插画",
     description: "适合角色视觉、封面图和社媒头像",
+    prompt: "未来城市信使角色设定，明亮发光披风，清晰轮廓，精致五官，动漫封面构图",
+    aspectRatio: "3:4",
     cost: 6,
     artClass: "art-anime",
     accentClass: "from-plasma to-cyanx"
@@ -89,24 +98,19 @@ const styleOptions: StyleOption[] = [
     name: "海报设计",
     label: "海报设计",
     description: "适合活动主视觉、标题空间和高对比排版",
+    prompt: "地下电子音乐节活动海报主视觉，撞色几何图形，高对比排版，预留醒目标题空间",
+    aspectRatio: "3:4",
     cost: 9,
     artClass: "art-poster",
     accentClass: "from-volt to-ember"
   },
   {
-    id: "architecture",
-    name: "空间概念",
-    label: "空间概念",
-    description: "适合室内、建筑、展陈和光影结构方案",
-    cost: 8,
-    artClass: "art-architecture",
-    accentClass: "from-cyanx to-ember"
-  },
-  {
-    id: "isometric",
-    name: "等距图形",
-    label: "等距图形",
+    id: "illustration",
+    name: "品牌插画",
+    label: "品牌插画",
     description: "适合应用插图、流程说明和品牌素材",
+    prompt: "智能创作流程品牌插画，等距视角工作台，图片网格、积分账本和队列节点清晰，现代配色",
+    aspectRatio: "4:3",
     cost: 5,
     artClass: "art-isometric",
     accentClass: "from-plasma to-volt"
@@ -329,17 +333,17 @@ export default function HomePage() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  async function handleGenerate() {
-    if (!effectivePrompt || authCheckState === "checking") {
+  async function enterGenerateWorkspace(path: string, draft: string | GenerationDraft) {
+    if (authCheckState === "checking") {
       return;
     }
 
     setEntryNotice(null);
-    saveGenerationDraft(effectivePrompt);
+    saveGenerationDraft(draft);
     const cachedUser = peekCurrentUser();
     if (cachedUser !== undefined) {
       setIsLoggedIn(Boolean(cachedUser));
-      router.push(cachedUser ? generatePath : `/login?next=${encodeURIComponent(generatePath)}`);
+      router.push(cachedUser ? path : `/login?next=${encodeURIComponent(path)}`);
       return;
     }
 
@@ -347,7 +351,7 @@ export default function HomePage() {
     try {
       const user = await getCurrentUser();
       setIsLoggedIn(Boolean(user));
-      router.push(user ? generatePath : `/login?next=${encodeURIComponent(generatePath)}`);
+      router.push(user ? path : `/login?next=${encodeURIComponent(path)}`);
     } catch (error) {
       setEntryNotice({
         tone: "danger",
@@ -356,6 +360,32 @@ export default function HomePage() {
     } finally {
       setAuthCheckState("idle");
     }
+  }
+
+  async function handleGenerate() {
+    if (!effectivePrompt) {
+      return;
+    }
+
+    await enterGenerateWorkspace(generatePath, effectivePrompt);
+  }
+
+  async function handleStyleOption(option: StyleOption) {
+    const path = buildGeneratePath({
+      style: option.id,
+      aspectRatio: option.aspectRatio,
+      quality: qualityToGenerateValue[quality],
+      quantity,
+      model: selectedModel
+    });
+    await enterGenerateWorkspace(path, {
+      prompt: option.prompt,
+      style: option.id,
+      aspectRatio: option.aspectRatio,
+      quality: qualityToGenerateValue[quality],
+      quantity,
+      model: selectedModel
+    });
   }
 
   return (
@@ -787,13 +817,14 @@ export default function HomePage() {
           <SectionHeading
             eyebrow="风格选择"
             title="结构化风格参数让提示词更稳定"
-            description="覆盖写实、插画、动漫、产品摄影、海报和空间概念等常见创作场景，减少重复调参成本，并让积分预估更容易理解。"
+            description="覆盖写实、插画、动漫、产品摄影和海报等常见创作场景，减少重复调参成本，并让积分预估更容易理解。"
           />
           <div className="mt-10 grid gap-4 lg:grid-cols-3">
             {styleOptions.map((item) => (
               <button
                 key={item.id}
                 type="button"
+                onClick={() => void handleStyleOption(item)}
                 className="focus-ring group min-h-56 rounded-[1.35rem] border border-white/12 bg-white/7 p-4 text-left transition-colors duration-200 hover:border-white/24 hover:bg-white/10"
               >
                 <div

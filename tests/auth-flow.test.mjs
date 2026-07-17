@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -321,6 +321,39 @@ test("resend-verification enforces a per-user cooldown after registration", asyn
   assert.equal(okRes.statusCode, 200, "resend after cooldown window should succeed");
 });
 
+test("request-password-reset invalidates older unused reset tokens", async () => {
+  const email = "reset-token-rotation-user@example.com";
+  const pass = "ResetRotatePass123abc";
+  await registerUser(email, pass);
+
+  const firstRes = await inject(makeJar(), {
+    method: "POST",
+    url: "/api/auth/request-password-reset",
+    payload: { email }
+  });
+  assert.equal(firstRes.statusCode, 200);
+
+  let storeData = await readStoreData();
+  const user = storeData.users.find((item) => item.email === email);
+  assert.ok(user, "registered user should exist");
+  let resetTokens = storeData.passwordResetTokens.filter((token) => token.userId === user.id);
+  assert.equal(resetTokens.length, 1);
+  assert.equal(resetTokens[0].usedAt, null);
+
+  const secondRes = await inject(makeJar(), {
+    method: "POST",
+    url: "/api/auth/request-password-reset",
+    payload: { email }
+  });
+  assert.equal(secondRes.statusCode, 200);
+
+  storeData = await readStoreData();
+  resetTokens = storeData.passwordResetTokens.filter((token) => token.userId === user.id);
+  assert.equal(resetTokens.length, 2);
+  assert.equal(resetTokens.filter((token) => token.usedAt === null).length, 1);
+  assert.equal(resetTokens.filter((token) => token.usedAt !== null).length, 1);
+});
+
 test("delete-account soft-deletes, frees email, and blocks re-login", async () => {
   // 用共享账号收尾：注销 TEST_EMAIL，验证软删+邮箱释放。
   const jar = await loginUser(TEST_EMAIL, PASSWORD_1);
@@ -349,3 +382,7 @@ test("delete-account soft-deletes, frees email, and blocks re-login", async () =
   });
   assert.equal(reRes.statusCode, 201, "email should be freed for re-registration after soft delete");
 });
+
+async function readStoreData() {
+  return JSON.parse(await readFile(process.env.IMAGORA_STORE_PATH, "utf8"));
+}

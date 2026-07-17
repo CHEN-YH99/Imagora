@@ -156,7 +156,7 @@ function OrdersView() {
                 ) : null}
                 {order.status === "REFUNDED" ? (
                   <p className="mt-2 text-sm text-ember">
-                    订单已退款，请核对账户余额和退款记录，如需继续购买请重新下单。
+                    订单已退款，请核对账户余额和订单状态，如需继续购买请重新下单。
                   </p>
                 ) : null}
               </div>
@@ -189,7 +189,7 @@ function OrdersView() {
           {orders.length === 0 ? (
             <EmptyState
               title="暂无订单记录"
-              description="购买积分或完成支付后，订单状态、金额和支付渠道会显示在这里。"
+              description="购买积分或完成支付后，订单状态、金额、支付渠道和创建时间会显示在这里。"
               actionLabel={message ? "重新加载订单" : "查看积分套餐"}
               actionHref={message ? undefined : "/pricing"}
               onAction={message ? () => void loadOrders() : undefined}

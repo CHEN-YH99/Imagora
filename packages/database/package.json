@@ -23,11 +23,11 @@
   },
   "dependencies": {
     "@imagora/shared": "0.1.0",
-    "@prisma/client": "^6.19.0"
+    "@prisma/client": "^6.19.0",
+    "prisma": "^6.19.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
-    "prisma": "^6.19.0",
     "typescript": "^5.7.2"
   }
 }

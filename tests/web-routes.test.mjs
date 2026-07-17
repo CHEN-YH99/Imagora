@@ -555,3 +555,38 @@ test("favorites and history use server-side offset pagination without polling aw
   assert.doesNotMatch(pollingSection, /loadHistory\(/);
   assert.match(pollingSection, /activeTaskIds\.map/);
 });
+
+test("p2 homepage style cards enter generate with supported preset ids", async () => {
+  const homePage = await readFile(join(root, "apps/web/app/page.tsx"), "utf8");
+
+  assert.match(homePage, /import type \{ PromptPresetId \} from "\.\/generate\/promptPresets";/);
+  for (const presetId of ["realistic", "product_photography", "poster", "illustration", "anime"]) {
+    assert.match(homePage, new RegExp(`id: "${presetId}"`));
+  }
+  for (const unsupportedId of ["cinematic", "product", "architecture", "isometric"]) {
+    assert.doesNotMatch(homePage, new RegExp(`id: "${unsupportedId}"`));
+  }
+
+  assert.match(homePage, /async function handleStyleOption\(option: StyleOption\)/);
+  assert.match(homePage, /buildGeneratePath\(\{[\s\S]*style: option\.id/);
+  assert.match(homePage, /saveGenerationDraft\(draft\)/);
+  assert.match(homePage, /enterGenerateWorkspace\(path, \{[\s\S]*prompt: option\.prompt,[\s\S]*style: option\.id/);
+  assert.match(homePage, /onClick=\{\(\) => void handleStyleOption\(item\)\}/);
+});
+
+test("p2 order and history polish avoids false promises and handles browser/API failures", async () => {
+  const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
+  const ordersPage = await readFile(join(root, "apps/web/app/orders/page.tsx"), "utf8");
+
+  assert.doesNotMatch(ordersPage, /退款记录/);
+  assert.match(ordersPage, /订单状态、金额、支付渠道和创建时间/);
+
+  assert.match(
+    historyPage,
+    /async function copyPrompt\(prompt: string\) \{[\s\S]*try \{[\s\S]*navigator\.clipboard\.writeText\(prompt\)[\s\S]*\} catch \(error\) \{[\s\S]*复制失败/
+  );
+  assert.match(
+    historyPage,
+    /async function toggleFavorite\(image: GeneratedImage\) \{[\s\S]*try \{[\s\S]*apiFetch<\{ imageId: string; favorite: boolean \}>[\s\S]*result\.favorite[\s\S]*\} catch \(error\) \{[\s\S]*收藏状态更新失败/
+  );
+});

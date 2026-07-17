@@ -154,8 +154,8 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.get("/api/admin/users", async (request) => {
-    const query = adminUserQuerySchema.parse(request.query);
     const { data } = await requireAdmin(request);
+    const query = adminUserQuerySchema.parse(request.query);
     const search = query.search?.toLowerCase();
     const users = data.users
       .filter((user) => !query.status || user.status === query.status)
@@ -282,8 +282,8 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.get("/api/admin/generation/tasks", async (request) => {
-    const query = adminTaskQuerySchema.parse(request.query);
     const { data } = await requireAdmin(request);
+    const query = adminTaskQuerySchema.parse(request.query);
     const tasks = data.generationTasks
       .filter((task) => !query.status || task.status === query.status)
       .filter((task) => !query.userId || task.userId === query.userId)
@@ -304,8 +304,8 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.get("/api/admin/images", async (request) => {
-    const query = adminImageQuerySchema.parse(request.query);
     const { data } = await requireAdmin(request);
+    const query = adminImageQuerySchema.parse(request.query);
     const images = data.generatedImages
       .filter((image) => !query.visibility || image.visibility === query.visibility)
       .filter((image) => !query.userId || image.userId === query.userId)
@@ -352,8 +352,8 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.get("/api/admin/orders", async (request) => {
-    const query = adminOrderQuerySchema.parse(request.query);
     const { data } = await requireAdmin(request);
+    const query = adminOrderQuerySchema.parse(request.query);
     const orders = data.orders
       .filter((order) => !query.status || order.status === query.status)
       .filter((order) => !query.userId || order.userId === query.userId)
@@ -495,8 +495,8 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.get("/api/admin/audit-logs", async (request) => {
-    const query = adminAuditQuerySchema.parse(request.query);
     const { data } = await requireAdmin(request);
+    const query = adminAuditQuerySchema.parse(request.query);
     const logs = data.adminAuditLogs
       .filter((log) => !query.adminUserId || log.adminUserId === query.adminUserId)
       .filter((log) => !query.action || log.action === query.action)
@@ -547,8 +547,8 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.get("/api/admin/safety-events", async (request) => {
-    const query = safetyEventQuerySchema.parse(request.query);
     const { data } = await requireAdmin(request);
+    const query = safetyEventQuerySchema.parse(request.query);
     const events = data.safetyEvents
       .filter((event) => !query.status || event.status === query.status)
       .sort(descCreated)
@@ -626,9 +626,8 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.get("/api/admin/safety-appeals", async (request) => {
+    const { data } = await requireAdmin(request);
     const query = safetyAppealAdminQuerySchema.parse(request.query);
-    await requireAdmin(request);
-    const data = await store.read();
     const appeals = data.safetyAppeals
       .filter((appeal) => !query.status || appeal.status === query.status)
       .sort(descCreated)
