@@ -790,6 +790,7 @@ const auditActionMap: Record<string, string> = {
   "maintenance.generation.reconcile": "生成任务补偿对账",
   "image.visibility.update": "图片可见性变更",
   "maintenance.reconcile": "订单对账",
+  "order.refund": "订单退款",
   "plan.create": "创建套餐",
   "plan.update": "更新套餐",
   "safety-appeal.review": "安全申诉处理",

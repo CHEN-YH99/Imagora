@@ -323,6 +323,16 @@ test("admin console exposes enterprise filters, detail drawers, and audit querie
   assert.match(adminPage, /\/api\/admin\/generation\/tasks\/\$\{taskId\}/);
   assert.match(adminPage, /\/api\/admin\/images\/\$\{imageId\}/);
   assert.match(adminPage, /\/api\/admin\/orders\/\$\{orderId\}/);
+  assert.match(adminPage, /order-refund/);
+  assert.match(adminPage, /\/api\/admin\/orders\/\$\{confirmState\.orderId\}\/refund/);
+  assert.match(adminPage, /refreshedDetail = await apiFetch<OrderDetail>/);
+  assert.match(adminPage, /\/api\/admin\/orders\/\$\{result\.order\.id\}/);
+  assert.match(adminPage, /confirm: true/);
+  assert.match(adminPage, /clientRequestId/);
+  assert.match(adminPage, /发起退款/);
+  assert.match(adminPage, /确认退款/);
+  assert.match(adminPage, /余额可被扣为负/);
+  assert.match(adminPage, /selectedDetail\.data\.order\.status === "PAID"/);
 
   assert.match(adminPage, /时间范围/);
   assert.match(adminPage, /createdFrom/);
@@ -340,6 +350,7 @@ test("admin console exposes enterprise filters, detail drawers, and audit querie
   assert.match(apiClient, /reason: string \| null/);
   assert.match(apiClient, /userId: string/);
   assert.match(apiClient, /paymentIntentId/);
+  assert.match(apiClient, /"order\.refund": "订单退款"/);
 });
 
 test("admin console exposes operational incidents and alert notifications", async () => {

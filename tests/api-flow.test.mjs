@@ -1085,6 +1085,170 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const admin = await login(baseUrl, "admin@imagora.local", "Admin123!");
     const adminSession = admin.session;
 
+    const refundOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock", clientRequestId: crypto.randomUUID() },
+      demoSession
+    );
+    const refundWebhookPayload = {
+      providerEventId: `evt_${crypto.randomUUID()}`,
+      orderId: refundOrder.data.order.id,
+      orderNo: refundOrder.data.order.orderNo,
+      amountCents: refundOrder.data.order.amountCents,
+      currency: refundOrder.data.order.currency
+    };
+    const refundOrderPaid = await post(baseUrl, "/api/payments/webhooks/mock", refundWebhookPayload);
+    assert.equal(refundOrderPaid.data.order.status, "PAID");
+
+    const nonAdminRefund = await fetch(`${baseUrl}/api/admin/orders/${refundOrder.data.order.id}/refund`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: demoSession,
+        Origin: defaultWriteOrigin
+      },
+      body: JSON.stringify({
+        reason: "QA non admin refund",
+        confirm: true,
+        clientRequestId: crypto.randomUUID()
+      })
+    });
+    const nonAdminRefundPayload = await nonAdminRefund.json();
+    assert.equal(nonAdminRefund.status, 403);
+    assert.equal(nonAdminRefundPayload.error.code, "FORBIDDEN");
+
+    const pendingRefundOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock", clientRequestId: crypto.randomUUID() },
+      demoSession
+    );
+    const pendingRefund = await fetch(`${baseUrl}/api/admin/orders/${pendingRefundOrder.data.order.id}/refund`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: adminSession,
+        Origin: defaultWriteOrigin
+      },
+      body: JSON.stringify({
+        reason: "QA pending refund",
+        confirm: true,
+        clientRequestId: crypto.randomUUID()
+      })
+    });
+    const pendingRefundPayload = await pendingRefund.json();
+    assert.equal(pendingRefund.status, 400);
+    assert.equal(pendingRefundPayload.error.code, "ORDER_NOT_REFUNDABLE");
+
+    await markOrderExpired(storePath, pendingRefundOrder.data.order.id);
+    await get(baseUrl, "/api/orders", demoSession);
+    const closedRefund = await fetch(`${baseUrl}/api/admin/orders/${pendingRefundOrder.data.order.id}/refund`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: adminSession,
+        Origin: defaultWriteOrigin
+      },
+      body: JSON.stringify({
+        reason: "QA closed refund",
+        confirm: true,
+        clientRequestId: crypto.randomUUID()
+      })
+    });
+    const closedRefundPayload = await closedRefund.json();
+    assert.equal(closedRefund.status, 400);
+    assert.equal(closedRefundPayload.error.code, "ORDER_NOT_REFUNDABLE");
+
+    const beforeAdminRefundCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const refundedOrder = await post(
+      baseUrl,
+      `/api/admin/orders/${refundOrder.data.order.id}/refund`,
+      {
+        reason: "QA order refund",
+        confirm: true,
+        clientRequestId: crypto.randomUUID()
+      },
+      adminSession
+    );
+    assert.equal(refundedOrder.data.order.status, "REFUNDED");
+    assert.equal(refundedOrder.data.refundId, `mock_re_${refundOrder.data.order.id}`);
+    assert.equal(refundedOrder.data.refundedAmountCents, refundOrder.data.order.amountCents);
+    assert.equal(
+      refundedOrder.data.balanceAfter,
+      beforeAdminRefundCredits.data.account.balance - refundOrder.data.plan.credits
+    );
+
+    const storeAfterAdminRefund = await readStore(storePath);
+    const storedRefundedOrder = storeAfterAdminRefund.orders.find((order) => order.id === refundOrder.data.order.id);
+    assert.ok(storedRefundedOrder);
+    assert.equal(storedRefundedOrder.status, "REFUNDED");
+    const refundLedgerEntries = storeAfterAdminRefund.creditLedgerEntries.filter(
+      (entry) =>
+        entry.sourceId === refundOrder.data.order.id &&
+        entry.idempotencyKey === `order-refund:${refundOrder.data.order.id}`
+    );
+    assert.equal(refundLedgerEntries.length, 1);
+    assert.equal(refundLedgerEntries[0].type, "GRANT");
+    assert.equal(refundLedgerEntries[0].sourceType, "ORDER");
+    assert.equal(refundLedgerEntries[0].amount, -refundOrder.data.plan.credits);
+    assert.equal(refundLedgerEntries[0].balanceAfter, refundedOrder.data.balanceAfter);
+    const refundPaymentEvents = storeAfterAdminRefund.paymentEvents.filter(
+      (event) => event.orderId === refundOrder.data.order.id && event.eventType === "payment.refunded"
+    );
+    assert.equal(refundPaymentEvents.length, 1);
+    assert.equal(refundPaymentEvents[0].provider, "mock");
+    assert.equal(refundPaymentEvents[0].payload.reason, "QA order refund");
+    assert.equal(refundPaymentEvents[0].payload.refundId, `mock_re_${refundOrder.data.order.id}`);
+    assert.equal(refundPaymentEvents[0].payload.amountCents, refundOrder.data.order.amountCents);
+    assert.equal(refundPaymentEvents[0].payload.refundedCredits, refundOrder.data.plan.credits);
+    const refundAuditEntries = storeAfterAdminRefund.adminAuditLogs.filter(
+      (entry) =>
+        entry.action === "order.refund" &&
+        entry.targetType === "ORDER" &&
+        entry.targetId === refundOrder.data.order.id &&
+        entry.reason === "QA order refund"
+    );
+    assert.equal(refundAuditEntries.length, 1);
+
+    const duplicateRefund = await fetch(`${baseUrl}/api/admin/orders/${refundOrder.data.order.id}/refund`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: adminSession,
+        Origin: defaultWriteOrigin
+      },
+      body: JSON.stringify({
+        reason: "QA duplicate refund",
+        confirm: true,
+        clientRequestId: crypto.randomUUID()
+      })
+    });
+    const duplicateRefundPayload = await duplicateRefund.json();
+    assert.equal(duplicateRefund.status, 400);
+    assert.equal(duplicateRefundPayload.error.code, "ORDER_ALREADY_REFUNDED");
+    const storeAfterDuplicateRefund = await readStore(storePath);
+    assert.equal(
+      storeAfterDuplicateRefund.creditLedgerEntries.filter(
+        (entry) =>
+          entry.sourceId === refundOrder.data.order.id &&
+          entry.idempotencyKey === `order-refund:${refundOrder.data.order.id}`
+      ).length,
+      refundLedgerEntries.length
+    );
+    assert.equal(
+      storeAfterDuplicateRefund.paymentEvents.filter(
+        (event) => event.orderId === refundOrder.data.order.id && event.eventType === "payment.refunded"
+      ).length,
+      refundPaymentEvents.length
+    );
+    assert.equal(
+      storeAfterDuplicateRefund.adminAuditLogs.filter(
+        (entry) => entry.action === "order.refund" && entry.targetId === refundOrder.data.order.id
+      ).length,
+      refundAuditEntries.length
+    );
+
     await removeOrderCreditGrant(storePath, orderCreated.data.order.id);
     const corruptedPaymentCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     assert.equal(

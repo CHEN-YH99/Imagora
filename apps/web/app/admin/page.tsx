@@ -820,11 +820,17 @@ export default function AdminPage() {
               body: { reason, confirm: true, clientRequestId: confirmState.clientRequestId }
             }
           );
+          let refreshedDetail: OrderDetail | null = null;
+          try {
+            refreshedDetail = await apiFetch<OrderDetail>(`/api/admin/orders/${result.order.id}`);
+          } catch {
+            refreshedDetail = null;
+          }
           await load(true);
-          // 详情面板正开着这笔订单时同步刷新其状态，避免用户看到过期的 PAID。
+          // 详情面板正开着这笔订单时同步刷新订单和支付事件，避免用户看到过期的 PAID。
           setSelectedDetail((current) =>
             current && current.kind === "order" && current.data.order.id === result.order.id
-              ? { ...current, data: { ...current.data, order: result.order } }
+              ? { ...current, data: refreshedDetail ?? { ...current.data, order: result.order } }
               : current
           );
           setNotice({

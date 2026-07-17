@@ -897,6 +897,161 @@ test("stripe checkout session carries immutable server order identity", async ()
   }
 });
 
+test("stripe refund resolves checkout session payment intent and sends idempotent refund", async () => {
+  const previous = snapshotEnv(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_API_BASE_URL"]);
+  const previousFetch = globalThis.fetch;
+  const requests = [];
+  try {
+    process.env.STRIPE_SECRET_KEY = "sk_test_local";
+    process.env.STRIPE_WEBHOOK_SECRET = "whsec_local";
+    process.env.STRIPE_API_BASE_URL = "http://127.0.0.1:18123";
+    globalThis.fetch = async (url, init = {}) => {
+      const href = String(url);
+      requests.push({ url: href, init });
+      if (href === "http://127.0.0.1:18123/v1/checkout/sessions/cs_test_refund") {
+        return new Response(JSON.stringify({ payment_intent: "pi_test_refund" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (href === "http://127.0.0.1:18123/v1/refunds") {
+        return new Response(JSON.stringify({ id: "re_test_refund", status: "succeeded", amount: 1900 }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({ error: { message: "unexpected stripe request" } }), {
+        status: 404,
+        headers: { "content-type": "application/json" }
+      });
+    };
+
+    const refund = await new StripePaymentProvider().refundOrder({
+      orderId: "order_refund",
+      orderNo: "IM20260629003",
+      paymentIntentId: "cs_test_refund",
+      amountCents: 1900,
+      currency: "USD",
+      reason: "QA refund"
+    });
+
+    assert.equal(refund.status, "refunded");
+    assert.equal(refund.refundId, "re_test_refund");
+    assert.equal(refund.refundedAmountCents, 1900);
+    assert.equal(refund.detail, "stripe refund succeeded");
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].url, "http://127.0.0.1:18123/v1/checkout/sessions/cs_test_refund");
+    assert.equal(requests[0].init.method, "GET");
+    assert.equal(requests[0].init.headers.Authorization, "Bearer sk_test_local");
+    assert.equal(requests[1].url, "http://127.0.0.1:18123/v1/refunds");
+    assert.equal(requests[1].init.method, "POST");
+    assert.equal(requests[1].init.headers.Authorization, "Bearer sk_test_local");
+    assert.equal(requests[1].init.headers["Idempotency-Key"], "refund_IM20260629003");
+    const body = new URLSearchParams(String(requests[1].init.body));
+    assert.equal(body.get("payment_intent"), "pi_test_refund");
+    assert.equal(body.get("amount"), "1900");
+    assert.equal(body.get("metadata[orderId]"), "order_refund");
+    assert.equal(body.get("metadata[orderNo]"), "IM20260629003");
+    assert.equal(body.get("metadata[reason]"), "QA refund");
+  } finally {
+    globalThis.fetch = previousFetch;
+    restoreEnv(previous);
+  }
+});
+
+test("stripe refund returns failed without throwing on provider errors", async (t) => {
+  const previous = snapshotEnv(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_API_BASE_URL"]);
+  const previousFetch = globalThis.fetch;
+  try {
+    process.env.STRIPE_SECRET_KEY = "sk_test_local";
+    process.env.STRIPE_WEBHOOK_SECRET = "whsec_local";
+    process.env.STRIPE_API_BASE_URL = "http://127.0.0.1:18123";
+
+    for (const scenario of [
+      {
+        name: "missing checkout session id",
+        paymentIntentId: null,
+        fetch: async () => {
+          throw new Error("fetch should not be called");
+        },
+        expectedDetail: /missing stripe checkout session id/
+      },
+      {
+        name: "session retrieve http failure",
+        paymentIntentId: "cs_test_refund",
+        fetch: async () =>
+          new Response(JSON.stringify({ error: { message: "session missing" } }), {
+            status: 500,
+            headers: { "content-type": "application/json" }
+          }),
+        expectedDetail: /session missing/
+      },
+      {
+        name: "session has no payment intent",
+        paymentIntentId: "cs_test_refund",
+        fetch: async () =>
+          new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }),
+        expectedDetail: /no payment_intent/
+      },
+      {
+        name: "refund http failure",
+        paymentIntentId: "cs_test_refund",
+        fetch: async (url) => {
+          if (String(url).includes("/v1/checkout/sessions/")) {
+            return new Response(JSON.stringify({ payment_intent: "pi_test_refund" }), {
+              status: 200,
+              headers: { "content-type": "application/json" }
+            });
+          }
+          return new Response(JSON.stringify({ error: { message: "refund declined" } }), {
+            status: 402,
+            headers: { "content-type": "application/json" }
+          });
+        },
+        expectedDetail: /refund declined/
+      },
+      {
+        name: "refund status failed",
+        paymentIntentId: "cs_test_refund",
+        fetch: async (url) => {
+          if (String(url).includes("/v1/checkout/sessions/")) {
+            return new Response(JSON.stringify({ payment_intent: "pi_test_refund" }), {
+              status: 200,
+              headers: { "content-type": "application/json" }
+            });
+          }
+          return new Response(JSON.stringify({ id: "re_test_failed", status: "failed", amount: 1900 }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          });
+        },
+        expectedDetail: /stripe refund status=failed/
+      }
+    ]) {
+      await t.test(scenario.name, async () => {
+        globalThis.fetch = scenario.fetch;
+        const refund = await new StripePaymentProvider().refundOrder({
+          orderId: "order_refund",
+          orderNo: "IM20260629004",
+          paymentIntentId: scenario.paymentIntentId,
+          amountCents: 1900,
+          currency: "USD",
+          reason: "QA refund"
+        });
+
+        assert.equal(refund.status, "failed");
+        assert.match(refund.detail ?? "", scenario.expectedDetail);
+      });
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+    restoreEnv(previous);
+  }
+});
+
 test("stripe webhook rejects a payload that no longer matches the signature", async () => {
   const previous = snapshotEnv(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_WEBHOOK_TOLERANCE_SECONDS"]);
   try {
