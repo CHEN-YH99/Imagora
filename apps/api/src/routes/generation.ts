@@ -9,7 +9,7 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     assertEmailVerified,
     assertFeatureEnabled,
     descCreated,
-    enqueueGenerationTaskOrFail,
+    enqueueGenerationTask,
     envelope,
     envNumber,
     extensionForMime,
@@ -57,9 +57,11 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
       );
       if (duplicate) {
         return {
+          blocked: false as const,
           task: taskWithRefund(data, duplicate),
           balanceAfter: mustFindCreditAccount(data, user.id).balance,
-          enqueue: false,
+          enqueue: duplicate.status === "PENDING",
+          created: false,
           requestedAt: duplicate.createdAt
         };
       }
@@ -132,6 +134,7 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
         task: taskWithRefund(data, task),
         balanceAfter: mustFindCreditAccount(data, user.id).balance,
         enqueue: true,
+        created: true,
         requestedAt: now
       };
     });
@@ -147,7 +150,9 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
       );
     }
     if (result.enqueue) {
-      await enqueueGenerationTaskOrFail(result.task.id, user.id, result.requestedAt);
+      await enqueueGenerationTask(result.task.id, user.id, result.requestedAt);
+    }
+    if (result.created) {
       reply.status(201);
     }
     return envelope(request, { task: result.task, balanceAfter: result.balanceAfter });
@@ -230,13 +235,23 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
   app.get("/api/generation/tasks", async (request) => {
     const { user, data } = await requireAuth(request);
     const query = taskQuerySchema.parse(request.query);
-    const tasks = data.generationTasks
+    const matchingTasks = data.generationTasks
       .filter((task) => task.userId === user.id)
       .filter((task) => (query.status ? task.status === query.status : true))
-      .sort(descCreated)
-      .slice(0, query.limit)
+      .sort(descCreated);
+    const total = matchingTasks.length;
+    const tasks = matchingTasks
+      .slice(query.offset, query.offset + query.limit)
       .map((task) => taskWithRefund(data, task));
-    return envelope(request, { tasks });
+    return envelope(request, {
+      tasks,
+      pageInfo: {
+        offset: query.offset,
+        limit: query.limit,
+        total,
+        hasMore: query.offset + tasks.length < total
+      }
+    });
   });
 
   app.get("/api/generation/tasks/:taskId", async (request) => {
@@ -286,7 +301,7 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
       );
       return { task, balanceAfter: mustFindCreditAccount(data, user.id).balance };
     });
-    await enqueueGenerationTaskOrFail(result.task.id, user.id, result.task.createdAt);
+    await enqueueGenerationTask(result.task.id, user.id, result.task.createdAt);
     reply.status(201);
     return envelope(request, { task: result.task, balanceAfter: result.balanceAfter });
   });

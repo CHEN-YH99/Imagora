@@ -56,6 +56,14 @@ export class LocalSafetyProvider implements SafetyProvider {
         provider: this.name
       };
     }
+    if (!hasValidImageBytes(input.mimeType, input.bytes)) {
+      return {
+        status: "BLOCKED",
+        reasonCode: "INVALID_IMAGE_BYTES",
+        reasonMessage: "图片内容无法识别，请重新上传有效图片",
+        provider: this.name
+      };
+    }
     return {
       status: "PASSED",
       reasonCode: "OK",
@@ -63,6 +71,55 @@ export class LocalSafetyProvider implements SafetyProvider {
       provider: this.name
     };
   }
+}
+
+function hasValidImageBytes(mimeType: string, encoded: string): boolean {
+  const normalizedMimeType = mimeType.split(";")[0]?.trim().toLowerCase();
+  const body = encoded.trim();
+  if (!body) {
+    return false;
+  }
+  if (normalizedMimeType === "image/svg+xml") {
+    const text = body.startsWith("<") ? body : decodeBase64Text(body);
+    return Boolean(text && /<svg[\s>]/i.test(text) && /<\/svg>/i.test(text));
+  }
+  const bytes = decodeBase64Bytes(body);
+  if (!bytes) {
+    return false;
+  }
+  if (normalizedMimeType === "image/png") {
+    return hasPrefix(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  }
+  if (normalizedMimeType === "image/jpeg") {
+    return hasPrefix(bytes, [0xff, 0xd8, 0xff]);
+  }
+  if (normalizedMimeType === "image/webp") {
+    return (
+      bytes.length >= 12 &&
+      bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
+      bytes.subarray(8, 12).toString("ascii") === "WEBP"
+    );
+  }
+  return false;
+}
+
+function decodeBase64Bytes(value: string): Buffer | null {
+  try {
+    const payload = value.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "");
+    const buffer = Buffer.from(payload, "base64");
+    return buffer.length > 0 ? buffer : null;
+  } catch {
+    return null;
+  }
+}
+
+function decodeBase64Text(value: string): string | null {
+  const bytes = decodeBase64Bytes(value);
+  return bytes ? bytes.toString("utf8") : null;
+}
+
+function hasPrefix(bytes: Buffer, prefix: number[]): boolean {
+  return prefix.every((value, index) => bytes[index] === value);
 }
 
 export interface HttpSafetyProviderOptions {

@@ -24,7 +24,6 @@ import {
   creditSourceRemainders,
   expireCredits,
   refundFailureCount,
-  refundTaskCredits,
   groupLedgerByUser,
   type GeneratedImage,
   type GenerationTask,
@@ -54,21 +53,22 @@ import {
   setSessionCookie
 } from "./auth-runtime.js";
 import {
-  captchaChallenges,
   captchaOptions,
-  captchaVerifications,
   clearLoginAttempt,
   consumeLoginAttempt,
   createCaptchaChallenge,
   exposeCaptchaAnswerForTests,
   hashCaptchaAnswer,
   issueLoginAttempt,
-  pruneCaptchaChallenges,
-  pruneCaptchaVerifications,
+  saveCaptchaChallenge,
+  saveCaptchaVerification,
   verifyCaptchaChallenge,
   verifyCaptchaVerifications
 } from "./captcha-runtime.js";
+import { createGenerationEnqueueRuntime } from "./generation-enqueue-runtime.js";
 import { validateProductionConfig } from "./production-config.js";
+import { runtimeState, type HttpMetricsSnapshot } from "./runtime-state.js";
+import { captchaMode, turnstileConfigForClient, verifyTurnstileToken } from "./turnstile-runtime.js";
 import { createRateLimitRuntime } from "./rate-limit-runtime.js";
 import { registerApiRoutes } from "./routes/index.js";
 import type { ApiRouteContext } from "./routes/index.js";
@@ -106,6 +106,7 @@ import {
   paymentWebhookParamSchema,
   planParamSchema,
   referenceUploadSchema,
+  refundOrderSchema,
   registerSchema,
   requestPasswordResetSchema,
   resetPasswordSchema,
@@ -166,6 +167,16 @@ const logger = pino({
         }
       }
 });
+const generationEnqueueRuntime = createGenerationEnqueueRuntime({
+  store,
+  queue: generationQueue,
+  intervalMs: envNumber("GENERATION_ENQUEUE_RECONCILE_INTERVAL_MS", 5_000),
+  batchSize: envNumber("GENERATION_ENQUEUE_RECONCILE_BATCH_SIZE", 100),
+  failureLogIntervalMs: envNumber("GENERATION_ENQUEUE_FAILURE_LOG_INTERVAL_MS", 60_000),
+  onLog(level, details, message) {
+    logger[level](details, message);
+  }
+});
 
 const app = Fastify({
   loggerInstance: logger,
@@ -176,14 +187,21 @@ const app = Fastify({
   // 默认关闭（本地直连更安全），生产由 TRUST_PROXY 显式开启；也可传入代理跳数或 CIDR。
   trustProxy: resolveTrustProxy()
 });
+app.addHook("onClose", async () => {
+  await generationEnqueueRuntime.stop();
+  await generationQueue.close();
+  await runtimeState.close();
+});
 const serviceStartedAt = Date.now();
-const routeMetrics = new Map<string, RouteMetric>();
 const generationMaintenanceIntervalMs = envNumber("GENERATION_MAINTENANCE_INTERVAL_MS", 60_000);
+const orderMaintenanceIntervalMs = envNumber("ORDER_MAINTENANCE_INTERVAL_MS", 60_000);
+// 主动反查会打支付方 API，间隔默认放长（5min），避免高频外呼；设 0 关闭。
+const providerReconcileIntervalMs = envNumber("ORDER_PROVIDER_RECONCILE_INTERVAL_MS", 300_000);
 
 app.removeContentTypeParser("application/json");
 app.addContentTypeParser("application/json", { parseAs: "string" }, (request, body, done) => {
   const rawBody = typeof body === "string" ? body : body.toString("utf8");
-  if (pathOnly(request.url).startsWith("/api/payments/webhooks/")) {
+  if (isPaymentWebhookPath(request.url)) {
     done(null, rawBody);
     return;
   }
@@ -247,7 +265,7 @@ app.addHook("onResponse", async (request, reply) => {
     `${request.method} ${request.url} ${statusCode} ${duration}ms`
   );
 
-  recordRequestMetric(request, statusCode);
+  await recordRequestMetric(request, statusCode);
 });
 
 app.setErrorHandler(async (error, request, reply) => {
@@ -331,13 +349,6 @@ declare module "fastify" {
     startedAt?: number;
     userId?: string;
   }
-}
-
-interface RouteMetric {
-  requests: number;
-  failures: number;
-  totalDurationMs: number;
-  maxDurationMs: number;
 }
 
 type FeatureName = "generation" | "payments" | "uploads" | "downloads";
@@ -428,19 +439,13 @@ function uploadBodyLimitBytes(): number {
   return Math.max(envNumber("API_BODY_LIMIT_BYTES", 1024 * 100), base64Chars + 16 * 1024);
 }
 
-async function enqueueGenerationTaskOrFail(taskId: string, userId: string, requestedAt: string): Promise<void> {
-  try {
-    await generationQueue.enqueueGenerationTask({ taskId, userId, requestedAt });
-  } catch (error) {
-    await markTaskFailedAndRefund(
-      taskId,
-      "QUEUE_ENQUEUE_FAILED",
-      errorMessage(error, "Generation queue enqueue failed")
-    );
-    throw new AppError("INTERNAL_ERROR", "Generation task could not be queued. Credits were refunded.", 500, {
-      taskId
-    });
-  }
+async function enqueueGenerationTask(taskId: string, userId: string, requestedAt: string): Promise<boolean> {
+  const attempt = await generationEnqueueRuntime.enqueueTask({
+    id: taskId,
+    userId,
+    createdAt: requestedAt
+  });
+  return attempt.enqueued;
 }
 
 function quote(input: {
@@ -635,15 +640,18 @@ function findCheckoutUrl(data: StoreData, order: Order): string | null {
 }
 
 function findOrderByClientRequestId(data: StoreData, userId: string, clientRequestId: string): Order | null {
-  const event = data.paymentEvents
+  const events = data.paymentEvents
     .filter(
       (item) => item.eventType === "checkout.created" && paymentEventClientRequestId(item.payload) === clientRequestId
     )
-    .sort(descCreated)[0];
-  if (!event) {
-    return null;
+    .sort(descCreated);
+  for (const event of events) {
+    const order = data.orders.find((item) => item.id === event.orderId && item.userId === userId);
+    if (order) {
+      return order;
+    }
   }
-  return data.orders.find((order) => order.id === event.orderId && order.userId === userId) ?? null;
+  return null;
 }
 
 function runOrderMaintenance(data: StoreData): OrderMaintenanceResult {
@@ -705,6 +713,142 @@ function startBackgroundGenerationMaintenance(): void {
       });
   }, generationMaintenanceIntervalMs);
 
+  timer.unref();
+}
+
+function startBackgroundOrderMaintenance(): void {
+  if (orderMaintenanceIntervalMs <= 0) {
+    return;
+  }
+
+  const timer = setInterval(() => {
+    store
+      .update((data) => {
+        const maintenance = runOrderMaintenance(data);
+        if (
+          maintenance.closedExpiredOrders ||
+          maintenance.reconciledPaymentEvents ||
+          maintenance.reconciledPaidOrders
+        ) {
+          logger.warn(
+            {
+              closedExpiredOrders: maintenance.closedExpiredOrders,
+              reconciledPaymentEvents: maintenance.reconciledPaymentEvents,
+              reconciledPaidOrders: maintenance.reconciledPaidOrders
+            },
+            "background order maintenance reconciled orders"
+          );
+        }
+      })
+      .catch((error) => {
+        logger.error({ err: error }, "background order maintenance failed");
+      });
+  }, orderMaintenanceIntervalMs);
+
+  timer.unref();
+}
+
+/**
+ * webhook 丢失兜底：主动向支付方反查"超时仍 PENDING"的订单是否其实已付款。
+ *
+ * 与 runOrderMaintenance 里的 reconcileSucceededPaymentEvents 的区别：
+ * - reconcileSucceededPaymentEvents 只在【本地已收到过 payment.succeeded 事件】时补账，
+ *   webhook 根本没送达时它翻遍全库也找不到。
+ * - 本函数不依赖本地事件，直接调支付方 API 问"这单付没付"，补的是 webhook 彻底丢失的洞。
+ *
+ * 必须在 store.update 事务【外】反查（网络 IO 不能进同步事务），查到 paid 再进事务补发。
+ * applyPaymentSucceeded 自带 provider+providerEventId 幂等 + 金额/币种/orderNo 三重校验，
+ * 即便同一单 webhook 迟到 + 反查同时命中也只入账一次。
+ *
+ * TODO(verify-with-live-stripe): retrieveOrderPaymentStatus 的 Stripe 真实实现需用实弹
+ *   STRIPE_SECRET_KEY 联网验证一次（触发一笔真实超时订单，确认反查能补发且不重复）。
+ */
+async function reconcilePendingOrdersWithProvider(): Promise<void> {
+  const expiresMs = envNumber("ORDER_PENDING_TTL_MINUTES", 30) * 60 * 1000;
+  if (expiresMs <= 0) {
+    return;
+  }
+  // 反查只针对已过 PENDING 超时窗口的订单：刚下单的还在正常支付流程里，别去打支付方 API。
+  const cutoff = Date.now() - expiresMs;
+  const snapshot = await store.read();
+  const staleOrders = snapshot.orders.filter(
+    (order) =>
+      order.status === "PENDING" &&
+      order.paymentProvider === paymentProvider.name &&
+      new Date(order.createdAt).getTime() <= cutoff
+  );
+  if (staleOrders.length === 0) {
+    return;
+  }
+
+  let reconciled = 0;
+  for (const order of staleOrders) {
+    let result: Awaited<ReturnType<typeof paymentProvider.retrieveOrderPaymentStatus>>;
+    try {
+      result = await paymentProvider.retrieveOrderPaymentStatus({
+        orderId: order.id,
+        orderNo: order.orderNo,
+        paymentIntentId: order.paymentIntentId,
+        amountCents: order.amountCents,
+        currency: order.currency
+      });
+    } catch (error) {
+      // retrieveOrderPaymentStatus 约定不抛错，这里是双保险：单单失败不拖垮整轮。
+      logger.error({ err: error, orderId: order.id }, "order payment status retrieve threw");
+      continue;
+    }
+    if (result.status !== "paid" || !result.event) {
+      continue;
+    }
+    const event = result.event;
+    try {
+      const applied = await store.update((data) =>
+        applyPaymentSucceeded(data, {
+          provider: event.provider,
+          providerEventId: event.providerEventId,
+          orderId: event.orderId,
+          orderNo: event.orderNo,
+          eventType: event.eventType,
+          amountCents: event.amountCents,
+          currency: event.currency,
+          paymentIntentId: event.paymentIntentId,
+          route: "background:reconcile-pending-orders",
+          // 主动反查没有原始 webhook 报文，构造一个标注来源的 payload；
+          // normalizedPaymentPayload 会用标准字段覆盖，这里只需提供对象。
+          payload: { source: "provider-reconcile", reconciledAt: new Date().toISOString() }
+        })
+      );
+      if (applied.credited) {
+        reconciled += 1;
+        logger.warn(
+          { orderId: order.id, balanceAfter: applied.balanceAfter },
+          "recovered lost-webhook order via provider reconcile"
+        );
+      } else if (applied.reason && applied.reason !== "DUPLICATE_EVENT") {
+        logger.error(
+          { orderId: order.id, reason: applied.reason },
+          "provider reconcile found paid order but could not credit"
+        );
+      }
+    } catch (error) {
+      logger.error({ err: error, orderId: order.id }, "provider reconcile apply failed");
+    }
+  }
+
+  if (reconciled > 0) {
+    logger.warn({ reconciled }, "background provider reconcile recovered paid orders");
+  }
+}
+
+function startBackgroundProviderReconcile(): void {
+  if (providerReconcileIntervalMs <= 0) {
+    return;
+  }
+  const timer = setInterval(() => {
+    reconcilePendingOrdersWithProvider().catch((error) => {
+      logger.error({ err: error }, "background provider reconcile failed");
+    });
+  }, providerReconcileIntervalMs);
   timer.unref();
 }
 
@@ -1011,6 +1155,191 @@ function applyPaymentSucceeded(
   };
 }
 
+/**
+ * 退款是 applyPaymentSucceeded 的镜像操作：PAID → REFUNDED，回收当初发放的积分。
+ *
+ * 调用约定：**必须在支付方 refund 真实成功之后才调本函数**（钱先退、状态后改），
+ * 杜绝「标了 REFUNDED 但钱没退」。真实 refund 调用在事务外由路由层完成。
+ *
+ * 幂等：以 `order-refund:{orderId}` 账本键为准——grantCredits 内部对该键去重，
+ * 重复退款不会二次回收积分；函数入口也先判状态，非 PAID 单直接拒。
+ *
+ * 积分回收金额 = 当初 `order-grant:{orderId}` 实际发放值（查账本），
+ * 不取 plan.credits——plan 后来若被改，回收的仍是当初真实发放的额度。
+ * 按业务决策，余额允许被扣成负数（用户下次充值先抵欠账）。
+ */
+function applyPaymentRefunded(
+  data: StoreData,
+  input: {
+    orderId: string;
+    adminUserId: string;
+    refundId: string;
+    amountCents: number;
+    reason: string;
+    requestId?: string | null;
+    route?: string | null;
+  }
+): { order: Order; balanceAfter: number; refunded: boolean; reason: string | null } {
+  const order = mustFindOrder(data, input.orderId);
+
+  // 只有已付款订单可退。PENDING/CLOSED/CANCELED/REFUNDED 一律拒。
+  if (order.status !== "PAID") {
+    return {
+      order,
+      balanceAfter: mustFindCreditAccount(data, order.userId).balance,
+      refunded: false,
+      reason: order.status === "REFUNDED" ? "ORDER_ALREADY_REFUNDED" : "ORDER_NOT_REFUNDABLE"
+    };
+  }
+
+  const refundIdempotencyKey = `order-refund:${order.id}`;
+  // 已退过（账本已有回收条目）→ 幂等返回，不重复回收。
+  if (data.creditLedgerEntries.some((entry) => entry.idempotencyKey === refundIdempotencyKey)) {
+    return {
+      order,
+      balanceAfter: mustFindCreditAccount(data, order.userId).balance,
+      refunded: false,
+      reason: "ORDER_ALREADY_REFUNDED"
+    };
+  }
+
+  const now = new Date().toISOString();
+
+  // 回收金额 = 当初实际发放的积分（查 order-grant 账本条目）。
+  const grantEntry = data.creditLedgerEntries.find((entry) => entry.idempotencyKey === `order-grant:${order.id}`);
+  const grantedCredits = grantEntry?.amount ?? 0;
+
+  // 记一条退款事件到 paymentEvents，对齐 applyPaymentSucceeded 的可追溯性。
+  data.paymentEvents.push({
+    id: randomUUID(),
+    provider: order.paymentProvider,
+    providerEventId: `refund_${input.refundId}`,
+    orderId: order.id,
+    eventType: "payment.refunded",
+    payload: {
+      orderNo: order.orderNo,
+      refundId: input.refundId,
+      amountCents: input.amountCents,
+      currency: normalizeCurrency(order.currency),
+      reason: input.reason,
+      adminUserId: input.adminUserId,
+      refundedCredits: grantedCredits
+    },
+    processedAt: now,
+    createdAt: now
+  });
+
+  // 回收积分：负数写账本，幂等键 order-refund:{orderId}。余额允许扣成负数。
+  if (grantedCredits > 0) {
+    grantCredits(
+      data,
+      order.userId,
+      -grantedCredits,
+      "ORDER",
+      order.id,
+      refundIdempotencyKey,
+      `Refund ${order.orderNo}`,
+      null
+    );
+  }
+
+  order.status = "REFUNDED";
+  order.updatedAt = now;
+
+  return {
+    order,
+    balanceAfter: mustFindCreditAccount(data, order.userId).balance,
+    refunded: true,
+    reason: null
+  };
+}
+
+/**
+ * 管理员退款编排：钱先退、状态后改。
+ *
+ * 1. 事务外读订单快照，做可退性预检（非 PAID / 已退 直接拒，不去打支付方 API）；
+ * 2. 事务外调 provider.refundOrder 真实退款（约定不抛错，失败返回 status:"failed"）；
+ * 3. 仅当支付方确认已退，才进 store.update 调 applyPaymentRefunded 落状态 + 回收积分。
+ *
+ * 任一步失败都保持订单状态不动，杜绝「标了 REFUNDED 但钱没退」。
+ * 与任务 5 的 reconcilePendingOrdersWithProvider 同款「事务外调用 + 事务内落账」结构。
+ */
+async function refundOrderWithProvider(input: {
+  orderId: string;
+  adminUserId: string;
+  reason: string;
+  requestId?: string | null;
+  route?: string | null;
+}): Promise<
+  | { ok: true; order: Order; balanceAfter: number; refundId: string | null; refundedAmountCents: number | null }
+  | { ok: false; code: string; message: string }
+> {
+  const snapshot = await store.read();
+  const order = snapshot.orders.find((item) => item.id === input.orderId);
+  if (!order) {
+    return { ok: false, code: "NOT_FOUND", message: "Order was not found" };
+  }
+  // 可退性预检：只有 PAID 单可退。省掉对 PENDING/CLOSED/已退单的无谓支付方调用。
+  if (order.status !== "PAID") {
+    return {
+      ok: false,
+      code: order.status === "REFUNDED" ? "ORDER_ALREADY_REFUNDED" : "ORDER_NOT_REFUNDABLE",
+      message: order.status === "REFUNDED" ? "Order has already been refunded" : "Order is not refundable"
+    };
+  }
+  if (order.paymentProvider !== paymentProvider.name) {
+    return {
+      ok: false,
+      code: "PAYMENT_PROVIDER_MISMATCH",
+      message: "Order payment provider is not the enabled provider"
+    };
+  }
+
+  // 事务外调支付方真退款。约定不抛错，双保险 try/catch。
+  let refund: Awaited<ReturnType<typeof paymentProvider.refundOrder>>;
+  try {
+    refund = await paymentProvider.refundOrder({
+      orderId: order.id,
+      orderNo: order.orderNo,
+      paymentIntentId: order.paymentIntentId,
+      amountCents: order.amountCents,
+      currency: order.currency,
+      reason: input.reason
+    });
+  } catch (error) {
+    logger.error({ err: error, orderId: order.id }, "provider refund threw");
+    return { ok: false, code: "REFUND_FAILED", message: errorMessage(error, "Provider refund failed") };
+  }
+  if (refund.status !== "refunded") {
+    logger.warn({ orderId: order.id, detail: refund.detail }, "provider refund did not succeed");
+    return { ok: false, code: "REFUND_FAILED", message: refund.detail ?? "Provider refund did not succeed" };
+  }
+
+  // 钱已退，进事务落状态 + 回收积分。
+  const applied = await store.update((data) =>
+    applyPaymentRefunded(data, {
+      orderId: order.id,
+      adminUserId: input.adminUserId,
+      refundId: refund.refundId ?? `refund_${order.orderNo}`,
+      amountCents: refund.refundedAmountCents ?? order.amountCents,
+      reason: input.reason,
+      requestId: input.requestId ?? null,
+      route: input.route ?? null
+    })
+  );
+  // applyPaymentRefunded 自带状态/账本幂等：并发或重试导致的重复退款只落一次。
+  if (!applied.refunded && applied.reason && applied.reason !== "ORDER_ALREADY_REFUNDED") {
+    return { ok: false, code: applied.reason, message: "Refund could not be applied to the order" };
+  }
+  return {
+    ok: true,
+    order: applied.order,
+    balanceAfter: applied.balanceAfter,
+    refundId: refund.refundId,
+    refundedAmountCents: refund.refundedAmountCents
+  };
+}
+
 function spendCredits(
   data: StoreData,
   userId: string,
@@ -1043,30 +1372,6 @@ function spendCredits(
     remark,
     createdAt: now,
     expiresAt: null
-  });
-}
-
-async function markTaskFailedAndRefund(taskId: string, code: string, message: string): Promise<void> {
-  await store.update((data) => {
-    const task = data.generationTasks.find((item) => item.id === taskId);
-    if (!task || ["SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"].includes(task.status)) {
-      return;
-    }
-    const now = new Date().toISOString();
-    task.status = "FAILED";
-    task.failureCode = code;
-    task.failureMessage = message;
-    task.completedAt = now;
-    task.updatedAt = now;
-    refundTaskCredits(data, task, task.creditCost, "Generation task could not be queued");
-    recordOperationalIncident(data, {
-      severity: "critical",
-      area: "generation",
-      message,
-      errorCode: code,
-      userId: task.userId,
-      taskId: task.id
-    });
   });
 }
 
@@ -1462,19 +1767,20 @@ function applySecurityHeaders(reply: FastifyReply): void {
 }
 
 function enforceWriteOrigin(request: FastifyRequest): void {
-  if (
-    ["GET", "HEAD", "OPTIONS"].includes(request.method) ||
-    pathOnly(request.url).startsWith("/api/payments/webhooks/")
-  ) {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method) || isPaymentWebhookPath(request.url)) {
     return;
   }
   const origin = headerValue(request.headers.origin);
   if (!origin) {
-    return;
+    throw new AppError("FORBIDDEN", "Request origin is required", 403);
   }
   if (!allowedWriteOrigins().has(normalizeOrigin(origin))) {
     throw new AppError("FORBIDDEN", "Request origin is not allowed", 403);
   }
+}
+
+function isPaymentWebhookPath(requestUrl: string): boolean {
+  return /^\/api\/payments\/webhooks\/[^/]+$/.test(pathOnly(requestUrl));
 }
 
 function allowedWriteOrigins(): Set<string> {
@@ -1523,15 +1829,15 @@ function localDevelopmentOriginAlias(origin: string): string | null {
   return null;
 }
 
-function recordRequestMetric(request: FastifyRequest, statusCode: number): void {
+async function recordRequestMetric(request: FastifyRequest, statusCode: number): Promise<void> {
   const route = `${request.method} ${request.routeOptions.url ?? pathOnly(request.url)}`;
-  const metric = routeMetrics.get(route) ?? { requests: 0, failures: 0, totalDurationMs: 0, maxDurationMs: 0 };
   const durationMs = Math.max(0, Date.now() - (request.startedAt ?? Date.now()));
-  metric.requests += 1;
-  metric.failures += statusCode >= 500 ? 1 : 0;
-  metric.totalDurationMs += durationMs;
-  metric.maxDurationMs = Math.max(metric.maxDurationMs, durationMs);
-  routeMetrics.set(route, metric);
+  try {
+    await runtimeState.recordHttpMetric(route, statusCode, durationMs);
+  } catch (error) {
+    // 指标写入失败不能改变已经完成的 HTTP 响应，只记录故障供运维排查。
+    request.log.error({ error, route }, "Runtime HTTP metrics update failed");
+  }
 }
 
 async function recordHttpIncident(
@@ -1730,7 +2036,7 @@ async function evaluateAndDispatchAlerts(): Promise<{ alerts: number; dispatched
     return { alerts: 0, dispatched: 0, failed: 0 };
   }
   const snapshot = await store.read();
-  const http = httpMetricsSnapshot();
+  const http = await httpMetricsSnapshot();
   const alerts = operationalAlertsSnapshot(snapshot, http);
   if (!alerts.length) {
     return { alerts: 0, dispatched: 0, failed: 0 };
@@ -1820,24 +2126,11 @@ function sanitizeOperationalMessage(message: string): string {
     .slice(0, 280);
 }
 
-function httpMetricsSnapshot() {
-  const routes = [...routeMetrics.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([route, metric]) => ({
-      route,
-      requests: metric.requests,
-      failures: metric.failures,
-      averageDurationMs: round(metric.totalDurationMs / metric.requests),
-      maxDurationMs: metric.maxDurationMs
-    }));
-  return {
-    requestsTotal: routes.reduce((sum, route) => sum + route.requests, 0),
-    failuresTotal: routes.reduce((sum, route) => sum + route.failures, 0),
-    routes
-  };
+async function httpMetricsSnapshot(): Promise<HttpMetricsSnapshot> {
+  return runtimeState.httpMetricsSnapshot();
 }
 
-function operationalAlertsSnapshot(data: StoreData, http: ReturnType<typeof httpMetricsSnapshot>): OperationalAlert[] {
+function operationalAlertsSnapshot(data: StoreData, http: HttpMetricsSnapshot): OperationalAlert[] {
   const alerts: OperationalAlert[] = [];
   const terminalTasks = data.generationTasks.filter((task) =>
     ["SUCCEEDED", "FAILED", "CANCELED", "BLOCKED"].includes(task.status)
@@ -2057,6 +2350,8 @@ function createRouteContext(): ApiRouteContext {
     adminUserQuerySchema,
     adminVisibilitySchema,
     applyPaymentSucceeded,
+    applyPaymentRefunded,
+    refundOrderWithProvider,
     aspectRatioDimensions,
     assertEmailVerified,
     assertFeatureEnabled,
@@ -2064,10 +2359,9 @@ function createRouteContext(): ApiRouteContext {
     assertPaymentProviderEnabled,
     audit,
     buildVerificationEmail,
-    captchaChallenges,
+    captchaMode,
     captchaOptions,
     captchaRequiredRounds,
-    captchaVerifications,
     captchaVerifySchema,
     changeEmailSchema,
     changePasswordSchema,
@@ -2083,7 +2377,7 @@ function createRouteContext(): ApiRouteContext {
     descCreated,
     descUpdated,
     domainMetricsSnapshot,
-    enqueueGenerationTaskOrFail,
+    enqueueGenerationTask,
     envelope,
     ensureCheckoutUrl,
     envNumber,
@@ -2130,14 +2424,13 @@ function createRouteContext(): ApiRouteContext {
     paymentProvider,
     paymentWebhookParamSchema,
     planParamSchema,
-    pruneCaptchaChallenges,
-    pruneCaptchaVerifications,
     publicUser,
     quote,
     randomUUID,
     readFile,
     recordLocalAlertNotifications,
     referenceUploadSchema,
+    refundOrderSchema,
     registerSchema,
     requestPasswordResetSchema,
     requireAdmin,
@@ -2148,6 +2441,8 @@ function createRouteContext(): ApiRouteContext {
     routeLabel,
     runGenerationMaintenance,
     runOrderMaintenance,
+    saveCaptchaChallenge,
+    saveCaptchaVerification,
     safetyAppealAdminQuerySchema,
     safetyAppealCreateSchema,
     safetyAppealParamSchema,
@@ -2171,9 +2466,11 @@ function createRouteContext(): ApiRouteContext {
     updateProfileSchema,
     uploadBodyLimitBytes,
     userParamSchema,
+    turnstileConfigForClient,
     verifyCaptchaChallenge,
     verifyCaptchaVerifications,
     verifyPassword,
+    verifyTurnstileToken,
     webhookSignature,
     withFavorite,
     withoutImagePublicUrl,
@@ -2190,7 +2487,10 @@ export { app };
 // API_NO_LISTEN=true 时只构建 app、不监听端口也不起后台定时器，
 // 让测试可以 import 本模块后用 app.inject 而不真正占用端口。
 if (process.env.API_NO_LISTEN !== "true") {
+  generationEnqueueRuntime.start();
   startBackgroundGenerationMaintenance();
+  startBackgroundOrderMaintenance();
+  startBackgroundProviderReconcile();
   startBackgroundAlertEvaluation();
 
   const port = Number(process.env.API_PORT ?? 4100);

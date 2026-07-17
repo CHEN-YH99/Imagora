@@ -28,7 +28,11 @@ import { SmtpMailer, createMailer } from "../packages/mailer/dist/index.js";
 import { StripePaymentProvider, createPaymentProvider } from "../packages/payments/dist/index.js";
 import { HttpSafetyProvider, createSafetyProvider } from "../packages/safety/dist/index.js";
 import { createObjectStorage } from "../packages/storage/dist/index.js";
-import { checkPromptSafety } from "../packages/shared/dist/index.js";
+import {
+  DEFAULT_PENDING_TASK_TIMEOUT_MS,
+  DEFAULT_RUNNING_TASK_TIMEOUT_MS,
+  checkPromptSafety
+} from "../packages/shared/dist/index.js";
 
 const onePixelPngBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
@@ -643,6 +647,58 @@ test("openai provider downloads url-only image responses from compatible gateway
   }
 });
 
+test("openai provider refuses reference-image requests until an edits endpoint is explicitly implemented", async () => {
+  const server = createFakeOpenAiServer([
+    {
+      status: 200,
+      body: {
+        id: "reference_should_not_be_sent_as_text",
+        data: [{ b64_json: onePixelPngBase64 }]
+      }
+    }
+  ]);
+  const previous = snapshotEnv([
+    "IMAGE_PROVIDER_DEFAULT",
+    "IMAGE_MODEL_DEFAULT",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_TIMEOUT_MS",
+    "OPENAI_MAX_RETRIES",
+    "OPENAI_RETRY_BASE_MS",
+    "OPENAI_IMAGE_MODEL"
+  ]);
+
+  await server.listen();
+  try {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${server.port}`;
+    process.env.OPENAI_TIMEOUT_MS = "500";
+    process.env.OPENAI_MAX_RETRIES = "0";
+    process.env.OPENAI_RETRY_BASE_MS = "10";
+    process.env.IMAGE_PROVIDER_DEFAULT = "openai";
+    process.env.IMAGE_MODEL_DEFAULT = "openai:gpt-image-2";
+    delete process.env.OPENAI_IMAGE_MODEL;
+
+    await assert.rejects(
+      () =>
+        new OpenAiImageGenerationProvider().generateImage({
+          ...fakeOpenAiInput("reference-image"),
+          referenceImageUrl: "https://cdn.imagora.example/reference.png"
+        }),
+      (error) => {
+        assert.equal(error instanceof ProviderError, true);
+        assert.equal(error.code, "PROVIDER_BAD_RESPONSE");
+        assert.match(error.message, /图生图/);
+        return true;
+      }
+    );
+    assert.equal(server.requests.length, 0);
+  } finally {
+    restoreEnv(previous);
+    await server.close();
+  }
+});
+
 test("local prompt safety blocks configured terms", () => {
   const result = checkPromptSafety("child abuse scene");
   assert.equal(result.status, "BLOCKED");
@@ -978,6 +1034,23 @@ test("http safety provider checks third-party text and image endpoints", async (
   }
 });
 
+test("local image safety rejects invalid image bytes instead of trusting mime type", async () => {
+  const provider = createSafetyProvider("local");
+
+  const invalidPng = await provider.checkImage({
+    mimeType: "image/png",
+    bytes: Buffer.from("not an image").toString("base64")
+  });
+  const validPng = await provider.checkImage({
+    mimeType: "image/png",
+    bytes: onePixelPngBase64
+  });
+
+  assert.equal(invalidPng.status, "BLOCKED");
+  assert.equal(invalidPng.reasonCode, "INVALID_IMAGE_BYTES");
+  assert.equal(validPng.status, "PASSED");
+});
+
 test("http safety provider sends uncertain provider failures to manual review", async () => {
   const server = createFakeSafetyServer([
     {
@@ -1001,6 +1074,11 @@ test("http safety provider sends uncertain provider failures to manual review", 
   } finally {
     await server.close();
   }
+});
+
+test("default pending generation timeout is not shorter than the running timeout", () => {
+  assert.equal(DEFAULT_PENDING_TASK_TIMEOUT_MS, DEFAULT_RUNNING_TASK_TIMEOUT_MS);
+  assert.ok(DEFAULT_PENDING_TASK_TIMEOUT_MS >= 30 * 60 * 1000);
 });
 
 test("createSafetyProvider resolves configured http third-party provider", () => {

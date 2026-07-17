@@ -1,26 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { AppError } from "@imagora/shared";
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { appendSetCookie, cookieValue, serializeCookie } from "./auth-runtime.js";
+import { appendSetCookie, cookieValue, serializeCookie, sessionCookieSameSite } from "./auth-runtime.js";
+import { runtimeState, type CaptchaChallengeState } from "./runtime-state.js";
 import { captchaRequiredRounds } from "./schemas.js";
 import { envBool, envNumber } from "./runtime.js";
-
-export interface CaptchaChallenge {
-  answerHash: string;
-  expiresAt: string;
-  createdAt: string;
-}
-
-export interface CaptchaVerification {
-  expiresAt: string;
-  createdAt: string;
-}
-
-interface LoginAttempt {
-  remaining: number;
-  expiresAt: string;
-  createdAt: string;
-}
 
 export interface CaptchaSelection {
   x: number;
@@ -39,10 +23,6 @@ interface CaptchaTile {
   row: number;
   column: number;
 }
-
-export const captchaChallenges = new Map<string, CaptchaChallenge>();
-export const captchaVerifications = new Map<string, CaptchaVerification>();
-export const loginAttempts = new Map<string, LoginAttempt>();
 
 const captchaColumns = 4;
 const captchaRows = 3;
@@ -145,10 +125,16 @@ function createCaptchaAnimalSvg(option: CaptchaOption, x: number, y: number): st
   }
 }
 
-export function verifyCaptchaChallenge(captchaId: string, captchaSelections: CaptchaSelection[]): void {
-  pruneCaptchaChallenges();
-  const challenge = captchaChallenges.get(captchaId);
-  captchaChallenges.delete(captchaId);
+export async function saveCaptchaChallenge(
+  captchaId: string,
+  challenge: CaptchaChallengeState,
+  ttlMs: number
+): Promise<void> {
+  await withRuntimeState(() => runtimeState.setCaptchaChallenge(captchaId, challenge, ttlMs));
+}
+
+export async function verifyCaptchaChallenge(captchaId: string, captchaSelections: CaptchaSelection[]): Promise<void> {
+  const challenge = await withRuntimeState(() => runtimeState.consumeCaptchaChallenge(captchaId));
   if (!challenge || new Date(challenge.expiresAt).getTime() <= Date.now()) {
     throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
   }
@@ -162,21 +148,17 @@ export function verifyCaptchaChallenge(captchaId: string, captchaSelections: Cap
   }
 }
 
-export function verifyCaptchaVerifications(verificationIds: string[]): void {
-  pruneCaptchaVerifications();
+export async function saveCaptchaVerification(verificationId: string, ttlMs: number): Promise<void> {
+  await withRuntimeState(() => runtimeState.setCaptchaVerification(verificationId, ttlMs));
+}
+
+export async function verifyCaptchaVerifications(verificationIds: string[]): Promise<void> {
   const uniqueIds = new Set(verificationIds);
   if (uniqueIds.size !== captchaRequiredRounds) {
     throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
   }
-  const verifications = verificationIds.map((verificationId) => ({
-    verificationId,
-    verification: captchaVerifications.get(verificationId)
-  }));
-  for (const { verificationId } of verifications) {
-    captchaVerifications.delete(verificationId);
-  }
-  const now = Date.now();
-  if (verifications.some(({ verification }) => !verification || new Date(verification.expiresAt).getTime() <= now)) {
+  const consumed = await withRuntimeState(() => runtimeState.consumeCaptchaVerifications(verificationIds));
+  if (!consumed) {
     throw new AppError("CAPTCHA_INVALID", "Image verification is invalid or expired", 400);
   }
 }
@@ -212,44 +194,6 @@ export function exposeCaptchaAnswerForTests(): boolean {
   return process.env.NODE_ENV !== "production" && envBool("EXPOSE_CAPTCHA_ANSWER_FOR_TESTS", false);
 }
 
-export function pruneCaptchaChallenges(): void {
-  const now = Date.now();
-  for (const [captchaId, challenge] of captchaChallenges) {
-    if (new Date(challenge.expiresAt).getTime() <= now) {
-      captchaChallenges.delete(captchaId);
-    }
-  }
-  const maxChallenges = envNumber("CAPTCHA_MAX_CHALLENGES", 5000);
-  if (captchaChallenges.size <= maxChallenges) {
-    return;
-  }
-  const overflow = [...captchaChallenges.entries()]
-    .sort(([, left], [, right]) => left.createdAt.localeCompare(right.createdAt))
-    .slice(0, captchaChallenges.size - maxChallenges);
-  for (const [captchaId] of overflow) {
-    captchaChallenges.delete(captchaId);
-  }
-}
-
-export function pruneCaptchaVerifications(): void {
-  const now = Date.now();
-  for (const [verificationId, verification] of captchaVerifications) {
-    if (new Date(verification.expiresAt).getTime() <= now) {
-      captchaVerifications.delete(verificationId);
-    }
-  }
-  const maxVerifications = envNumber("CAPTCHA_MAX_VERIFICATIONS", 5000);
-  if (captchaVerifications.size <= maxVerifications) {
-    return;
-  }
-  const overflow = [...captchaVerifications.entries()]
-    .sort(([, left], [, right]) => left.createdAt.localeCompare(right.createdAt))
-    .slice(0, captchaVerifications.size - maxVerifications);
-  for (const [verificationId] of overflow) {
-    captchaVerifications.delete(verificationId);
-  }
-}
-
 // 登录尝试令牌名，随会话 cookie 名派生，避免命名冲突。
 function loginAttemptCookieName(): string {
   return process.env.LOGIN_ATTEMPT_COOKIE_NAME ?? "imagora_login_attempt";
@@ -264,85 +208,61 @@ function loginAttemptTtlMs(): number {
 }
 
 // 验证码验过后签发一个带额度的登录尝试令牌，允许在有效期内多次尝试密码而无需重做图片验证。
-export function issueLoginAttempt(reply: FastifyReply): void {
-  pruneLoginAttempts();
+export async function issueLoginAttempt(reply: FastifyReply): Promise<void> {
   const token = randomUUID();
-  const now = Date.now();
-  const expiresAtMs = now + loginAttemptTtlMs();
-  loginAttempts.set(token, {
-    remaining: loginAttemptMaxTries(),
-    expiresAt: new Date(expiresAtMs).toISOString(),
-    createdAt: new Date(now).toISOString()
-  });
+  const ttlMs = loginAttemptTtlMs();
+  const expiresAtMs = Date.now() + ttlMs;
+  await withRuntimeState(() => runtimeState.setLoginAttempt(token, loginAttemptMaxTries(), ttlMs));
   appendSetCookie(
     reply,
     serializeCookie(loginAttemptCookieName(), token, {
       expires: new Date(expiresAtMs),
       httpOnly: true,
       secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+      sameSite: sessionCookieSameSite(),
       path: "/"
     })
   );
 }
 
 // 消费一次登录尝试额度：令牌存在、未过期且有剩余额度则扣 1 并返回 true；否则清理并返回 false。
-export function consumeLoginAttempt(request: FastifyRequest): boolean {
-  pruneLoginAttempts();
+export async function consumeLoginAttempt(request: FastifyRequest): Promise<boolean> {
   const token = cookieValue(request.headers.cookie, loginAttemptCookieName());
   if (!token) {
     return false;
   }
-  const attempt = loginAttempts.get(token);
-  if (!attempt) {
-    return false;
-  }
-  if (new Date(attempt.expiresAt).getTime() <= Date.now() || attempt.remaining <= 0) {
-    loginAttempts.delete(token);
-    return false;
-  }
-  attempt.remaining -= 1;
-  if (attempt.remaining <= 0) {
-    // 额度用尽：本次仍放行，但令牌作废，下次必须重新做图片验证。
-    loginAttempts.delete(token);
-  }
-  return true;
+  return withRuntimeState(() => runtimeState.consumeLoginAttempt(token));
 }
 
 // 登录成功或需要强制重验时，清掉当前尝试令牌及其 cookie。
-export function clearLoginAttempt(request: FastifyRequest, reply: FastifyReply): void {
+export async function clearLoginAttempt(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const token = cookieValue(request.headers.cookie, loginAttemptCookieName());
-  if (token) {
-    loginAttempts.delete(token);
+  if (!token) {
+    return;
   }
+  await withRuntimeState(() => runtimeState.deleteLoginAttempt(token));
   appendSetCookie(
     reply,
     serializeCookie(loginAttemptCookieName(), "", {
       expires: new Date(0),
       httpOnly: true,
       secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+      sameSite: sessionCookieSameSite(),
       path: "/"
     })
   );
 }
 
-function pruneLoginAttempts(): void {
-  const now = Date.now();
-  for (const [token, attempt] of loginAttempts) {
-    if (new Date(attempt.expiresAt).getTime() <= now || attempt.remaining <= 0) {
-      loginAttempts.delete(token);
+async function withRuntimeState<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
     }
-  }
-  const maxAttempts = envNumber("LOGIN_ATTEMPT_MAX_TOKENS", 5000);
-  if (loginAttempts.size <= maxAttempts) {
-    return;
-  }
-  const overflow = [...loginAttempts.entries()]
-    .sort(([, left], [, right]) => left.createdAt.localeCompare(right.createdAt))
-    .slice(0, loginAttempts.size - maxAttempts);
-  for (const [token] of overflow) {
-    loginAttempts.delete(token);
+    throw new AppError("RUNTIME_STATE_UNAVAILABLE", "Authentication state service is unavailable", 503, {
+      provider: runtimeState.provider
+    });
   }
 }
 

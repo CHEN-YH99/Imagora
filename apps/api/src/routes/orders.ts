@@ -44,7 +44,7 @@ export function registerOrderRoutes(app: ApiRouteApp, context: ApiRouteContext):
     assertPaymentProviderEnabled(input.paymentProvider);
     return store.update(async (data) => {
       runOrderMaintenance(data);
-      const duplicate = input.clientRequestId ? findOrderByClientRequestId(data, user.id, input.clientRequestId) : null;
+      const duplicate = findOrderByClientRequestId(data, user.id, input.clientRequestId);
       if (duplicate) {
         if (duplicate.planId !== input.planId || duplicate.paymentProvider !== input.paymentProvider) {
           throw new AppError("CONFLICT", "clientRequestId has already been used for another order", 409);
@@ -101,7 +101,7 @@ export function registerOrderRoutes(app: ApiRouteApp, context: ApiRouteContext):
             orderNo: order.orderNo,
             amountCents: order.amountCents,
             currency: order.currency,
-            clientRequestId: input.clientRequestId ?? null
+            clientRequestId: input.clientRequestId
           },
           processedAt: now,
           createdAt: now

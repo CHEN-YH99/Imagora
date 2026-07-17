@@ -38,6 +38,9 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
     planParamSchema,
     randomUUID,
     recordLocalAlertNotifications,
+    refundOrderSchema,
+    refundOrderWithProvider,
+    routeLabel,
     requireAdmin,
     requireAuth,
     runGenerationMaintenance,
@@ -88,9 +91,9 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
 
   app.get("/api/admin/metrics", async (request) => {
     await requireAdmin(request);
+    const http = await httpMetricsSnapshot();
     return store.update((data) => {
       const maintenance = runOrderMaintenance(data);
-      const http = httpMetricsSnapshot();
       const domain = domainMetricsSnapshot(data);
       const alerts = operationalAlertsSnapshot(data, http);
       recordLocalAlertNotifications(data, alerts);
@@ -373,6 +376,68 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
     }
     const paymentEvents = data.paymentEvents.filter((event) => event.orderId === order.id).sort(descCreated);
     return envelope(request, { order, user: withoutPassword(user), plan, paymentEvents });
+  });
+
+  // 管理员发起退款：先在事务外调支付方真退款，成功后才落 REFUNDED + 回收积分。
+  // 大额（>= 阈值）退款需 confirm 二次确认，避免误点把整笔退出去。
+  app.post("/api/admin/orders/:orderId/refund", async (request) => {
+    const { user: admin } = await requireAdmin(request);
+    const { orderId } = orderParamSchema.parse(request.params);
+    const input = refundOrderSchema.parse(request.body);
+
+    // 退款金额相对固定（全额退当初订单金额），但仍给大额退款加二次确认闸门。
+    const snapshot = await store.read();
+    const targetOrder = mustFindOrder(snapshot, orderId);
+    const largeRefundThreshold = envNumber("ADMIN_REFUND_CONFIRM_THRESHOLD_CENTS", 50000);
+    if (targetOrder.amountCents >= largeRefundThreshold && !input.confirm) {
+      throw new AppError("VALIDATION_ERROR", "大额退款需要二次确认", 400, {
+        requiresConfirmation: true,
+        thresholdCents: largeRefundThreshold,
+        amountCents: targetOrder.amountCents
+      });
+    }
+
+    const result = await refundOrderWithProvider({
+      orderId,
+      adminUserId: admin.id,
+      reason: input.reason,
+      requestId: request.requestId ?? null,
+      route: routeLabel(request)
+    });
+    if (!result.ok) {
+      // 退款失败：REFUND_FAILED / PAYMENT_PROVIDER_MISMATCH 归 502（支付方问题），
+      // 其余（NOT_FOUND / ORDER_NOT_REFUNDABLE / ORDER_ALREADY_REFUNDED）归 4xx。
+      const status =
+        result.code === "NOT_FOUND"
+          ? 404
+          : result.code === "REFUND_FAILED" || result.code === "PAYMENT_PROVIDER_MISMATCH"
+            ? 502
+            : 400;
+      throw new AppError(result.code, result.message, status);
+    }
+
+    // 退款成功后写审计（在事务外，退款已落库；审计单独入库不影响退款结果）。
+    await store.update((data) => {
+      audit(
+        data,
+        admin.id,
+        "order.refund",
+        "ORDER",
+        result.order.id,
+        input.reason,
+        { status: "PAID" },
+        { status: result.order.status, refundId: result.refundId, refundedAmountCents: result.refundedAmountCents },
+        request
+      );
+      return null;
+    });
+
+    return envelope(request, {
+      order: result.order,
+      balanceAfter: result.balanceAfter,
+      refundId: result.refundId,
+      refundedAmountCents: result.refundedAmountCents
+    });
   });
 
   app.get("/api/admin/plans", async (request) => {

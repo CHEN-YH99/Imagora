@@ -274,6 +274,16 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
         provider: this.name
       });
     }
+    if (input.referenceImageUrl?.trim()) {
+      throw new ProviderError(
+        "PROVIDER_BAD_RESPONSE",
+        "图生图暂未接入已验证的 OpenAI images edits 端点，不能把参考图 URL 当文本提示词伪装成图生图。",
+        {
+          retryable: false,
+          provider: this.name
+        }
+      );
+    }
 
     const size = openAiSize(input.width, input.height);
     const quality = openAiQuality(input.quality);
@@ -1056,8 +1066,7 @@ function buildPrompt(input: GenerateImageInput): string {
     input.prompt,
     `Style: ${input.style.replace(/_/g, " ")}`,
     `Aspect ratio: ${input.aspectRatio}`,
-    input.negativePrompt ? `Avoid: ${input.negativePrompt}` : null,
-    input.referenceImageUrl ? `Reference image URL: ${input.referenceImageUrl}` : null
+    input.negativePrompt ? `Avoid: ${input.negativePrompt}` : null
   ];
   return parts.filter(Boolean).join("\n");
 }

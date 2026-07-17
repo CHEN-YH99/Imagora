@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +24,13 @@ export interface ObjectStorage {
 }
 
 const workspaceRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+const developmentFilesystemSigningSecret = randomBytes(32).toString("hex");
+const insecureFilesystemSigningSecrets = new Set([
+  "imagora-local-storage-dev-secret",
+  "replace-only-if-filesystem-storage-is-used",
+  "change-me",
+  "changeme"
+]);
 
 export class InlineDataUrlStorage implements ObjectStorage {
   readonly name = "inline-data-url";
@@ -61,7 +68,7 @@ export class InlineDataUrlStorage implements ObjectStorage {
 export class FilesystemObjectStorage implements ObjectStorage {
   readonly name = "filesystem";
   private readonly baseDir = resolveLocalStorageDir(process.env.LOCAL_STORAGE_DIR ?? "./data/generated-files");
-  private readonly signingSecret = process.env.LOCAL_STORAGE_SIGNING_SECRET ?? "imagora-local-storage-dev-secret";
+  private readonly signingSecret = resolveFilesystemSigningSecret();
   private readonly publicBasePath = (process.env.LOCAL_STORAGE_PUBLIC_PATH ?? "/api/files").replace(/\/$/, "");
 
   async putObject(input: PutObjectInput): Promise<PutObjectResult> {
@@ -127,6 +134,23 @@ export class FilesystemObjectStorage implements ObjectStorage {
 
 function resolveLocalStorageDir(value: string): string {
   return isAbsolute(value) ? resolve(value) : resolve(workspaceRoot, value);
+}
+
+function resolveFilesystemSigningSecret(): string {
+  const configured = process.env.LOCAL_STORAGE_SIGNING_SECRET?.trim();
+  if (!configured) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("LOCAL_STORAGE_SIGNING_SECRET is required for filesystem storage in production");
+    }
+    return developmentFilesystemSigningSecret;
+  }
+  if (insecureFilesystemSigningSecrets.has(configured.toLowerCase())) {
+    throw new Error("LOCAL_STORAGE_SIGNING_SECRET must not use a known placeholder or development default");
+  }
+  if (Buffer.byteLength(configured, "utf8") < 32) {
+    throw new Error("LOCAL_STORAGE_SIGNING_SECRET must be at least 32 bytes");
+  }
+  return configured;
 }
 
 export class S3CompatibleObjectStorage implements ObjectStorage {

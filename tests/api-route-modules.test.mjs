@@ -101,6 +101,8 @@ test("api production readiness checks are isolated from main entrypoint", async 
     "requireProductionImageProvider",
     "requireProductionImageModel",
     "requireProductionGenerationRunningTimeout",
+    "requireProductionRuntimeStateProvider",
+    "requireProductionSessionCookieSameSite",
     "rejectLocalhostProductionValue"
   ]) {
     assert.match(productionConfig, new RegExp(`function ${helper}\\b`));
@@ -145,6 +147,7 @@ test("api auth and session helpers are isolated from main entrypoint", async () 
     "requireEmailVerification",
     "serializeCookie",
     "sessionCookieName",
+    "sessionCookieSameSite",
     "sessionToken",
     "setSessionCookie"
   ]) {
@@ -160,23 +163,25 @@ test("api auth and session helpers are isolated from main entrypoint", async () 
 test("api captcha and login attempt helpers are isolated from main entrypoint", async () => {
   const main = await readProjectFile("apps/api/src/main.ts");
   const captchaRuntime = await readProjectFile("apps/api/src/captcha-runtime.ts");
+  const runtimeState = await readProjectFile("apps/api/src/runtime-state.ts");
 
   assert.match(main, /from "\.\/captcha-runtime\.js"/);
   for (const exported of [
-    "captchaChallenges",
     "captchaOptions",
-    "captchaVerifications",
     "createCaptchaChallenge",
     "hashCaptchaAnswer",
     "issueLoginAttempt",
-    "loginAttempts",
-    "pruneCaptchaChallenges",
-    "pruneCaptchaVerifications",
+    "saveCaptchaChallenge",
+    "saveCaptchaVerification",
     "verifyCaptchaChallenge",
     "verifyCaptchaVerifications"
   ]) {
-    assert.match(captchaRuntime, new RegExp(`export (?:const|function) ${exported}\\b`));
+    assert.match(captchaRuntime, new RegExp(`export (?:async )?(?:const|function) ${exported}\\b`));
   }
+  assert.match(runtimeState, /export class RuntimeState\b/);
+  assert.match(runtimeState, /export function createRuntimeState\b/);
+  assert.match(runtimeState, /export const runtimeState\b/);
+  assert.doesNotMatch(captchaRuntime, /new Map/);
   for (const helper of [
     "createCaptchaChallenge",
     "createCaptchaSvg",
@@ -189,15 +194,12 @@ test("api captcha and login attempt helpers are isolated from main entrypoint", 
     "pickUniqueIndexes",
     "randomNonTargetCaptchaOption",
     "exposeCaptchaAnswerForTests",
-    "pruneCaptchaChallenges",
-    "pruneCaptchaVerifications",
     "loginAttemptCookieName",
     "loginAttemptMaxTries",
     "loginAttemptTtlMs",
     "issueLoginAttempt",
     "consumeLoginAttempt",
-    "clearLoginAttempt",
-    "pruneLoginAttempts"
+    "clearLoginAttempt"
   ]) {
     assert.doesNotMatch(main, new RegExp(`function ${helper}\\b`));
   }

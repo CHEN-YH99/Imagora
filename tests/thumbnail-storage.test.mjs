@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+const defaultWriteOrigin = "http://127.0.0.1:3100";
+
 test("worker stores SVG thumbnails with matching SVG metadata", async () => {
   const dir = await mkdtemp(join(tmpdir(), "imagora-thumb-"));
   const port = 5100 + Math.floor(Math.random() * 400);
@@ -165,7 +167,8 @@ async function login(baseUrl, email, password) {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Origin: defaultWriteOrigin
     },
     body: JSON.stringify({
       email,
@@ -185,7 +188,8 @@ async function verifyCaptcha(baseUrl) {
   const response = await fetch(`${baseUrl}/api/auth/captcha/verify`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Origin: defaultWriteOrigin
     },
     body: JSON.stringify({
       captchaId: captcha.data.captchaId,
@@ -239,6 +243,7 @@ async function post(baseUrl, path, body, session) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      Origin: defaultWriteOrigin,
       ...sessionHeaders(session)
     },
     body: JSON.stringify(body)
@@ -251,7 +256,10 @@ async function post(baseUrl, path, body, session) {
 async function deleteRequest(baseUrl, path, session) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "DELETE",
-    headers: sessionHeaders(session)
+    headers: {
+      Origin: defaultWriteOrigin,
+      ...sessionHeaders(session)
+    }
   });
   const payload = await response.json();
   assert.equal(response.ok, true, JSON.stringify(payload));

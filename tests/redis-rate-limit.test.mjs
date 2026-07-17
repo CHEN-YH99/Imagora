@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+const defaultWriteOrigin = "http://127.0.0.1:3100";
+
 test("redis rate limiter fails closed with a service-unavailable error", async () => {
   const dir = await mkdtemp(join(tmpdir(), "imagora-redis-limit-"));
   const apiPort = 5500 + Math.floor(Math.random() * 400);
@@ -30,7 +32,8 @@ test("redis rate limiter fails closed with a service-unavailable error", async (
     const response = await fetch(`${baseUrl}/api/auth/login`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({
         email: "demo@imagora.local",
@@ -72,7 +75,8 @@ test("redis rate limiter fails closed when redis returns an error", async () => 
     const response = await fetch(`${baseUrl}/api/auth/login`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({
         email: "demo@imagora.local",
@@ -181,7 +185,8 @@ async function invalidLogin(baseUrl) {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Origin: defaultWriteOrigin
     },
     body: JSON.stringify({
       email: "demo@imagora.local",
@@ -204,7 +209,8 @@ async function verifyCaptcha(baseUrl) {
   const response = await fetch(`${baseUrl}/api/auth/captcha/verify`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Origin: defaultWriteOrigin
     },
     body: JSON.stringify({
       captchaId: captchaPayload.data.captchaId,

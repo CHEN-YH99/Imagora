@@ -38,10 +38,13 @@ const newPasswordSchema = z
     message: "Password is too common"
   });
 
+// turnstileToken：CAPTCHA_PROVIDER=turnstile 时前端 widget 产出的 token，可选（builtin 模式下不发）。
+// 是否强制由路由按运行时 captchaMode() 判定，schema 层只做形状校验。
 export const registerSchema = z
   .object({
     email: emailSchema,
-    password: newPasswordSchema
+    password: newPasswordSchema,
+    turnstileToken: z.string().min(1).max(4096).optional()
   })
   .strict()
   .superRefine((input, context) => {
@@ -61,7 +64,9 @@ export const loginSchema = z
   .object({
     email: emailSchema,
     password: loginPasswordSchema,
-    captchaVerificationIds: z.array(z.string().uuid()).max(captchaRequiredRounds).optional()
+    captchaVerificationIds: z.array(z.string().uuid()).max(captchaRequiredRounds).optional(),
+    // Turnstile 模式下由前端 widget 回传的一次性 token；builtin 模式忽略此字段。
+    turnstileToken: z.string().min(1).max(2048).optional()
   })
   .strict();
 
@@ -158,8 +163,17 @@ export const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30)
 });
 
-export const imageQuerySchema = paginationSchema.extend({
-  projectId: z.string().min(1).optional()
+const offsetPaginationSchema = z.object({
+  offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  limit: z.coerce.number().int().min(1).max(100).default(30)
+});
+
+export const imageQuerySchema = offsetPaginationSchema.extend({
+  projectId: z.string().min(1).optional(),
+  favorite: z
+    .enum(["true", "false"])
+    .transform((value) => value === "true")
+    .optional()
 });
 
 export const imageProjectCreateSchema = z
@@ -198,7 +212,7 @@ const taskStatusSchema = z.enum(["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "C
 const imageVisibilitySchema = z.enum(["PRIVATE", "PUBLIC", "HIDDEN"]);
 const orderStatusSchema = z.enum(["PENDING", "PAID", "CANCELED", "REFUNDED", "CLOSED"]);
 
-export const taskQuerySchema = paginationSchema.extend({
+export const taskQuerySchema = offsetPaginationSchema.extend({
   status: taskStatusSchema.optional()
 });
 
@@ -242,7 +256,7 @@ export const paymentWebhookParamSchema = z.object({ provider: z.string().min(1) 
 export const createOrderSchema = z.object({
   planId: z.string().min(1),
   paymentProvider: z.enum(["mock", "stripe", "wechat", "alipay"]).default("mock"),
-  clientRequestId: z.string().min(8).max(120).optional()
+  clientRequestId: z.string().min(8).max(120)
 });
 
 export const adminReasonSchema = z.object({ reason: z.string().trim().min(3).max(240) });
@@ -258,6 +272,14 @@ export const adjustCreditSchema = z.object({
   confirm: z.boolean().optional(),
   // 幂等键由客户端在发起操作时生成一次，防止重复提交/网络重试把同一笔调整叠加执行
   clientRequestId: z.string().min(8).max(120)
+});
+
+// 管理员退款：全额退款，reason 必填留档，confirm 二次确认防误触。
+// clientRequestId 供前端幂等重试用（后端真正的幂等押在 order-refund:{id} 账本键上）。
+export const refundOrderSchema = z.object({
+  reason: z.string().min(3).max(240),
+  confirm: z.boolean().optional(),
+  clientRequestId: z.string().min(8).max(120).optional()
 });
 const planSchema = z.object({
   name: z.string().min(1).max(80),

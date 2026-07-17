@@ -55,12 +55,14 @@ export function validateProductionConfig(options: ProductionConfigOptions): void
   requireProductionSetting("MAILER_PROVIDER", "smtp");
   requireProductionSetting("SAFETY_PROVIDER", "http");
   requireProductionSetting("RATE_LIMIT_PROVIDER", "redis");
+  requireProductionRuntimeStateProvider();
   if (options.allowBearerSessionAuth()) {
     throw new Error("Unsafe production config: bearer session auth must be disabled");
   }
   if (!envBool("SESSION_COOKIE_SECURE", false)) {
     throw new Error("Unsafe production config: SESSION_COOKIE_SECURE must be true");
   }
+  requireProductionSessionCookieSameSite();
   if (!process.env.ALERT_WEBHOOK_URL?.trim() && !process.env.ALERT_EMAIL_TO?.trim()) {
     throw new Error(
       "Unsafe production config: at least one alert channel is required (set ALERT_WEBHOOK_URL or ALERT_EMAIL_TO)"
@@ -125,6 +127,20 @@ function requireProductionGenerationRunningTimeout(): void {
     throw new Error(
       `Unsafe production config: GENERATION_RUNNING_TIMEOUT_MS must be at least ${minimum} when OPENAI_TIMEOUT_MS=${openAiTimeoutMs} and max quantity is ${maxQuantity}`
     );
+  }
+}
+
+function requireProductionRuntimeStateProvider(): void {
+  const provider = process.env.RUNTIME_STATE_PROVIDER?.trim() || "redis";
+  if (provider !== "redis") {
+    throw new Error("Unsafe production config: RUNTIME_STATE_PROVIDER must be redis");
+  }
+}
+
+function requireProductionSessionCookieSameSite(): void {
+  const sameSite = requireProductionValue("SESSION_COOKIE_SAMESITE").toLowerCase();
+  if (sameSite !== "strict") {
+    throw new Error("Unsafe production config: SESSION_COOKIE_SAMESITE must be Strict");
   }
 }
 

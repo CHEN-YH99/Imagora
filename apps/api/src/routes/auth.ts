@@ -7,10 +7,9 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
     addDays,
     audit,
     buildVerificationEmail,
-    captchaChallenges,
+    captchaMode,
     captchaOptions,
     captchaRequiredRounds,
-    captchaVerifications,
     captchaVerifySchema,
     changeEmailSchema,
     changePasswordSchema,
@@ -34,35 +33,45 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
     mustFindCreditAccount,
     mustFindUser,
     paginationSchema,
-    pruneCaptchaChallenges,
-    pruneCaptchaVerifications,
     publicUser,
     randomUUID,
     registerSchema,
     requestPasswordResetSchema,
     requireAuth,
     resetPasswordSchema,
+    saveCaptchaChallenge,
+    saveCaptchaVerification,
     sessionToken,
     setSessionCookie,
     store,
+    turnstileConfigForClient,
     updateProfileSchema,
     verifyCaptchaChallenge,
     verifyCaptchaVerifications,
     verifyPassword,
+    verifyTurnstileToken,
     z
   } = context;
 
+  // 前端据此决定渲染 Turnstile widget 还是内置 SVG 验证码。siteKey 可公开。
+  app.get("/api/auth/captcha-config", async (request) => {
+    return envelope(request, { mode: captchaMode(), turnstile: turnstileConfigForClient() });
+  });
+
   app.get("/api/auth/captcha", async (request) => {
-    pruneCaptchaChallenges();
-    pruneCaptchaVerifications();
     const challenge = createCaptchaChallenge();
     const captchaId = randomUUID();
-    const expiresAt = new Date(Date.now() + envNumber("CAPTCHA_TTL_SECONDS", 180) * 1000).toISOString();
-    captchaChallenges.set(captchaId, {
-      answerHash: hashCaptchaAnswer(challenge.answer),
-      expiresAt,
-      createdAt: new Date().toISOString()
-    });
+    const ttlMs = envNumber("CAPTCHA_TTL_SECONDS", 180) * 1000;
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    await saveCaptchaChallenge(
+      captchaId,
+      {
+        answerHash: hashCaptchaAnswer(challenge.answer),
+        expiresAt,
+        createdAt: new Date().toISOString()
+      },
+      ttlMs
+    );
     return envelope(request, {
       captchaId,
       imageSvg: challenge.imageSvg,
@@ -76,21 +85,22 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
   });
 
   app.post("/api/auth/captcha/verify", async (request) => {
-    pruneCaptchaChallenges();
-    pruneCaptchaVerifications();
     const input = captchaVerifySchema.parse(request.body);
-    verifyCaptchaChallenge(input.captchaId, input.captchaSelections);
+    await verifyCaptchaChallenge(input.captchaId, input.captchaSelections);
     const verificationId = randomUUID();
-    const expiresAt = new Date(Date.now() + envNumber("CAPTCHA_VERIFICATION_TTL_SECONDS", 180) * 1000).toISOString();
-    captchaVerifications.set(verificationId, {
-      expiresAt,
-      createdAt: new Date().toISOString()
-    });
+    const ttlMs = envNumber("CAPTCHA_VERIFICATION_TTL_SECONDS", 180) * 1000;
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    await saveCaptchaVerification(verificationId, ttlMs);
     return envelope(request, { verificationId, expiresAt });
   });
 
   app.post("/api/auth/register", async (request, reply) => {
     const input = registerSchema.parse(request.body);
+    // turnstile 模式：注册强制人机验证，堵住批量注册薅 120 迎新积分的正门。
+    // builtin 模式下注册维持原样（无验证码），仅本地/测试使用。
+    if (captchaMode() === "turnstile") {
+      await verifyTurnstileToken(input.turnstileToken, request.ip);
+    }
     const result = await store.update(async (data) => {
       const email = input.email.toLowerCase();
       if (data.users.some((user) => user.email === email)) {
@@ -164,42 +174,63 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
     const input = loginSchema.parse(request.body);
     // 两条放行路径：① 已有未耗尽的登录尝试令牌 → 扣一次额度直接放行；
     // ② 无有效令牌 → 必须提交两轮图片验证，验过后签发新令牌。
-    const canReuseLoginAttempt = consumeLoginAttempt(request);
+    const canReuseLoginAttempt = await consumeLoginAttempt(request);
     const canIssueLoginAttempt = !canReuseLoginAttempt;
     if (canReuseLoginAttempt) {
-      // 走令牌路径：本次尝试无需重做图片验证。
+      // 走令牌路径：本次尝试无需重做人机验证。
+    } else if (captchaMode() === "turnstile") {
+      // turnstile 模式：无有效令牌则必须带上 Cloudflare token。token 一次性，前端每次登录取新的。
+      await verifyTurnstileToken(input.turnstileToken, request.ip);
     } else {
+      // builtin 模式：沿用进程内 SVG 多轮点选验证（本地/测试）。
       if (!input.captchaVerificationIds || input.captchaVerificationIds.length !== captchaRequiredRounds) {
         throw new AppError("CAPTCHA_REQUIRED", "Image verification is required", 400);
       }
-      verifyCaptchaVerifications(input.captchaVerificationIds);
+      await verifyCaptchaVerifications(input.captchaVerificationIds);
     }
 
-    return store.update(async (data) => {
+    const result = await store.update((data) => {
       const user = data.users.find((item) => item.email === input.email.toLowerCase());
       if (!user || !verifyPassword(input.password, user.passwordHash)) {
-        // 密码错误：不清令牌，前端凭剩余额度可直接重试而无需重验。
-        if (canIssueLoginAttempt) {
-          issueLoginAttempt(reply);
-        }
-        throw new AppError("UNAUTHORIZED", "Invalid email or password", 401);
+        return {
+          ok: false as const,
+          error: new AppError("UNAUTHORIZED", "Invalid email or password", 401)
+        };
       }
       if (user.status !== "ACTIVE") {
-        if (canIssueLoginAttempt) {
-          issueLoginAttempt(reply);
-        }
-        throw new AppError("FORBIDDEN", "User is not active", 403);
+        return {
+          ok: false as const,
+          error: new AppError("FORBIDDEN", "User is not active", 403)
+        };
       }
       const now = new Date().toISOString();
       const token = randomUUID();
+      const expiresAt = addDays(now, 14);
       user.lastLoginAt = now;
       user.updatedAt = now;
-      data.sessions.push({ token, userId: user.id, createdAt: now, expiresAt: addDays(now, 14) });
-      setSessionCookie(reply, token, addDays(now, 14));
-      // 登录成功：作废尝试令牌。
-      clearLoginAttempt(request, reply);
-      return envelope(request, { user: publicUser(user) });
+      data.sessions.push({ token, userId: user.id, createdAt: now, expiresAt });
+      return { ok: true as const, user: publicUser(user), token, expiresAt };
     });
+
+    if (!result.ok) {
+      // 密码错误时保留已有令牌的剩余额度；首次验证码通过则在事务外签发新令牌。
+      if (canIssueLoginAttempt) {
+        await issueLoginAttempt(reply);
+      }
+      throw result.error;
+    }
+
+    try {
+      // Redis I/O 放在 store 事务外；失败时撤销刚创建的会话，避免返回 503 却留下孤儿会话。
+      await clearLoginAttempt(request, reply);
+    } catch (error) {
+      await store.update((data) => {
+        data.sessions = data.sessions.filter((session) => session.token !== result.token);
+      });
+      throw error;
+    }
+    setSessionCookie(reply, result.token, result.expiresAt);
+    return envelope(request, { user: result.user });
   });
 
   app.post("/api/auth/logout", async (request, reply) => {

@@ -138,6 +138,27 @@ test("idempotent: second scan does not double-expire", () => {
   assert.equal(data.creditLedgerEntries.filter((entry) => entry.type === "EXPIRE").length, 1);
 });
 
+test("expiry maintenance scans the main ledger once", () => {
+  const past = new Date(Date.now() - DAY).toISOString();
+  const older = new Date(Date.now() - 10 * DAY).toISOString();
+  const tracked = trackedLedger([
+    grant("b1", "u1", 100, older, past),
+    spend("s1", "u1", 40, new Date(Date.now() - 5 * DAY).toISOString())
+  ]);
+  const data = {
+    creditAccounts: [makeAccount("u1", 60, 100, 40)],
+    creditLedgerEntries: tracked.entries
+  };
+
+  const expired = expireCredits(data);
+
+  assert.equal(tracked.iteratorCalls, 1);
+  assert.equal(expired, 1);
+  assert.equal(data.creditLedgerEntries.length, 3);
+  assert.equal(data.creditAccounts[0].balance, 0);
+  assert.equal(data.creditAccounts[0].totalSpent, 100);
+});
+
 test("future batch is not expired", () => {
   const future = new Date(Date.now() + 10 * DAY).toISOString();
   const data = {
@@ -259,6 +280,103 @@ test("generation maintenance refunds stale pending/running and unreconciled term
   assert.equal(data.generationTasks.find((task) => task.id === "running-stale").failureCode, "WORKER_TIMEOUT");
   assert.equal(refundFailureCount(data), 0);
 });
+
+test("generation maintenance scans task ledger once while reconciling refunds", () => {
+  const now = new Date("2026-07-04T12:00:00.000Z").toISOString();
+  const stale = new Date("2026-07-04T11:40:00.000Z").toISOString();
+  const tracked = trackedLedger([
+    taskSpend("pending-stale", "u1", 40, stale),
+    taskSpend("running-stale", "u1", 40, stale),
+    taskSpend("blocked-missing-refund", "u1", 40, stale)
+  ]);
+  const data = {
+    creditAccounts: [makeAccount("u1", 20, 140, 120)],
+    creditLedgerEntries: tracked.entries,
+    generationTasks: [
+      generationTask("pending-stale", "PENDING", stale, null, 40),
+      generationTask("running-stale", "RUNNING", stale, stale, 40),
+      generationTask("blocked-missing-refund", "BLOCKED", stale, stale, 40)
+    ]
+  };
+
+  const result = runGenerationMaintenance(data, {
+    now,
+    pendingTimeoutMs: 5 * 60 * 1000,
+    runningTimeoutMs: 10 * 60 * 1000
+  });
+
+  assert.equal(tracked.iteratorCalls, 1);
+  assert.equal(result.failedPendingTasks, 1);
+  assert.equal(result.failedRunningTasks, 1);
+  assert.equal(result.reconciledRefunds, 3);
+  assert.equal(result.refundedCredits, 120);
+  assert.equal(data.creditLedgerEntries.length, 6);
+  assert.equal(data.creditAccounts[0].balance, 140);
+  assert.equal(data.creditAccounts[0].totalSpent, 0);
+});
+
+test("refund failure count scans task ledger once", () => {
+  const now = new Date("2026-07-04T12:00:00.000Z").toISOString();
+  const tracked = trackedLedger([
+    taskSpend("failed-unrefunded", "u1", 40, now),
+    taskSpend("failed-partial-refund", "u1", 40, now),
+    {
+      id: "refund-failed-partial-refund",
+      userId: "u1",
+      type: "REFUND",
+      amount: 10,
+      balanceAfter: 30,
+      sourceType: "TASK",
+      sourceId: "failed-partial-refund",
+      idempotencyKey: "task-refund:failed-partial-refund:partial",
+      remark: "partial refund",
+      createdAt: now,
+      expiresAt: null
+    }
+  ]);
+  const data = {
+    creditAccounts: [makeAccount("u1", 30, 110, 80)],
+    creditLedgerEntries: tracked.entries,
+    generationTasks: [
+      generationTask("failed-unrefunded", "FAILED", now, now, 40),
+      generationTask("failed-partial-refund", "FAILED", now, now, 40),
+      generationTask("failed-free", "FAILED", now, now, 0)
+    ]
+  };
+
+  assert.equal(refundFailureCount(data), 2);
+  assert.equal(tracked.iteratorCalls, 1);
+});
+
+function trackedLedger(entries) {
+  const ledger = [...entries];
+  const originalIterator = ledger[Symbol.iterator].bind(ledger);
+  let iteratorCalls = 0;
+
+  Object.defineProperty(ledger, Symbol.iterator, {
+    value() {
+      iteratorCalls += 1;
+      return originalIterator();
+    }
+  });
+  Object.defineProperty(ledger, "filter", {
+    value() {
+      throw new Error("ledger filter should not be used by maintenance");
+    }
+  });
+  Object.defineProperty(ledger, "some", {
+    value() {
+      throw new Error("ledger some should not be used by maintenance");
+    }
+  });
+
+  return {
+    entries: ledger,
+    get iteratorCalls() {
+      return iteratorCalls;
+    }
+  };
+}
 
 test("refund failure count flags terminal tasks with incomplete refunds", () => {
   const now = new Date("2026-07-04T12:00:00.000Z").toISOString();

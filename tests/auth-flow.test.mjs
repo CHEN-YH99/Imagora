@@ -15,6 +15,7 @@ import { join } from "node:path";
 // 只有纯读取（登录、令牌重试）的用例才复用 TEST_EMAIL，且 delete-account 放最后。
 
 const storeDir = await mkdtemp(join(tmpdir(), "imagora-auth-test-"));
+const defaultWriteOrigin = "http://127.0.0.1:3100";
 process.env.API_NO_LISTEN = "true";
 process.env.NODE_ENV = "test";
 process.env.IMAGORA_STORE_PATH = join(storeDir, "store.json");
@@ -70,6 +71,11 @@ function absorbCookies(jar, response) {
 
 async function inject(jar, opts) {
   const headers = { "content-type": "application/json", ...(opts.headers ?? {}) };
+  const method = opts.method.toUpperCase();
+  const hasOrigin = Object.keys(headers).some((name) => name.toLowerCase() === "origin");
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && opts.origin !== null && !hasOrigin) {
+    headers.origin = opts.origin ?? defaultWriteOrigin;
+  }
   const cookies = cookieHeader(jar);
   if (cookies) {
     headers.cookie = cookies;
@@ -86,6 +92,11 @@ async function inject(jar, opts) {
 
 function body(response) {
   return response.json();
+}
+
+function setCookieLines(response) {
+  const raw = response.headers["set-cookie"];
+  return raw ? (Array.isArray(raw) ? raw : [raw]) : [];
 }
 
 // 走完整两轮图片验证，返回两个 verificationId。
@@ -140,6 +151,17 @@ const PASSWORD_1 = "FlowPass123abc";
 
 // ---- 用例 ----
 
+test("write requests without Origin are rejected before route handling", async () => {
+  const response = await inject(makeJar(), {
+    method: "POST",
+    url: "/api/auth/register",
+    origin: null,
+    payload: { email: "missing-origin@example.com", password: PASSWORD_1 }
+  });
+  assert.equal(response.statusCode, 403);
+  assert.equal(body(response).error.code, "FORBIDDEN");
+});
+
 test("register creates an active session", async () => {
   const jar = makeJar();
   const res = await inject(jar, {
@@ -151,6 +173,10 @@ test("register creates an active session", async () => {
   const data = body(res).data;
   assert.equal(data.user.email, TEST_EMAIL);
   assert.ok(jar.has("imagora_session"), "register should set a session cookie");
+  assert.ok(
+    setCookieLines(res).some((cookie) => /^imagora_session=/.test(cookie) && /;\s*SameSite=Strict/i.test(cookie)),
+    "session cookie should use SameSite=Strict"
+  );
 
   // 带 cookie 应能拿到自己
   const meRes = await inject(jar, { method: "GET", url: "/api/auth/me" });
@@ -192,6 +218,12 @@ test("login attempt token lets a wrong password retry without redoing captcha", 
   });
   assert.equal(wrongRes.statusCode, 401, "wrong password should return 401");
   assert.ok(jar.has("imagora_login_attempt"), "a login attempt token should be issued");
+  assert.ok(
+    setCookieLines(wrongRes).some(
+      (cookie) => /^imagora_login_attempt=/.test(cookie) && /;\s*SameSite=Strict/i.test(cookie)
+    ),
+    "login attempt cookie should use SameSite=Strict"
+  );
 
   // 第二次：不带任何 verificationId，仅凭尝试令牌重试正确密码 → 应成功
   const retryRes = await inject(jar, {
@@ -299,6 +331,10 @@ test("delete-account soft-deletes, frees email, and blocks re-login", async () =
     payload: { currentPassword: PASSWORD_1, reason: "test cleanup" }
   });
   assert.equal(res.statusCode, 200, "delete-account should succeed");
+  assert.ok(
+    setCookieLines(res).some((cookie) => /^imagora_session=/.test(cookie) && /;\s*SameSite=Strict/i.test(cookie)),
+    "cleared session cookie should preserve SameSite=Strict"
+  );
 
   // 注销后当前会话失效
   const meRes = await inject(jar, { method: "GET", url: "/api/auth/me" });

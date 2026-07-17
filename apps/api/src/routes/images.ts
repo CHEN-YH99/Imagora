@@ -26,13 +26,29 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
     if (query.projectId) {
       mustFindOwnActiveProject(data, user.id, query.projectId, AppError);
     }
-    const images = data.generatedImages
+    const matchingImages = data.generatedImages
       .filter((image) => image.userId === user.id && !image.deletedAt && image.visibility !== "HIDDEN")
       .filter((image) => (query.projectId ? image.projectId === query.projectId : true))
-      .sort(descCreated)
-      .slice(0, query.limit)
+      .filter((image) =>
+        query.favorite === undefined
+          ? true
+          : data.imageFavorites.some((favorite) => favorite.userId === user.id && favorite.imageId === image.id) ===
+            query.favorite
+      )
+      .sort(descCreated);
+    const total = matchingImages.length;
+    const images = matchingImages
+      .slice(query.offset, query.offset + query.limit)
       .map((image) => withFavorite(data, user.id, image));
-    return envelope(request, { images });
+    return envelope(request, {
+      images,
+      pageInfo: {
+        offset: query.offset,
+        limit: query.limit,
+        total,
+        hasMore: query.offset + images.length < total
+      }
+    });
   });
 
   app.get("/api/images/:imageId", async (request) => {

@@ -376,6 +376,7 @@ export type ErrorCode =
   | "ORDER_NOT_PAYABLE"
   | "RATE_LIMITED"
   | "RATE_LIMIT_UNAVAILABLE"
+  | "RUNTIME_STATE_UNAVAILABLE"
   | "FEATURE_DISABLED"
   | "INTERNAL_ERROR"
   | "INVALID_RESET_TOKEN"
@@ -409,9 +410,10 @@ export const aspectRatioDimensions: Record<AspectRatio, { width: number; height:
 
 export const maxPromptLength = 1200;
 export const maxQuantity = 4;
-export const DEFAULT_PENDING_TASK_TIMEOUT_MS = 5 * 60 * 1000;
 // OpenAI 批量生图会按请求张数放大超时预算，高质量四宫格时 30 分钟以内都属于正常兜底窗口。
 export const DEFAULT_RUNNING_TASK_TIMEOUT_MS = 30 * 60 * 1000;
+// PENDING 是排队窗口，不应短于 RUNNING；队列积压时 5 分钟误杀会让合法任务还没被 worker 领取就退款失败。
+export const DEFAULT_PENDING_TASK_TIMEOUT_MS = DEFAULT_RUNNING_TASK_TIMEOUT_MS;
 // 生成任务积分成本的唯一真源为 @imagora/ai-providers 的 quoteImageGeneration，
 // 此处不再维护独立公式，避免两套计费口径漂移。
 
@@ -533,8 +535,23 @@ export function groupLedgerByUser(entries: CreditLedgerEntry[]): Map<string, Cre
 export function expireCredits(data: StoreData, nowInput?: string): number {
   const now = nowInput ?? new Date().toISOString();
   const nowMs = new Date(now).getTime();
+  const entriesByUser = new Map<string, CreditLedgerEntry[]>();
+  const idempotencyKeys = new Set<string>();
+  for (const entry of data.creditLedgerEntries) {
+    const entries = entriesByUser.get(entry.userId) ?? [];
+    entries.push(entry);
+    entriesByUser.set(entry.userId, entries);
+    idempotencyKeys.add(entry.idempotencyKey);
+  }
+  const accountsByUserId = new Map<string, UserCreditAccount>();
+  for (const account of data.creditAccounts) {
+    if (!accountsByUserId.has(account.userId)) {
+      accountsByUserId.set(account.userId, account);
+    }
+  }
+
   let expired = 0;
-  for (const [userId, entries] of groupLedgerByUser(data.creditLedgerEntries)) {
+  for (const [userId, entries] of entriesByUser) {
     const remainders = creditSourceRemainders(entries);
     for (const entry of entries) {
       if (entry.type !== "GRANT" || !entry.expiresAt) {
@@ -544,14 +561,14 @@ export function expireCredits(data: StoreData, nowInput?: string): number {
         continue;
       }
       const idempotencyKey = `credit-expire:${entry.id}`;
-      if (data.creditLedgerEntries.some((existing) => existing.idempotencyKey === idempotencyKey)) {
+      if (idempotencyKeys.has(idempotencyKey)) {
         continue;
       }
       const remainder = remainders.get(entry.id) ?? 0;
       if (remainder <= 0) {
         continue;
       }
-      const account = data.creditAccounts.find((item) => item.userId === userId);
+      const account = accountsByUserId.get(userId);
       if (!account) {
         continue;
       }
@@ -571,6 +588,7 @@ export function expireCredits(data: StoreData, nowInput?: string): number {
         createdAt: now,
         expiresAt: null
       });
+      idempotencyKeys.add(idempotencyKey);
       expired += 1;
     }
   }
@@ -581,6 +599,13 @@ export interface TaskRefundResult {
   refunded: boolean;
   amount: number;
   balanceAfter: number | null;
+}
+
+interface TaskCreditLedgerIndex {
+  accountsByUserId: Map<string, UserCreditAccount>;
+  spentByTaskId: Map<string, number>;
+  refundedByTaskId: Map<string, number>;
+  idempotencyKeys: Set<string>;
 }
 
 export interface GenerationMaintenanceOptions {
@@ -603,16 +628,27 @@ export function refundTaskCredits(
   remark = "Task failed before image delivery",
   nowInput?: string
 ): TaskRefundResult {
+  return refundTaskCreditsWithIndex(data, task, buildTaskCreditLedgerIndex(data), amount, remark, nowInput);
+}
+
+function refundTaskCreditsWithIndex(
+  data: StoreData,
+  task: GenerationTask,
+  index: TaskCreditLedgerIndex,
+  amount = task.creditCost,
+  remark = "Task failed before image delivery",
+  nowInput?: string
+): TaskRefundResult {
   const idempotencyKey = `task-refund:${task.id}`;
-  const account = data.creditAccounts.find((item) => item.userId === task.userId);
+  const account = index.accountsByUserId.get(task.userId);
   if (!account) {
     return { refunded: false, amount: 0, balanceAfter: null };
   }
-  if (data.creditLedgerEntries.some((entry) => entry.idempotencyKey === idempotencyKey)) {
+  if (index.idempotencyKeys.has(idempotencyKey)) {
     return { refunded: false, amount: 0, balanceAfter: account.balance };
   }
-  const spent = taskSpentCredits(data, task.id);
-  const alreadyRefunded = taskRefundedCredits(data, task.id);
+  const spent = index.spentByTaskId.get(task.id) ?? 0;
+  const alreadyRefunded = index.refundedByTaskId.get(task.id) ?? 0;
   const refundable = Math.max(0, spent - alreadyRefunded);
   const refundAmount = Math.min(Math.max(0, amount), refundable);
   if (refundAmount <= 0) {
@@ -635,22 +671,33 @@ export function refundTaskCredits(
     createdAt: now,
     expiresAt: null
   });
+  index.idempotencyKeys.add(idempotencyKey);
+  index.refundedByTaskId.set(task.id, alreadyRefunded + refundAmount);
   return { refunded: true, amount: refundAmount, balanceAfter: account.balance };
 }
 
 export function taskRefundedCredits(data: StoreData, taskId: string): number {
-  return data.creditLedgerEntries
-    .filter((entry) => entry.type === "REFUND" && entry.sourceType === "TASK" && entry.sourceId === taskId)
-    .reduce((sum, entry) => sum + Math.max(0, entry.amount), 0);
+  let refunded = 0;
+  for (const entry of data.creditLedgerEntries) {
+    if (entry.type === "REFUND" && entry.sourceType === "TASK" && entry.sourceId === taskId) {
+      refunded += Math.max(0, entry.amount);
+    }
+  }
+  return refunded;
 }
 
 export function refundFailureCount(data: StoreData): number {
-  return data.generationTasks.filter(
-    (task) =>
-      ["FAILED", "BLOCKED", "CANCELED"].includes(task.status) &&
-      task.creditCost > 0 &&
-      taskSpentCredits(data, task.id) > taskRefundedCredits(data, task.id)
-  ).length;
+  const index = buildTaskCreditLedgerIndex(data);
+  let count = 0;
+  for (const task of data.generationTasks) {
+    if (
+      isTerminalRefundableTask(task) &&
+      (index.spentByTaskId.get(task.id) ?? 0) > (index.refundedByTaskId.get(task.id) ?? 0)
+    ) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 export function runGenerationMaintenance(
@@ -667,6 +714,7 @@ export function runGenerationMaintenance(
     reconciledRefunds: 0,
     refundedCredits: 0
   };
+  const creditIndex = buildTaskCreditLedgerIndex(data);
 
   for (const task of data.generationTasks) {
     if (task.status === "PENDING" && isOlderThan(task.createdAt, nowMs, pendingTimeoutMs)) {
@@ -677,8 +725,15 @@ export function runGenerationMaintenance(
       result.failedRunningTasks += 1;
     }
 
-    if (["FAILED", "BLOCKED", "CANCELED"].includes(task.status)) {
-      const refund = refundTaskCredits(data, task, task.creditCost, "Task ended before image delivery", now);
+    if (isTerminalRefundableTask(task)) {
+      const refund = refundTaskCreditsWithIndex(
+        data,
+        task,
+        creditIndex,
+        task.creditCost,
+        "Task ended before image delivery",
+        now
+      );
       if (refund.refunded) {
         result.reconciledRefunds += 1;
         result.refundedCredits += refund.amount;
@@ -689,10 +744,33 @@ export function runGenerationMaintenance(
   return result;
 }
 
-function taskSpentCredits(data: StoreData, taskId: string): number {
-  return data.creditLedgerEntries
-    .filter((entry) => entry.type === "SPEND" && entry.sourceType === "TASK" && entry.sourceId === taskId)
-    .reduce((sum, entry) => sum + Math.abs(Math.min(0, entry.amount)), 0);
+function buildTaskCreditLedgerIndex(data: StoreData): TaskCreditLedgerIndex {
+  const accountsByUserId = new Map<string, UserCreditAccount>();
+  for (const account of data.creditAccounts) {
+    if (!accountsByUserId.has(account.userId)) {
+      accountsByUserId.set(account.userId, account);
+    }
+  }
+
+  const spentByTaskId = new Map<string, number>();
+  const refundedByTaskId = new Map<string, number>();
+  const idempotencyKeys = new Set<string>();
+  for (const entry of data.creditLedgerEntries) {
+    idempotencyKeys.add(entry.idempotencyKey);
+    if (entry.sourceType !== "TASK") {
+      continue;
+    }
+    if (entry.type === "SPEND") {
+      spentByTaskId.set(entry.sourceId, (spentByTaskId.get(entry.sourceId) ?? 0) + Math.abs(Math.min(0, entry.amount)));
+    } else if (entry.type === "REFUND") {
+      refundedByTaskId.set(entry.sourceId, (refundedByTaskId.get(entry.sourceId) ?? 0) + Math.max(0, entry.amount));
+    }
+  }
+  return { accountsByUserId, spentByTaskId, refundedByTaskId, idempotencyKeys };
+}
+
+function isTerminalRefundableTask(task: GenerationTask): boolean {
+  return (task.status === "FAILED" || task.status === "BLOCKED" || task.status === "CANCELED") && task.creditCost > 0;
 }
 
 function markTaskFailed(task: GenerationTask, code: string, message: string, now: string): void {

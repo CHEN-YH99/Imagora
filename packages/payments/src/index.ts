@@ -24,10 +24,79 @@ export interface VerifiedPaymentEvent {
   paymentIntentId: string | null;
 }
 
+/**
+ * 主动反查一笔订单在支付方处的真实状态。
+ * 用于 webhook 丢失（网络中断/重试耗尽）时的兜底对账：不依赖本地是否收到过事件，
+ * 直接问支付方“这单到底付没付”。
+ */
+export interface RetrieveOrderPaymentInput {
+  orderId: string;
+  orderNo: string;
+  /** 下单时 createPayment 返回的 paymentIntentId（Stripe 下即 checkout session id）。 */
+  paymentIntentId: string | null;
+  amountCents: number;
+  currency: string;
+}
+
+export interface OrderPaymentStatus {
+  /**
+   * paid   -> 支付方确认已收款，可安全补发积分
+   * unpaid -> 明确未支付（会话仍开放/已过期/被取消）
+   * unknown-> 无法判定（缺 session id、反查失败等），调用方应保持 PENDING 不动、等下轮重试
+   */
+  status: "paid" | "unpaid" | "unknown";
+  /** status===paid 时携带，供调用方做金额/币种/orderNo 三重校验，语义对齐 verifyWebhook。 */
+  event: VerifiedPaymentEvent | null;
+  /** 供日志/告警的补充说明。 */
+  detail?: string;
+}
+
+/**
+ * 订单退款输入。管理员发起退款时，由调用方传入订单快照关键字段。
+ */
+export interface RefundOrderInput {
+  orderId: string;
+  orderNo: string;
+  /** 下单时 createPayment 返回的 paymentIntentId（Stripe 下即 checkout session id，退款前需反查真实 payment_intent）。 */
+  paymentIntentId: string | null;
+  /** 退款金额（分）。当前只支持全额退款，取订单原始 amountCents。 */
+  amountCents: number;
+  currency: string;
+  /** 退款原因，透传给支付方并记入审计。 */
+  reason?: string | null;
+}
+
+export interface RefundOrderResult {
+  /**
+   * refunded -> 支付方确认已退款，调用方可安全置 REFUNDED + 回收积分
+   * failed   -> 退款失败（支付方拒绝、网络异常等），调用方必须保持订单状态不动
+   */
+  status: "refunded" | "failed";
+  /** 支付方返回的退款单号，记入 paymentEvents 供追溯。 */
+  refundId: string | null;
+  /** 实际退款金额（分），正常应等于请求金额。 */
+  refundedAmountCents: number | null;
+  /** 供日志/告警/审计的补充说明。 */
+  detail?: string;
+}
+
 export interface PaymentProvider {
   name: string;
   createPayment(input: CreatePaymentInput): Promise<CreatePaymentResult>;
   verifyWebhook(payload: unknown, signature: string | undefined): Promise<VerifiedPaymentEvent>;
+  /**
+   * 主动向支付方反查订单状态。webhook 丢失兜底用。
+   * 实现约定：任何网络/解析异常都应捕获后返回 status:"unknown"，绝不抛错——
+   * 兜底对账在后台定时器里跑，抛错会中断整轮维护。
+   */
+  retrieveOrderPaymentStatus(input: RetrieveOrderPaymentInput): Promise<OrderPaymentStatus>;
+  /**
+   * 向支付方发起退款。管理员退款路由用。
+   * 实现约定：任何网络/解析异常都应捕获后返回 status:"failed"，绝不抛错——
+   * 调用方拿到 failed 会保持订单状态不动（钱先退、状态后改），抛错会让路由层难以区分
+   * 「已退成功但响应丢了」和「压根没退」。
+   */
+  refundOrder(input: RefundOrderInput): Promise<RefundOrderResult>;
 }
 
 export class MockPaymentProvider implements PaymentProvider {
@@ -55,6 +124,40 @@ export class MockPaymentProvider implements PaymentProvider {
       amountCents: parsedPayload.amountCents,
       currency: parsedPayload.currency.toUpperCase(),
       paymentIntentId: `mock_pi_${parsedPayload.orderId}`
+    };
+  }
+
+  // 测试兜底对账用：MOCK_RECONCILE_PAID_ORDERS 里列出的 orderId（逗号分隔）会被判定为已支付。
+  async retrieveOrderPaymentStatus(input: RetrieveOrderPaymentInput): Promise<OrderPaymentStatus> {
+    const paidOrders = (process.env.MOCK_RECONCILE_PAID_ORDERS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (!paidOrders.includes(input.orderId)) {
+      return { status: "unpaid", event: null, detail: "mock order not marked paid" };
+    }
+    return {
+      status: "paid",
+      event: {
+        provider: this.name,
+        providerEventId: `mock_reconcile_${input.orderId}`,
+        orderId: input.orderId,
+        orderNo: input.orderNo,
+        eventType: "payment.succeeded",
+        amountCents: input.amountCents,
+        currency: input.currency.toUpperCase(),
+        paymentIntentId: input.paymentIntentId ?? `mock_pi_${input.orderId}`
+      }
+    };
+  }
+
+  // mock 退款恒成功：本地/测试环境不接支付方，管理员退款流程照样能端到端跑通。
+  async refundOrder(input: RefundOrderInput): Promise<RefundOrderResult> {
+    return {
+      status: "refunded",
+      refundId: `mock_re_${input.orderId}`,
+      refundedAmountCents: input.amountCents,
+      detail: "mock refund"
     };
   }
 }
@@ -145,6 +248,192 @@ export class StripePaymentProvider implements PaymentProvider {
       paymentIntentId
     };
   }
+
+  // TODO(verify-with-live-stripe): 以下反查逻辑需用真实 STRIPE_SECRET_KEY 联网验证一次。
+  // 验证方式：造一笔已支付订单，手动删掉本地对应 payment.succeeded 事件模拟 webhook 丢失，
+  // 跑后台订单维护，确认能反查到 paid 并补发积分（幂等键 order-grant:{id} 保证不重复发）。
+  async retrieveOrderPaymentStatus(input: RetrieveOrderPaymentInput): Promise<OrderPaymentStatus> {
+    // Stripe 下 paymentIntentId 存的是 createPayment 返回的 checkout session id（见 createPayment）。
+    const sessionId = input.paymentIntentId;
+    if (!sessionId) {
+      return { status: "unknown", event: null, detail: "missing stripe checkout session id" };
+    }
+    let response: Response;
+    try {
+      response = await fetch(`${this.apiBaseUrl}/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "GET",
+        signal: AbortSignal.timeout(this.timeoutMs),
+        headers: {
+          Authorization: `Bearer ${this.secretKey}`
+        }
+      });
+    } catch (error) {
+      // 网络异常绝不抛出——保持 PENDING，等下一轮定时器重试。
+      return {
+        status: "unknown",
+        event: null,
+        detail: `stripe session retrieve failed: ${error instanceof Error ? error.message : "network error"}`
+      };
+    }
+    const object = (await response.json().catch(() => ({}))) as StripeSessionRetrieveResponse;
+    if (!response.ok) {
+      return {
+        status: "unknown",
+        event: null,
+        detail: object.error?.message ?? `stripe session retrieve returned ${response.status}`
+      };
+    }
+    // 与 verifyWebhook 同款防资损校验：延迟支付方式下会话可能仍非 paid。
+    const paymentStatus = stringValue(object.payment_status);
+    if (paymentStatus !== "paid") {
+      return {
+        status: "unpaid",
+        event: null,
+        detail: `stripe payment_status=${paymentStatus ?? "unknown"}`
+      };
+    }
+    const orderId = stringValue(object.metadata?.orderId) ?? stringValue(object.client_reference_id);
+    const orderNo = stringValue(object.metadata?.orderNo);
+    const amountCents = numberValue(object.amount_total) ?? numberValue(object.amount_received);
+    const currency = stringValue(object.currency)?.toUpperCase();
+    const paymentIntentId = stringValue(object.payment_intent) ?? sessionId;
+    if (!orderId || !orderNo || amountCents === null || !currency) {
+      return {
+        status: "unknown",
+        event: null,
+        detail: "stripe session missing order identity, amount, or currency"
+      };
+    }
+    // providerEventId 用 session id 派生一个稳定值，供上层按 provider+eventId 幂等去重，
+    // 避免与真实 webhook 事件 id 冲突时重复入账。
+    return {
+      status: "paid",
+      event: {
+        provider: this.name,
+        providerEventId: `reconcile_${sessionId}`,
+        orderId,
+        orderNo,
+        eventType: "payment.succeeded",
+        amountCents,
+        currency,
+        paymentIntentId
+      }
+    };
+  }
+
+  // TODO(verify-with-live-stripe): 以下退款逻辑需用真实 STRIPE_SECRET_KEY 联网验证一次。
+  // 验证方式：造一笔已支付订单，走 admin 退款路由，确认 Stripe 侧真实退款成功、
+  // 订单转 REFUNDED、积分被回收（幂等键 order-refund:{id} 保证不重复回收）。
+  async refundOrder(input: RefundOrderInput): Promise<RefundOrderResult> {
+    // Stripe 下 paymentIntentId 存的是 createPayment 返回的 checkout session id（见 createPayment），
+    // 退款接口要的是真实 payment_intent，需先反查 session 拿到它。
+    const sessionId = input.paymentIntentId;
+    if (!sessionId) {
+      return {
+        status: "failed",
+        refundId: null,
+        refundedAmountCents: null,
+        detail: "missing stripe checkout session id"
+      };
+    }
+
+    let paymentIntent: string | null;
+    try {
+      paymentIntent = await this.resolvePaymentIntentId(sessionId);
+    } catch (error) {
+      return {
+        status: "failed",
+        refundId: null,
+        refundedAmountCents: null,
+        detail: `stripe session retrieve failed: ${error instanceof Error ? error.message : "network error"}`
+      };
+    }
+    if (!paymentIntent) {
+      return {
+        status: "failed",
+        refundId: null,
+        refundedAmountCents: null,
+        detail: "stripe session has no payment_intent (session may be unpaid or expired)"
+      };
+    }
+
+    // 幂等：以订单号派生 Idempotency-Key，Stripe 侧对同一 key 的重复退款请求只执行一次，
+    // 双保险叠加上层 applyPaymentRefunded 的账本幂等（order-refund:{id}）。
+    const body = new URLSearchParams({
+      payment_intent: paymentIntent,
+      amount: String(input.amountCents),
+      "metadata[orderId]": input.orderId,
+      "metadata[orderNo]": input.orderNo
+    });
+    if (input.reason) {
+      body.set("metadata[reason]", input.reason);
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.apiBaseUrl}/v1/refunds`, {
+        method: "POST",
+        signal: AbortSignal.timeout(this.timeoutMs),
+        headers: {
+          Authorization: `Bearer ${this.secretKey}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Idempotency-Key": `refund_${input.orderNo}`
+        },
+        body
+      });
+    } catch (error) {
+      // 网络异常绝不抛出——返回 failed，调用方保持订单状态不动。
+      return {
+        status: "failed",
+        refundId: null,
+        refundedAmountCents: null,
+        detail: `stripe refund request failed: ${error instanceof Error ? error.message : "network error"}`
+      };
+    }
+
+    const payload = (await response.json().catch(() => ({}))) as StripeRefundResponse;
+    if (!response.ok) {
+      return {
+        status: "failed",
+        refundId: null,
+        refundedAmountCents: null,
+        detail: payload.error?.message ?? `stripe refund returned ${response.status}`
+      };
+    }
+    // Stripe refund 成功后 status 为 succeeded / pending（银行渠道异步到账），两者都视为已受理；
+    // failed / canceled 视为退款失败。
+    const refundStatus = stringValue(payload.status);
+    if (refundStatus !== "succeeded" && refundStatus !== "pending") {
+      return {
+        status: "failed",
+        refundId: stringValue(payload.id),
+        refundedAmountCents: null,
+        detail: `stripe refund status=${refundStatus ?? "unknown"}`
+      };
+    }
+    return {
+      status: "refunded",
+      refundId: stringValue(payload.id),
+      refundedAmountCents: numberValue(payload.amount) ?? input.amountCents,
+      detail: `stripe refund ${refundStatus}`
+    };
+  }
+
+  // 反查 checkout session 拿真实 payment_intent。网络/HTTP 异常抛出，由 refundOrder 捕获转 failed。
+  private async resolvePaymentIntentId(sessionId: string): Promise<string | null> {
+    const response = await fetch(`${this.apiBaseUrl}/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "GET",
+      signal: AbortSignal.timeout(this.timeoutMs),
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`
+      }
+    });
+    const object = (await response.json().catch(() => ({}))) as StripeSessionRetrieveResponse;
+    if (!response.ok) {
+      throw new Error(object.error?.message ?? `stripe session retrieve returned ${response.status}`);
+    }
+    return stringValue(object.payment_intent);
+  }
 }
 
 /**
@@ -179,6 +468,16 @@ export class WechatPayProvider implements PaymentProvider {
         `  Notify URL: ${this.notifyUrl}\n` +
         "  V3 signature verification: https://pay.weixin.qq.com/wiki/doc/apiv3/wechatpay/wechatpay4_1.shtml"
     );
+  }
+
+  async retrieveOrderPaymentStatus(_input: RetrieveOrderPaymentInput): Promise<OrderPaymentStatus> {
+    // TODO: 实现微信支付订单查询 GET /v3/pay/transactions/out-trade-no/{out_trade_no}
+    throw new Error("WechatPayProvider order status query not implemented yet.");
+  }
+
+  async refundOrder(_input: RefundOrderInput): Promise<RefundOrderResult> {
+    // TODO: 实现微信支付退款 POST /v3/refund/domestic/refunds
+    throw new Error("WechatPayProvider refund not implemented yet.");
   }
 }
 
@@ -217,6 +516,16 @@ export class AlipayProvider implements PaymentProvider {
         "  Reference: https://opendocs.alipay.com/open/270/105902"
     );
   }
+
+  async retrieveOrderPaymentStatus(_input: RetrieveOrderPaymentInput): Promise<OrderPaymentStatus> {
+    // TODO: 实现支付宝交易查询 alipay.trade.query
+    throw new Error("AlipayProvider order status query not implemented yet.");
+  }
+
+  async refundOrder(_input: RefundOrderInput): Promise<RefundOrderResult> {
+    // TODO: 实现支付宝退款 alipay.trade.refund
+    throw new Error("AlipayProvider refund not implemented yet.");
+  }
 }
 
 export function createPaymentProvider(name = process.env.PAYMENT_PROVIDER ?? "mock"): PaymentProvider {
@@ -234,6 +543,24 @@ interface StripeCheckoutSession {
   id?: string;
   url?: string;
   error?: { message?: string };
+}
+
+interface StripeSessionRetrieveResponse {
+  error?: { message?: string };
+  payment_status?: unknown;
+  metadata?: Record<string, unknown>;
+  client_reference_id?: unknown;
+  amount_total?: unknown;
+  amount_received?: unknown;
+  currency?: unknown;
+  payment_intent?: unknown;
+}
+
+interface StripeRefundResponse {
+  error?: { message?: string };
+  id?: unknown;
+  status?: unknown;
+  amount?: unknown;
 }
 
 interface StripeEvent {

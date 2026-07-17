@@ -5,7 +5,53 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+
+const defaultWriteOrigin = "http://127.0.0.1:3100";
 import { FilesystemObjectStorage } from "../packages/storage/dist/index.js";
+
+test("filesystem storage rejects missing or weak signing secrets in production", () => {
+  const previous = snapshotEnv(["NODE_ENV", "LOCAL_STORAGE_SIGNING_SECRET"]);
+
+  try {
+    process.env.NODE_ENV = "production";
+    delete process.env.LOCAL_STORAGE_SIGNING_SECRET;
+    assert.throws(
+      () => new FilesystemObjectStorage(),
+      /LOCAL_STORAGE_SIGNING_SECRET is required for filesystem storage in production/
+    );
+
+    process.env.LOCAL_STORAGE_SIGNING_SECRET = "imagora-local-storage-dev-secret";
+    assert.throws(() => new FilesystemObjectStorage(), /must not use a known placeholder or development default/);
+
+    process.env.LOCAL_STORAGE_SIGNING_SECRET = "too-short";
+    assert.throws(() => new FilesystemObjectStorage(), /must be at least 32 bytes/);
+  } finally {
+    restoreEnv(previous);
+  }
+});
+
+test("filesystem storage uses a process-random signing secret outside production when unset", () => {
+  const previous = snapshotEnv(["NODE_ENV", "LOCAL_STORAGE_SIGNING_SECRET"]);
+
+  try {
+    process.env.NODE_ENV = "test";
+    delete process.env.LOCAL_STORAGE_SIGNING_SECRET;
+    const signer = new FilesystemObjectStorage();
+    const verifier = new FilesystemObjectStorage();
+    const key = "generated/process-random-secret.txt";
+    const signedUrl = new URL(`http://imagora.local${signer.buildSignedUrl(key, 60)}`);
+
+    assert.doesNotThrow(() =>
+      verifier.verifyAndResolve(
+        key,
+        Number(signedUrl.searchParams.get("expiresAt")),
+        signedUrl.searchParams.get("signature") ?? ""
+      )
+    );
+  } finally {
+    restoreEnv(previous);
+  }
+});
 
 test("filesystem storage resolves relative LOCAL_STORAGE_DIR from the workspace root across process cwd", async () => {
   const repoRoot = process.cwd();
@@ -15,7 +61,7 @@ test("filesystem storage resolves relative LOCAL_STORAGE_DIR from the workspace 
 
   try {
     process.env.LOCAL_STORAGE_DIR = relativeStorageDir;
-    process.env.LOCAL_STORAGE_SIGNING_SECRET = "cwd-stable-storage-secret";
+    process.env.LOCAL_STORAGE_SIGNING_SECRET = "cwd-stable-storage-signing-secret-32";
     delete process.env.LOCAL_STORAGE_PUBLIC_PATH;
 
     process.chdir(join(repoRoot, "apps", "worker"));
@@ -67,7 +113,7 @@ test("filesystem storage serves signed image files and rejects tampering", async
     WORKER_POLL_INTERVAL_MS: "300",
     STORAGE_PROVIDER: "filesystem",
     LOCAL_STORAGE_DIR: storageDir,
-    LOCAL_STORAGE_SIGNING_SECRET: "test-fs-signing-secret",
+    LOCAL_STORAGE_SIGNING_SECRET: "test-filesystem-signing-secret-32",
     DOWNLOAD_URL_TTL_MINUTES: "20000"
   };
   const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
@@ -140,7 +186,8 @@ async function login(baseUrl, email, password) {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Origin: defaultWriteOrigin
     },
     body: JSON.stringify({
       email,
@@ -160,7 +207,8 @@ async function verifyCaptcha(baseUrl) {
   const response = await fetch(`${baseUrl}/api/auth/captcha/verify`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Origin: defaultWriteOrigin
     },
     body: JSON.stringify({
       captchaId: captcha.data.captchaId,
@@ -213,6 +261,7 @@ async function post(baseUrl, path, body, session) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      Origin: defaultWriteOrigin,
       ...sessionHeaders(session)
     },
     body: JSON.stringify(body)

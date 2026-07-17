@@ -11,96 +11,52 @@ import { JsonStore } from "../packages/database/dist/index.js";
 
 const onePixelPngBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+const defaultWriteOrigin = "http://127.0.0.1:3100";
 
 test("api rejects bearer session auth in production config", async () => {
-  const env = {
-    ...process.env,
-    NODE_ENV: "production",
-    WEB_ORIGIN: "https://imagora.example",
-    DATABASE_URL: "postgresql://imagora:imagora@db.example:5432/imagora",
-    REDIS_URL: "redis://redis.example:6379",
-    OPENAI_API_KEY: "sk-test",
-    S3_ENDPOINT: "https://s3.example",
-    S3_BUCKET: "imagora",
-    S3_ACCESS_KEY_ID: "test-access-key",
-    S3_SECRET_ACCESS_KEY: "test-secret-key",
-    S3_PUBLIC_BASE_URL: "https://cdn.example",
-    STRIPE_SECRET_KEY: "sk_test",
-    STRIPE_WEBHOOK_SECRET: "whsec_test",
-    STRIPE_SUCCESS_URL: "https://imagora.example/payment/success",
-    STRIPE_CANCEL_URL: "https://imagora.example/payment/cancel",
-    OPENAI_TIMEOUT_MS: "300000",
-    OPENAI_MAX_RETRIES: "1",
-    GENERATION_RUNNING_TIMEOUT_MS: "1500000",
-    MAILER_PROVIDER: "smtp",
-    SMTP_HOST: "smtp.example",
-    SMTP_USER: "imagora",
-    SMTP_PASSWORD: "smtp-secret",
-    SMTP_FROM: "noreply@imagora.example",
-    SAFETY_PROVIDER: "http",
-    SAFETY_TEXT_ENDPOINT: "https://safety.example/text",
-    SAFETY_IMAGE_ENDPOINT: "https://safety.example/image",
-    DATA_STORE: "prisma",
-    QUEUE_PROVIDER: "bullmq",
-    IMAGE_PROVIDER_DEFAULT: "openai",
-    IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
-    STORAGE_PROVIDER: "s3",
-    PAYMENT_PROVIDER: "stripe",
-    RATE_LIMIT_PROVIDER: "redis",
-    SESSION_COOKIE_SECURE: "true",
-    ALERT_EMAIL_TO: "ops@imagora.example",
-    ALLOW_BEARER_SESSION_AUTH: "true"
-  };
+  const env = productionApiEnv({ ALLOW_BEARER_SESSION_AUTH: "true" });
 
   const result = await runProcess(process.execPath, ["apps/api/dist/main.js"], env);
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /bearer session auth must be disabled/);
 });
 
+test("api rejects in-memory runtime state in production config", async () => {
+  const env = productionApiEnv({ RUNTIME_STATE_PROVIDER: "memory" });
+
+  const result = await runProcess(process.execPath, ["apps/api/dist/main.js"], env);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /RUNTIME_STATE_PROVIDER must be redis/);
+});
+
 test("api rejects production config without any alert channel", async () => {
-  const env = {
-    ...process.env,
-    NODE_ENV: "production",
-    WEB_ORIGIN: "https://imagora.example",
-    DATABASE_URL: "postgresql://imagora:imagora@db.example:5432/imagora",
-    REDIS_URL: "redis://redis.example:6379",
-    OPENAI_API_KEY: "sk-test",
-    S3_ENDPOINT: "https://s3.example",
-    S3_BUCKET: "imagora",
-    S3_ACCESS_KEY_ID: "test-access-key",
-    S3_SECRET_ACCESS_KEY: "test-secret-key",
-    S3_PUBLIC_BASE_URL: "https://cdn.example",
-    STRIPE_SECRET_KEY: "sk_test",
-    STRIPE_WEBHOOK_SECRET: "whsec_test",
-    STRIPE_SUCCESS_URL: "https://imagora.example/payment/success",
-    STRIPE_CANCEL_URL: "https://imagora.example/payment/cancel",
-    OPENAI_TIMEOUT_MS: "300000",
-    OPENAI_MAX_RETRIES: "1",
-    GENERATION_RUNNING_TIMEOUT_MS: "1500000",
-    MAILER_PROVIDER: "smtp",
-    SMTP_HOST: "smtp.example",
-    SMTP_USER: "imagora",
-    SMTP_PASSWORD: "smtp-secret",
-    SMTP_FROM: "noreply@imagora.example",
-    SAFETY_PROVIDER: "http",
-    SAFETY_TEXT_ENDPOINT: "https://safety.example/text",
-    SAFETY_IMAGE_ENDPOINT: "https://safety.example/image",
-    DATA_STORE: "prisma",
-    QUEUE_PROVIDER: "bullmq",
-    IMAGE_PROVIDER_DEFAULT: "openai",
-    IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
-    STORAGE_PROVIDER: "s3",
-    PAYMENT_PROVIDER: "stripe",
-    RATE_LIMIT_PROVIDER: "redis",
-    SESSION_COOKIE_SECURE: "true",
-    ALLOW_BEARER_SESSION_AUTH: "false"
-  };
+  const env = productionApiEnv();
   delete env.ALERT_WEBHOOK_URL;
   delete env.ALERT_EMAIL_TO;
 
   const result = await runProcess(process.execPath, ["apps/api/dist/main.js"], env);
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /at least one alert channel is required/);
+});
+
+test("api rejects production session cookies unless SameSite is explicitly Strict", async (t) => {
+  for (const scenario of [
+    { name: "missing", value: undefined, expected: /SESSION_COOKIE_SAMESITE is required/ },
+    { name: "Lax", value: "Lax", expected: /SESSION_COOKIE_SAMESITE must be Strict/ },
+    { name: "None", value: "None", expected: /SESSION_COOKIE_SAMESITE must be Strict/ }
+  ]) {
+    await t.test(scenario.name, async () => {
+      const env = productionApiEnv();
+      if (scenario.value === undefined) {
+        delete env.SESSION_COOKIE_SAMESITE;
+      } else {
+        env.SESSION_COOKIE_SAMESITE = scenario.value;
+      }
+      const result = await runProcess(process.execPath, ["apps/api/dist/main.js"], env);
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, scenario.expected);
+    });
+  }
 });
 
 test("auth remains usable in local development when prisma database is unavailable", async () => {
@@ -265,6 +221,100 @@ test("auth validates registration and login payloads at browser boundaries", asy
   }
 });
 
+test("generation creation remains durable and idempotent when redis enqueue is unavailable", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-generation-enqueue-fallback-"));
+  const port = await reserveUnusedPort();
+  const unavailableRedisPort = await reserveUnusedPort();
+  const storePath = join(dir, "store.json");
+  const origin = "http://127.0.0.1:3100";
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    DATA_STORE: "json",
+    IMAGORA_STORE_PATH: storePath,
+    IMAGORA_SEED_DEMO_DATA: "true",
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    RATE_LIMIT_PROVIDER: "memory",
+    QUEUE_PROVIDER: "bullmq",
+    REDIS_URL: `redis://127.0.0.1:${unavailableRedisPort}`,
+    GENERATION_QUEUE_COMMAND_TIMEOUT_MS: "100",
+    GENERATION_ENQUEUE_RECONCILE_INTERVAL_MS: "60000",
+    WEB_ORIGIN: origin,
+    CSRF_ALLOWED_ORIGINS: origin
+  };
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl, 12000);
+
+    const demo = await login(baseUrl, "demo@imagora.local", "Demo123!");
+    const startingCredits = await get(baseUrl, "/api/users/me/credits", demo.session);
+    const clientRequestId = randomUUID();
+    const body = {
+      clientRequestId,
+      prompt: "A durable queue fallback test image",
+      style: "realistic",
+      aspectRatio: "1:1",
+      quantity: 1,
+      quality: "draft"
+    };
+
+    const firstResponse = await fetch(`${baseUrl}/api/generation/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...sessionHeaders(demo.session)
+      },
+      body: JSON.stringify(body)
+    });
+    const firstPayload = await firstResponse.json();
+    assert.equal(firstResponse.status, 201, JSON.stringify(firstPayload));
+    assert.equal(firstPayload.data.task.status, "PENDING");
+    assert.equal(
+      firstPayload.data.balanceAfter,
+      startingCredits.data.account.balance - firstPayload.data.task.creditCost
+    );
+
+    const duplicateResponse = await fetch(`${baseUrl}/api/generation/tasks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...sessionHeaders(demo.session)
+      },
+      body: JSON.stringify(body)
+    });
+    const duplicatePayload = await duplicateResponse.json();
+    assert.equal(duplicateResponse.status, 200, JSON.stringify(duplicatePayload));
+    assert.equal(duplicatePayload.data.task.id, firstPayload.data.task.id);
+    assert.equal(duplicatePayload.data.task.status, "PENDING");
+    assert.equal(duplicatePayload.data.balanceAfter, firstPayload.data.balanceAfter);
+
+    const stored = await readStore(storePath);
+    const matchingTasks = stored.generationTasks.filter(
+      (task) => task.userId === demo.data.user.id && task.clientRequestId === clientRequestId
+    );
+    assert.equal(matchingTasks.length, 1);
+    assert.equal(matchingTasks[0].status, "PENDING");
+    assert.equal(
+      stored.creditLedgerEntries.filter((entry) => entry.sourceId === matchingTasks[0].id && entry.type === "SPEND")
+        .length,
+      1
+    );
+    assert.equal(
+      stored.creditLedgerEntries.filter((entry) => entry.sourceId === matchingTasks[0].id && entry.type === "REFUND")
+        .length,
+      0
+    );
+  } finally {
+    api.kill();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("auth login requires a valid one-time image captcha", async () => {
   const dir = await mkdtemp(join(tmpdir(), "imagora-auth-captcha-"));
   const port = await reserveUnusedPort();
@@ -379,6 +429,114 @@ test("auth login requires a valid one-time image captcha", async () => {
   }
 });
 
+test("user image and generation task lists expose filtered offset pagination", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-user-pagination-"));
+  const port = await reserveUnusedPort();
+  const storePath = join(dir, "store.json");
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    DATA_STORE: "json",
+    IMAGORA_STORE_PATH: storePath,
+    IMAGORA_SEED_DEMO_DATA: "true",
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    RATE_LIMIT_PROVIDER: "memory",
+    WEB_ORIGIN: defaultWriteOrigin,
+    CSRF_ALLOWED_ORIGINS: defaultWriteOrigin
+  };
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
+
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl, 12000);
+    const demo = await login(baseUrl, "demo@imagora.local", "Demo123!");
+    const userId = demo.data.user.id;
+    const taskIds = Array.from({ length: 55 }, (_, index) => `pagination-task-${index + 1}`);
+    const newerImageIds = Array.from({ length: 105 }, (_, index) => `pagination-new-image-${index + 1}`);
+    const favoriteImageIds = Array.from({ length: 3 }, (_, index) => `pagination-favorite-image-${index + 1}`);
+
+    await updateStoreJson(storePath, (store) => {
+      store.generationTasks = store.generationTasks.filter((task) => task.userId !== userId);
+      store.generatedImages = store.generatedImages.filter((image) => image.userId !== userId);
+      store.imageFavorites = store.imageFavorites.filter((favorite) => favorite.userId !== userId);
+
+      for (const [index, taskId] of taskIds.entries()) {
+        const createdAt = new Date(Date.UTC(2026, 6, 17, 12, 0, index)).toISOString();
+        store.generationTasks.push(createPaginationTask(taskId, userId, createdAt));
+      }
+
+      for (const [index, imageId] of newerImageIds.entries()) {
+        const createdAt = new Date(Date.UTC(2026, 6, 17, 10, index, 0)).toISOString();
+        store.generatedImages.push(createPaginationImage(imageId, taskIds[0], userId, createdAt));
+      }
+      for (const [index, imageId] of favoriteImageIds.entries()) {
+        const createdAt = new Date(Date.UTC(2025, 0, index + 1, 10, 0, 0)).toISOString();
+        store.generatedImages.push(createPaginationImage(imageId, taskIds[0], userId, createdAt));
+        store.imageFavorites.push({ userId, imageId, createdAt });
+      }
+    });
+
+    const unfilteredImages = await get(baseUrl, "/api/images?limit=100&offset=0", demo.session);
+    assert.equal(unfilteredImages.data.images.length, 100);
+    assert.equal(unfilteredImages.data.pageInfo.total, 108);
+    assert.equal(unfilteredImages.data.pageInfo.hasMore, true);
+    assert.equal(
+      unfilteredImages.data.images.some((image) => favoriteImageIds.includes(image.id)),
+      false,
+      "older favorites should be outside the unfiltered first page"
+    );
+
+    const favoriteFirstPage = await get(baseUrl, "/api/images?favorite=true&limit=2&offset=0", demo.session);
+    const favoriteSecondPage = await get(baseUrl, "/api/images?favorite=true&limit=2&offset=2", demo.session);
+    assert.deepEqual(favoriteFirstPage.data.pageInfo, {
+      offset: 0,
+      limit: 2,
+      total: 3,
+      hasMore: true
+    });
+    assert.deepEqual(favoriteSecondPage.data.pageInfo, {
+      offset: 2,
+      limit: 2,
+      total: 3,
+      hasMore: false
+    });
+    const returnedFavoriteImages = [...favoriteFirstPage.data.images, ...favoriteSecondPage.data.images];
+    const returnedFavoriteIds = returnedFavoriteImages.map((image) => image.id);
+    assert.equal(new Set(returnedFavoriteIds).size, favoriteImageIds.length);
+    assert.deepEqual(new Set(returnedFavoriteIds), new Set(favoriteImageIds));
+    assert.ok(returnedFavoriteImages.every((image) => image.favorite));
+
+    const nonFavoriteImages = await get(baseUrl, "/api/images?favorite=false&limit=5&offset=0", demo.session);
+    assert.equal(nonFavoriteImages.data.pageInfo.total, newerImageIds.length);
+    assert.ok(nonFavoriteImages.data.images.every((image) => image.favorite === false));
+
+    const firstTaskPage = await get(baseUrl, "/api/generation/tasks?limit=50&offset=0", demo.session);
+    const secondTaskPage = await get(baseUrl, "/api/generation/tasks?limit=50&offset=50", demo.session);
+    assert.deepEqual(firstTaskPage.data.pageInfo, {
+      offset: 0,
+      limit: 50,
+      total: taskIds.length,
+      hasMore: true
+    });
+    assert.deepEqual(secondTaskPage.data.pageInfo, {
+      offset: 50,
+      limit: 50,
+      total: taskIds.length,
+      hasMore: false
+    });
+    assert.equal(secondTaskPage.data.tasks.length, 5);
+    const returnedTaskIds = [...firstTaskPage.data.tasks, ...secondTaskPage.data.tasks].map((task) => task.id);
+    assert.equal(new Set(returnedTaskIds).size, taskIds.length);
+    assert.deepEqual(new Set(returnedTaskIds), new Set(taskIds));
+  } finally {
+    api.kill();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("api and worker complete generation and enforce admin safety rules", async () => {
   const dir = await mkdtemp(join(tmpdir(), "imagora-api-"));
   const port = 4700 + Math.floor(Math.random() * 400);
@@ -393,6 +551,7 @@ test("api and worker complete generation and enforce admin safety rules", async 
     EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
     ORDER_PENDING_TTL_MINUTES: "30",
     GENERATION_RUNNING_TIMEOUT_MS: "600000",
+    WORKER_MAINTENANCE_INTERVAL_MS: "0",
     WORKER_POLL_INTERVAL_MS: "300"
   };
   const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
@@ -436,11 +595,41 @@ test("api and worker complete generation and enforce admin safety rules", async 
     assert.equal(blockedOrigin.status, 403);
     assert.equal(blockedOriginPayload.error.code, "FORBIDDEN");
 
-    const invalidUpload = await fetch(`${baseUrl}/api/uploads/reference-images`, {
+    const missingOrigin = await fetch(`${baseUrl}/api/generation/quote`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Cookie: demoSession
+      },
+      body: JSON.stringify({
+        prompt: "missing origin write",
+        style: "poster",
+        aspectRatio: "1:1",
+        quantity: 1,
+        quality: "draft"
+      })
+    });
+    const missingOriginPayload = await missingOrigin.json();
+    assert.equal(missingOrigin.status, 403);
+    assert.equal(missingOriginPayload.error.code, "FORBIDDEN");
+
+    const nestedWebhookPath = await fetch(`${baseUrl}/api/payments/webhooks/mock/nested`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: "{}"
+    });
+    const nestedWebhookPayload = await nestedWebhookPath.json();
+    assert.equal(nestedWebhookPath.status, 403);
+    assert.equal(nestedWebhookPayload.error.code, "FORBIDDEN");
+
+    const invalidUpload = await fetch(`${baseUrl}/api/uploads/reference-images`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: demoSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({
         fileName: "fake.png",
@@ -456,7 +645,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Cookie: demoSession
+        Cookie: demoSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({
         fileName: "large-invalid.png",
@@ -511,7 +701,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Cookie: otherUserSession
+        Cookie: otherUserSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({
         clientRequestId: crypto.randomUUID(),
@@ -629,7 +820,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Cookie: otherUserSession
+        Cookie: otherUserSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({ projectId: projectCreated.data.project.id })
     });
@@ -661,7 +853,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Cookie: otherUserSession
+        Cookie: otherUserSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({})
     });
@@ -672,7 +865,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Cookie: otherUserSession
+        Cookie: otherUserSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({})
     });
@@ -682,7 +876,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
     const foreignFavoriteRemoval = await fetch(`${baseUrl}/api/images/${generatedImageId}/favorite`, {
       method: "DELETE",
       headers: {
-        Cookie: otherUserSession
+        Cookie: otherUserSession,
+        Origin: defaultWriteOrigin
       }
     });
     const foreignFavoriteRemovalPayload = await foreignFavoriteRemoval.json();
@@ -729,6 +924,19 @@ test("api and worker complete generation and enforce admin safety rules", async 
     );
 
     const beforePaymentCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
+    const missingOrderClientRequestId = await fetch(`${baseUrl}/api/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: demoSession,
+        Origin: defaultWriteOrigin
+      },
+      body: JSON.stringify({ planId: "starter", paymentProvider: "mock" })
+    });
+    const missingOrderClientRequestPayload = await missingOrderClientRequestId.json();
+    assert.equal(missingOrderClientRequestId.status, 400);
+    assert.equal(missingOrderClientRequestPayload.error.code, "VALIDATION_ERROR");
+
     const orderClientRequestId = crypto.randomUUID();
     const orderCreated = await post(
       baseUrl,
@@ -743,6 +951,41 @@ test("api and worker complete generation and enforce admin safety rules", async 
       demoSession
     );
     assert.equal(duplicateOrderCreate.data.order.id, orderCreated.data.order.id);
+    const conflictingOrderCreate = await fetch(`${baseUrl}/api/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: demoSession,
+        Origin: defaultWriteOrigin
+      },
+      body: JSON.stringify({ planId: "creator", paymentProvider: "mock", clientRequestId: orderClientRequestId })
+    });
+    const conflictingOrderPayload = await conflictingOrderCreate.json();
+    assert.equal(conflictingOrderCreate.status, 409);
+    assert.equal(conflictingOrderPayload.error.code, "CONFLICT");
+
+    const sharedOrderClientRequestId = crypto.randomUUID();
+    const demoSharedOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock", clientRequestId: sharedOrderClientRequestId },
+      demoSession
+    );
+    const otherSharedOrder = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock", clientRequestId: sharedOrderClientRequestId },
+      otherUserSession
+    );
+    assert.notEqual(otherSharedOrder.data.order.id, demoSharedOrder.data.order.id);
+    const demoSharedRetry = await post(
+      baseUrl,
+      "/api/orders",
+      { planId: "starter", paymentProvider: "mock", clientRequestId: sharedOrderClientRequestId },
+      demoSession
+    );
+    assert.equal(demoSharedRetry.data.order.id, demoSharedOrder.data.order.id);
+
     const providerEventId = `evt_${crypto.randomUUID()}`;
     const webhookPayload = {
       providerEventId,
@@ -926,7 +1169,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Cookie: demoSession
+        Cookie: demoSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({})
     });
@@ -1118,7 +1362,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
-        Cookie: adminSession
+        Cookie: adminSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({ status: "SUSPENDED", reason: "防止误封自己" })
     });
@@ -1225,7 +1470,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Cookie: demoSession
+        Cookie: demoSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({
         clientRequestId: crypto.randomUUID(),
@@ -1250,7 +1496,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Cookie: demoSession
+        Cookie: demoSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({
         clientRequestId: crypto.randomUUID(),
@@ -1285,7 +1532,8 @@ test("api and worker complete generation and enforce admin safety rules", async 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Cookie: demoSession
+        Cookie: demoSession,
+        Origin: defaultWriteOrigin
       },
       body: JSON.stringify({
         safetyEventId: reviewEvent.id,
@@ -1677,6 +1925,19 @@ test("api wires stripe provider into checkout, webhook signing and credit grant"
     assert.equal(wrongProviderReject.status, 400);
     assert.equal(wrongProviderPayload.error.code, "VALIDATION_ERROR");
 
+    const missingStripeOrderClientRequestId = await fetch(`${baseUrl}/api/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: demoSession,
+        Origin: origin
+      },
+      body: JSON.stringify({ planId: "starter", paymentProvider: "stripe" })
+    });
+    const missingStripeOrderClientRequestPayload = await missingStripeOrderClientRequestId.json();
+    assert.equal(missingStripeOrderClientRequestId.status, 400);
+    assert.equal(missingStripeOrderClientRequestPayload.error.code, "VALIDATION_ERROR");
+
     const beforeCredits = await get(baseUrl, "/api/users/me/credits", demoSession);
     const stripeOrderClientRequestId = crypto.randomUUID();
     const orderCreated = await post(
@@ -1843,14 +2104,59 @@ test("api wires stripe provider into checkout, webhook signing and credit grant"
   }
 });
 
+function productionApiEnv(overrides = {}) {
+  return {
+    ...process.env,
+    NODE_ENV: "production",
+    WEB_ORIGIN: "https://imagora.example",
+    DATABASE_URL: "postgresql://imagora:imagora@db.example:5432/imagora",
+    REDIS_URL: "redis://redis.example:6379",
+    OPENAI_API_KEY: "sk-test",
+    S3_ENDPOINT: "https://s3.example",
+    S3_BUCKET: "imagora",
+    S3_ACCESS_KEY_ID: "test-access-key",
+    S3_SECRET_ACCESS_KEY: "test-secret-key",
+    S3_PUBLIC_BASE_URL: "https://cdn.example",
+    STRIPE_SECRET_KEY: "sk_test",
+    STRIPE_WEBHOOK_SECRET: "whsec_test",
+    STRIPE_SUCCESS_URL: "https://imagora.example/payment/success",
+    STRIPE_CANCEL_URL: "https://imagora.example/payment/cancel",
+    OPENAI_TIMEOUT_MS: "300000",
+    OPENAI_MAX_RETRIES: "1",
+    GENERATION_RUNNING_TIMEOUT_MS: "1500000",
+    MAILER_PROVIDER: "smtp",
+    SMTP_HOST: "smtp.example",
+    SMTP_USER: "imagora",
+    SMTP_PASSWORD: "smtp-secret",
+    SMTP_FROM: "noreply@imagora.example",
+    SAFETY_PROVIDER: "http",
+    SAFETY_TEXT_ENDPOINT: "https://safety.example/text",
+    SAFETY_IMAGE_ENDPOINT: "https://safety.example/image",
+    DATA_STORE: "prisma",
+    QUEUE_PROVIDER: "bullmq",
+    IMAGE_PROVIDER_DEFAULT: "openai",
+    IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
+    STORAGE_PROVIDER: "s3",
+    PAYMENT_PROVIDER: "stripe",
+    RATE_LIMIT_PROVIDER: "redis",
+    RUNTIME_STATE_PROVIDER: "redis",
+    SESSION_COOKIE_SECURE: "true",
+    SESSION_COOKIE_SAMESITE: "Strict",
+    ALERT_EMAIL_TO: "ops@imagora.example",
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    ...overrides
+  };
+}
+
 function runProcess(command, args, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     const timeout = setTimeout(() => {
       child.kill();
-      reject(new Error(`${command} ${args.join(" ")} timed out`));
-    }, 5000);
+      const detail = stderr.trim() ? `\nstderr:\n${stderr.trim()}` : "";
+      reject(new Error(`${command} ${args.join(" ")} timed out after 15000ms${detail}`));
+    }, 15000);
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {
@@ -1891,6 +2197,7 @@ async function authPost(baseUrl, path, body, origin) {
   const setCookie = readSetCookie(response);
   assert.match(setCookie, /^imagora_session=/);
   assert.match(setCookie, /;\s*HttpOnly/i);
+  assert.match(setCookie, /;\s*SameSite=Strict/i);
   const session = setCookie.split(";")[0];
   const sessionValue = session.split("=").slice(1).join("=");
   assert.ok(sessionValue);
@@ -1905,7 +2212,7 @@ async function rawAuthPost(baseUrl, path, body, origin) {
   };
 }
 
-async function rawApiPost(baseUrl, path, body, origin) {
+async function rawApiPost(baseUrl, path, body, origin = defaultWriteOrigin) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: {
@@ -1920,7 +2227,7 @@ async function rawApiPost(baseUrl, path, body, origin) {
   };
 }
 
-async function verifyCaptcha(baseUrl, origin) {
+async function verifyCaptcha(baseUrl, origin = defaultWriteOrigin) {
   const captcha = await getCaptcha(baseUrl, origin);
   const response = await fetch(`${baseUrl}/api/auth/captcha/verify`, {
     method: "POST",
@@ -1940,7 +2247,7 @@ async function verifyCaptcha(baseUrl, origin) {
   return payload;
 }
 
-async function getCaptcha(baseUrl, origin) {
+async function getCaptcha(baseUrl, origin = defaultWriteOrigin) {
   const response = await fetch(`${baseUrl}/api/auth/captcha`, {
     headers: origin ? { Origin: origin } : undefined
   });
@@ -1955,7 +2262,7 @@ async function getCaptcha(baseUrl, origin) {
   return payload;
 }
 
-async function authFetch(baseUrl, path, body, origin) {
+async function authFetch(baseUrl, path, body, origin = defaultWriteOrigin) {
   return fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: {
@@ -2096,7 +2403,10 @@ async function fetchJsonWithTimeout(url, init, timeoutMs) {
 }
 
 function sessionHeaders(session) {
-  return session ? { Cookie: session } : {};
+  return {
+    Origin: defaultWriteOrigin,
+    ...(session ? { Cookie: session } : {})
+  };
 }
 
 async function pathExists(filePath) {
@@ -2120,6 +2430,70 @@ async function readStore(storePath) {
 
 async function updateStoreJson(storePath, updater) {
   return new JsonStore(storePath).update((store) => updater(store));
+}
+
+function createPaginationTask(id, userId, createdAt) {
+  return {
+    id,
+    userId,
+    clientRequestId: `client-${id}`,
+    referenceImageId: null,
+    prompt: `pagination prompt ${id}`,
+    negativePrompt: null,
+    style: "illustration",
+    aspectRatio: "1:1",
+    width: 1024,
+    height: 1024,
+    quantity: 1,
+    quality: "draft",
+    modelProvider: "mock",
+    modelName: "mock:default",
+    status: "SUCCEEDED",
+    creditCost: 1,
+    providerCostCents: 0,
+    failureCode: null,
+    failureMessage: null,
+    startedAt: createdAt,
+    completedAt: createdAt,
+    createdAt,
+    updatedAt: createdAt
+  };
+}
+
+function createPaginationImage(id, taskId, userId, createdAt) {
+  return {
+    id,
+    taskId,
+    userId,
+    projectId: null,
+    storageKey: `generated/${userId}/${id}.svg`,
+    thumbnailKey: `generated/${userId}/${id}-thumb.svg`,
+    thumbnailUrl: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>",
+    publicUrl: "",
+    width: 1024,
+    height: 1024,
+    fileSize: 128,
+    mimeType: "image/svg+xml",
+    safetyStatus: "PASSED",
+    visibility: "PRIVATE",
+    generationMetadata: {
+      taskId,
+      prompt: `pagination image ${id}`,
+      negativePrompt: null,
+      style: "illustration",
+      aspectRatio: "1:1",
+      quality: "draft",
+      quantity: 1,
+      modelProvider: "mock",
+      modelName: "mock:default",
+      width: 1024,
+      height: 1024,
+      creditCost: 1,
+      createdAt
+    },
+    deletedAt: null,
+    createdAt
+  };
 }
 
 async function forceStaleRunningTask(storePath, taskId) {

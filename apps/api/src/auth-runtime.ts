@@ -6,6 +6,8 @@ interface AuthStore {
   read(): Promise<StoreData>;
 }
 
+type SameSitePolicy = "Strict" | "Lax" | "None";
+
 export function createAuthRuntime(store: AuthStore): {
   requireAuth: (request: FastifyRequest) => Promise<{ data: StoreData; user: User }>;
   requireAdmin: (request: FastifyRequest) => Promise<{ data: StoreData; user: User }>;
@@ -80,7 +82,7 @@ export function setSessionCookie(reply: FastifyReply, token: string, expiresAt: 
     expires: new Date(expiresAt),
     httpOnly: true,
     secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-    sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+    sameSite: sessionCookieSameSite(),
     path: "/"
   });
   const existing = reply.getHeader("set-cookie");
@@ -102,7 +104,7 @@ export function clearSessionCookie(reply: FastifyReply): void {
       expires: new Date(0),
       httpOnly: true,
       secure: envBool("SESSION_COOKIE_SECURE", process.env.NODE_ENV === "production"),
-      sameSite: process.env.SESSION_COOKIE_SAMESITE ?? "Lax",
+      sameSite: sessionCookieSameSite(),
       path: "/"
     })
   );
@@ -110,6 +112,17 @@ export function clearSessionCookie(reply: FastifyReply): void {
 
 export function sessionCookieName(): string {
   return process.env.SESSION_COOKIE_NAME ?? "imagora_session";
+}
+
+export function sessionCookieSameSite(): SameSitePolicy {
+  const value = process.env.SESSION_COOKIE_SAMESITE?.trim().toLowerCase();
+  if (value === "lax") {
+    return "Lax";
+  }
+  if (value === "none") {
+    return "None";
+  }
+  return "Strict";
 }
 
 export function cookieValue(cookieHeader: string | undefined, name: string): string | null {
