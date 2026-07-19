@@ -59,6 +59,7 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
     stripAdminReason,
     store,
     userParamSchema,
+    withSignedImageThumbnail,
     withoutPassword
   } = context;
 
@@ -299,7 +300,10 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
     const data = await store.read();
     const task = mustFindTask(data, taskId);
     const user = mustFindUser(data, task.userId);
-    const images = data.generatedImages.filter((image) => image.taskId === task.id).sort(descCreated);
+    const images = data.generatedImages
+      .filter((image) => image.taskId === task.id)
+      .sort(descCreated)
+      .map(withSignedImageThumbnail);
     return envelope(request, { task, user: withoutPassword(user), images });
   });
 
@@ -311,7 +315,8 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
       .filter((image) => !query.userId || image.userId === query.userId)
       .filter((image) => matchesCreatedRange(image.createdAt, query))
       .sort(descCreated)
-      .slice(0, query.limit);
+      .slice(0, query.limit)
+      .map(withSignedImageThumbnail);
     return envelope(request, { images });
   });
 
@@ -322,7 +327,7 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
     const image = mustFindImage(data, imageId);
     const user = mustFindUser(data, image.userId);
     const task = mustFindTask(data, image.taskId);
-    return envelope(request, { image, user: withoutPassword(user), task });
+    return envelope(request, { image: withSignedImageThumbnail(image), user: withoutPassword(user), task });
   });
 
   app.patch("/api/admin/images/:imageId/visibility", async (request) => {
@@ -347,7 +352,7 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
         { visibility: image.visibility },
         request
       );
-      return envelope(request, { image });
+      return envelope(request, { image: withSignedImageThumbnail(image) });
     });
   });
 

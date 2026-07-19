@@ -1469,6 +1469,13 @@ function withoutImagePublicUrl(image: GeneratedImage): GeneratedImage {
   };
 }
 
+function withSignedImageThumbnail(image: GeneratedImage): GeneratedImage {
+  return {
+    ...image,
+    thumbnailUrl: signLocalThumbnailUrl(image.thumbnailUrl)
+  };
+}
+
 // 把 worker 落库的 local://<key> 缩略图签名成前端可直连的 /api/files/<key> URL。
 // 仅 filesystem 模式生效；其余模式 thumbnailUrl 已是 data: 或公开直链，原样返回。
 function signLocalThumbnailUrl(thumbnailUrl: string): string {
@@ -2473,6 +2480,7 @@ function createRouteContext(): ApiRouteContext {
     verifyTurnstileToken,
     webhookSignature,
     withFavorite,
+    withSignedImageThumbnail,
     withoutImagePublicUrl,
     withoutPassword,
     z

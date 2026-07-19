@@ -26,5 +26,6 @@ export interface ApiRouteContext {
   mustFindOwnImage: (data: StoreData, userId: string, imageId: string) => GeneratedImage;
   mustFindImage: (data: StoreData, imageId: string) => GeneratedImage;
   withoutImagePublicUrl: (image: GeneratedImage) => GeneratedImage;
+  withSignedImageThumbnail: (image: GeneratedImage) => GeneratedImage;
   withFavorite: (data: StoreData, userId: string, image: GeneratedImage) => GeneratedImage & { favorite: boolean };
 }

@@ -153,6 +153,40 @@ test("filesystem storage serves signed image files and rejects tampering", async
     const thumbBody = Buffer.from(await thumbResponse.arrayBuffer());
     assert.ok(thumbBody.byteLength > 0, "thumbnail body was empty");
 
+    const admin = await login(baseUrl, "admin@imagora.local", "Admin123!");
+    const adminImages = await get(baseUrl, "/api/admin/images?limit=10", admin.session);
+    assert.equal(adminImages.data.images.length > 0, true);
+    assert.match(
+      adminImages.data.images[0].thumbnailUrl,
+      /^\/api\/files\/generated\//,
+      adminImages.data.images[0].thumbnailUrl
+    );
+    assert.match(adminImages.data.images[0].publicUrl, /^local:\/\/generated\//, adminImages.data.images[0].publicUrl);
+
+    const adminTaskDetail = await get(baseUrl, `/api/admin/generation/tasks/${created.data.task.id}`, admin.session);
+    assert.match(
+      adminTaskDetail.data.images[0].thumbnailUrl,
+      /^\/api\/files\/generated\//,
+      adminTaskDetail.data.images[0].thumbnailUrl
+    );
+    assert.match(
+      adminTaskDetail.data.images[0].publicUrl,
+      /^local:\/\/generated\//,
+      adminTaskDetail.data.images[0].publicUrl
+    );
+
+    const adminImageDetail = await get(baseUrl, `/api/admin/images/${image.id}`, admin.session);
+    assert.match(
+      adminImageDetail.data.image.thumbnailUrl,
+      /^\/api\/files\/generated\//,
+      adminImageDetail.data.image.thumbnailUrl
+    );
+    assert.match(
+      adminImageDetail.data.image.publicUrl,
+      /^local:\/\/generated\//,
+      adminImageDetail.data.image.publicUrl
+    );
+
     // 全尺寸预览走按需签名接口，同样应可直连回读。
     const preview = await post(baseUrl, `/api/images/${image.id}/preview-url`, {}, demo.session);
     assert.match(preview.data.url, /^\/api\/files\/generated\//, preview.data.url);
