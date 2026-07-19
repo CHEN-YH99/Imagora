@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useId, useState } from "react";
-import { CheckCircle2, LogOut, Sparkles, X, XCircle } from "lucide-react";
+import { LogOut, Sparkles } from "lucide-react";
+import { Toaster } from "sonner";
 import {
   formatStatusLabel,
   getCurrentUser,
@@ -323,73 +324,20 @@ export function InlineNotice({
   );
 }
 
-export type ToastMessage = {
-  id: string;
-  tone: "success" | "danger";
-  text: string;
-};
-
-let toastListeners: ((toast: ToastMessage) => void)[] = [];
-
-export function showToast(tone: "success" | "danger", text: string) {
-  const toast: ToastMessage = {
-    id: `toast-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-    tone,
-    text
-  };
-  toastListeners.forEach((listener) => listener(toast));
-}
-
 export function ToastContainer() {
-  const [toasts, setToasts] = useState<ToastMessage[]>([]);
-
-  useEffect(() => {
-    const listener = (toast: ToastMessage) => {
-      setToasts((prev) => [...prev, toast]);
-      setTimeout(() => {
-        setToasts((prev) => prev.filter((t) => t.id !== toast.id));
-      }, 4000);
-    };
-    toastListeners.push(listener);
-    return () => {
-      toastListeners = toastListeners.filter((l) => l !== listener);
-    };
-  }, []);
-
-  const removeToast = (id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  if (toasts.length === 0) {
-    return null;
-  }
-
   return (
-    <div className="pointer-events-none fixed right-4 top-4 z-[9999] flex flex-col gap-3">
-      {toasts.map((toast) => (
-        <div
-          key={toast.id}
-          role="alert"
-          aria-live="assertive"
-          className="pointer-events-auto flex min-w-80 items-start gap-3 rounded-2xl border border-white/12 bg-ink/95 p-4 shadow-2xl backdrop-blur-xl animate-in fade-in slide-in-from-top-2 duration-300"
-        >
-          {toast.tone === "success" ? (
-            <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-mint" />
-          ) : (
-            <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-ember" />
-          )}
-          <p className="flex-1 text-sm leading-6 text-white">{toast.text}</p>
-          <button
-            type="button"
-            onClick={() => removeToast(toast.id)}
-            className="focus-ring -mr-1 -mt-1 rounded-lg p-1 text-white/40 transition-colors hover:bg-white/8 hover:text-white/70"
-            aria-label="关闭通知"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      ))}
-    </div>
+    <Toaster
+      position="top-right"
+      toastOptions={{
+        className: "!border-white/12 !bg-ink/95 !backdrop-blur-xl !text-white !shadow-2xl",
+        style: {
+          borderRadius: "1rem",
+          padding: "1rem"
+        },
+        duration: 4000
+      }}
+      theme="dark"
+    />
   );
 }
 

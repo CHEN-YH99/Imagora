@@ -3,7 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, BarChart3, Coins, Eye, EyeOff, Plus, RefreshCw, Save, X } from "lucide-react";
-import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill, showToast, ToastContainer } from "../../components/AppFrame";
+import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill, ToastContainer } from "../../components/AppFrame";
+import { toast } from "sonner";
 import {
   apiFetch,
   formatAuditAction,
@@ -249,6 +250,7 @@ export default function AdminPage() {
   const [accessState, setAccessState] = useState<AdminAccessState>(
     cachedUser?.role === "ADMIN" ? "granted" : "checking"
   );
+  const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -833,10 +835,21 @@ export default function AdminPage() {
               ? { ...current, data: refreshedDetail ?? { ...current.data, order: result.order } }
               : current
           );
-          showToast("success", `订单 ${confirmState.orderNo} 已退款成功，用户余额回收后为 ${formatCredits(result.balanceAfter)}。`);
+
+          // 高亮订单行 3 秒
+          setHighlightedOrderId(result.order.id);
+          setTimeout(() => setHighlightedOrderId(null), 3000);
+
+          // Sonner toast 成功提示
+          const refundIdHint = result.refundId ? `（支付方单号：${result.refundId.slice(0, 12)}...）` : "";
+          toast.success("订单退款成功", {
+            description: `订单 ${confirmState.orderNo} 已退款 ${formatMoney(confirmState.amountCents, confirmState.currency)}${refundIdHint}，用户余额回收后为 ${formatCredits(result.balanceAfter)}。`,
+            duration: 5000
+          });
+
           setNotice({
             tone: "success",
-            text: `订单 ${confirmState.orderNo} 已退款，用户余额回收后为 ${formatCredits(result.balanceAfter)}。`
+            text: `订单 ${confirmState.orderNo} 已退款 ${formatMoney(confirmState.amountCents, confirmState.currency)}${refundIdHint}，用户余额回收后为 ${formatCredits(result.balanceAfter)}。`
           });
           break;
         }
@@ -845,9 +858,51 @@ export default function AdminPage() {
       }
       resetConfirm();
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "管理员操作失败,请稍后重试。";
-      showToast("danger", errorMessage);
-      setNotice({ tone: "danger", text: errorMessage });
+      // 精细化错误提示
+      let errorTitle = "操作失败";
+      let errorDescription = "管理员操作失败，请稍后重试。";
+
+      if (error instanceof ApiRequestError) {
+        switch (error.code) {
+          case "PROVIDER_REFUND_FAILED":
+            errorTitle = "支付方退款失败";
+            errorDescription = `${error.apiMessage ?? "未知原因"}。请登录支付平台后台核实，或联系支付渠道客服处理。`;
+            break;
+          case "INSUFFICIENT_BALANCE":
+            errorTitle = "用户积分余额不足";
+            errorDescription = "无法回收积分。请先在用户管理中调整积分为正，或在审计日志中标记此异常订单。";
+            break;
+          case "ORDER_NOT_REFUNDABLE":
+            errorTitle = "订单不可退款";
+            errorDescription = "订单当前状态不允许退款（可能已退款或已关闭），请刷新订单列表后重试。";
+            break;
+          case "ORDER_ALREADY_REFUNDED":
+            errorTitle = "订单已退款";
+            errorDescription = "该订单的退款已在处理中或已完成，请勿重复提交。刷新列表查看最新状态。";
+            break;
+          case "REFUND_FAILED":
+            errorTitle = "退款失败";
+            errorDescription = error.apiMessage ?? "退款请求被拒绝，请检查订单状态和支付平台后台。";
+            break;
+          default:
+            errorTitle = error.code ?? "未知错误";
+            errorDescription = error.apiMessage ?? error.message;
+        }
+      } else if (error instanceof Error) {
+        if (error.message.includes("网络") || error.message.includes("超时")) {
+          errorTitle = "网络异常";
+          errorDescription = "请求超时或网络连接失败。退款可能已提交，请勿重复操作，刷新列表确认状态。";
+        } else {
+          errorDescription = error.message;
+        }
+      }
+
+      toast.error(errorTitle, {
+        description: errorDescription,
+        duration: 8000
+      });
+
+      setNotice({ tone: "danger", text: `${errorTitle}：${errorDescription}` });
     } finally {
       setConfirmLoading(false);
       setMaintenanceRunning(false);
@@ -1452,7 +1507,14 @@ export default function AdminPage() {
           </div>
           <div className="space-y-3">
             {visibleOrders.map((order) => (
-              <article key={order.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <article
+                key={order.id}
+                className={`rounded-2xl border border-white/10 bg-black/20 p-4 transition-all duration-300 ${
+                  highlightedOrderId === order.id
+                    ? "ring-2 ring-mint/50 shadow-lg shadow-mint/20 bg-mint/5"
+                    : ""
+                }`}
+              >
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="font-medium">{order.orderNo}</p>
