@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, BarChart3, Coins, Eye, EyeOff, Plus, RefreshCw, Save, X } from "lucide-react";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill, ToastContainer } from "../../components/AppFrame";
 import { toast } from "sonner";
@@ -113,6 +113,14 @@ type Notice = {
 
 type AdminAccessState = "checking" | "granted";
 
+type AdminOrderQuery = {
+  status?: Order["status"];
+  userId?: string;
+  orderNo?: string;
+  createdFrom?: string;
+  createdTo?: string;
+};
+
 // 与后端 ADMIN_CREDIT_ADJUST_THRESHOLD 默认值保持一致：
 // 单次调整绝对值达到该阈值即视为大额，必须走强制二次确认（confirm=true）。
 const LARGE_CREDIT_ADJUST_THRESHOLD = 1000;
@@ -183,6 +191,54 @@ function toApiDateTime(value: string): string | undefined {
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
+function buildOrderQueryKey(query: AdminOrderQuery): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value) {
+      params.set(key, value);
+    }
+  }
+  return params.toString();
+}
+
+function compareOrderCreatedDesc(a: Order, b: Order): number {
+  return Date.parse(b.createdAt) - Date.parse(a.createdAt);
+}
+
+function mergeOrderCache(current: Order[], incoming: Order[]): Order[] {
+  const byId = new Map<string, Order>(current.map((order) => [order.id, order]));
+  for (const order of incoming) {
+    byId.set(order.id, order);
+  }
+  return Array.from(byId.values()).sort(compareOrderCreatedDesc);
+}
+
+function orderMatchesQuery(order: Order, query: AdminOrderQuery): boolean {
+  if (query.status && order.status !== query.status) {
+    return false;
+  }
+  if (query.userId && order.userId !== query.userId) {
+    return false;
+  }
+  if (query.orderNo && !order.orderNo.toLowerCase().includes(query.orderNo.toLowerCase())) {
+    return false;
+  }
+
+  const createdAt = Date.parse(order.createdAt);
+  const createdFrom = query.createdFrom ? Date.parse(query.createdFrom) : null;
+  const createdTo = query.createdTo ? Date.parse(query.createdTo) : null;
+  if (Number.isNaN(createdAt)) {
+    return createdFrom === null && createdTo === null;
+  }
+  if (createdFrom !== null && createdAt < createdFrom) {
+    return false;
+  }
+  if (createdTo !== null && createdAt > createdTo) {
+    return false;
+  }
+  return true;
+}
+
 function detailDialogLabel(kind: SelectedDetail["kind"]): string {
   switch (kind) {
     case "user":
@@ -217,6 +273,7 @@ export default function AdminPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [orderCache, setOrderCache] = useState<Order[]>([]);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [rules, setRules] = useState<SafetyRule[]>([]);
   const [safetyEvents, setSafetyEvents] = useState<SafetyEvent[]>([]);
@@ -254,6 +311,12 @@ export default function AdminPage() {
     cachedUser?.role === "ADMIN" ? "granted" : "checking"
   );
   const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
+  const [settledOrderQueryKey, setSettledOrderQueryKey] = useState<string | null>(null);
+  const [orderQueryLoading, setOrderQueryLoading] = useState(false);
+  const pageLoadSeqRef = useRef(0);
+  const orderLoadSeqRef = useRef(0);
+  const refreshSeqRef = useRef(0);
+  const orderFilterEffectReadyRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -326,18 +389,27 @@ export default function AdminPage() {
   }, [
     accessState,
     taskStatusFilter,
-    orderStatusFilter,
     imageVisibilityFilter,
     safetyAppealStatusFilter,
     createdFrom,
     createdTo,
     userIdFilter,
-    orderNoFilter,
     adminUserIdFilter,
     auditActionFilter,
     auditTargetTypeFilter,
     auditTargetIdFilter
   ]);
+
+  useEffect(() => {
+    if (accessState !== "granted") {
+      return;
+    }
+    if (!orderFilterEffectReadyRef.current) {
+      orderFilterEffectReadyRef.current = true;
+      return;
+    }
+    void loadOrders();
+  }, [accessState, orderNoFilter, orderStatusFilter]);
 
   const visibleUsers = useMemo(
     () =>
@@ -357,7 +429,30 @@ export default function AdminPage() {
 
   const visibleImages = useMemo(() => images.slice(0, 8), [images]);
 
-  const visibleOrders = useMemo(() => orders.slice(0, 12), [orders]);
+  const orderQuery = useMemo<AdminOrderQuery>(
+    () => ({
+      status: orderStatusFilter === "ALL" ? undefined : orderStatusFilter,
+      userId: filterValue(userIdFilter),
+      orderNo: filterValue(orderNoFilter),
+      createdFrom: toApiDateTime(createdFrom),
+      createdTo: toApiDateTime(createdTo)
+    }),
+    [createdFrom, createdTo, orderNoFilter, orderStatusFilter, userIdFilter]
+  );
+  const orderQueryKey = useMemo(() => buildOrderQueryKey(orderQuery), [orderQuery]);
+  const locallyMatchedOrders = useMemo(
+    () => orderCache.filter((order) => orderMatchesQuery(order, orderQuery)).slice(0, 12),
+    [orderCache, orderQuery]
+  );
+  const orderQuerySettled = settledOrderQueryKey === orderQueryKey;
+  const orderQueryPending = accessState === "granted" && (orderQueryLoading || !orderQuerySettled);
+  const hasActiveOrderFilter = Boolean(
+    orderQuery.status || orderQuery.userId || orderQuery.orderNo || orderQuery.createdFrom || orderQuery.createdTo
+  );
+  const visibleOrders = useMemo(
+    () => (orderQuerySettled ? orders.slice(0, 12) : locallyMatchedOrders),
+    [locallyMatchedOrders, orderQuerySettled, orders]
+  );
 
   const visibleSafetyEvents = useMemo(() => safetyEvents.slice(0, 8), [safetyEvents]);
   const visibleSafetyAppeals = useMemo(() => safetyAppeals.slice(0, 8), [safetyAppeals]);
@@ -414,11 +509,30 @@ export default function AdminPage() {
     }
   }
 
+  function commitOrderResult(nextOrders: Order[], queryKey: string) {
+    setOrders(nextOrders);
+    setOrderCache((current) => mergeOrderCache(current, nextOrders));
+    setSettledOrderQueryKey(queryKey);
+    setOrderQueryLoading(false);
+  }
+
   async function load(preserveNotice = false) {
+    const pageLoadSeq = ++pageLoadSeqRef.current;
+    const orderLoadSeq = ++orderLoadSeqRef.current;
+    const refreshSeq = ++refreshSeqRef.current;
+    const createdFromFilter = toApiDateTime(createdFrom);
+    const createdToFilter = toApiDateTime(createdTo);
+    const selectedUserId = filterValue(userIdFilter);
+    const requestOrderQuery: AdminOrderQuery = {
+      status: orderStatusFilter === "ALL" ? undefined : orderStatusFilter,
+      userId: selectedUserId,
+      orderNo: filterValue(orderNoFilter),
+      createdFrom: createdFromFilter,
+      createdTo: createdToFilter
+    };
+    const requestOrderQueryKey = buildOrderQueryKey(requestOrderQuery);
     try {
-      const createdFromFilter = toApiDateTime(createdFrom);
-      const createdToFilter = toApiDateTime(createdTo);
-      const selectedUserId = filterValue(userIdFilter);
+      setOrderQueryLoading(true);
       const [
         dashboard,
         operations,
@@ -456,11 +570,7 @@ export default function AdminPage() {
         apiFetch<{ orders: Order[] }>(
           withQuery("/api/admin/orders", {
             limit: 30,
-            status: orderStatusFilter === "ALL" ? undefined : orderStatusFilter,
-            userId: selectedUserId,
-            orderNo: filterValue(orderNoFilter),
-            createdFrom: createdFromFilter,
-            createdTo: createdToFilter
+            ...requestOrderQuery
           })
         ),
         apiFetch<{ plans: Plan[] }>("/api/admin/plans"),
@@ -482,12 +592,17 @@ export default function AdminPage() {
           })
         )
       ]);
+      if (pageLoadSeq !== pageLoadSeqRef.current) {
+        return;
+      }
       setMetrics(dashboard.metrics);
       setOperationalMetrics(operations);
       setUsers(userResult.users);
       setTasks(taskResult.tasks);
       setImages(imageResult.images);
-      setOrders(orderResult.orders);
+      if (orderLoadSeq === orderLoadSeqRef.current) {
+        commitOrderResult(orderResult.orders, requestOrderQueryKey);
+      }
       setPlans(planResult.plans);
       setPlanEdits(
         Object.fromEntries(
@@ -505,11 +620,55 @@ export default function AdminPage() {
       setSafetyEvents(safetyEventResult.events.slice(0, 12));
       setSafetyAppeals(safetyAppealResult.appeals.slice(0, 12));
       setLogs(logResult.logs.slice(0, 12));
-      if (!preserveNotice) {
+      if (!preserveNotice && refreshSeq === refreshSeqRef.current) {
         setNotice(null);
       }
     } catch (error) {
-      setNotice({ tone: "danger", text: error instanceof Error ? error.message : "后台数据加载失败，请稍后重试。" });
+      if (orderLoadSeq === orderLoadSeqRef.current) {
+        setSettledOrderQueryKey(requestOrderQueryKey);
+        setOrderQueryLoading(false);
+      }
+      if (pageLoadSeq === pageLoadSeqRef.current && refreshSeq === refreshSeqRef.current) {
+        setNotice({ tone: "danger", text: error instanceof Error ? error.message : "后台数据加载失败，请稍后重试。" });
+      }
+    }
+  }
+
+  async function loadOrders(preserveNotice = false) {
+    const orderLoadSeq = ++orderLoadSeqRef.current;
+    const refreshSeq = ++refreshSeqRef.current;
+    const createdFromFilter = toApiDateTime(createdFrom);
+    const createdToFilter = toApiDateTime(createdTo);
+    const selectedUserId = filterValue(userIdFilter);
+    const requestOrderQuery: AdminOrderQuery = {
+      status: orderStatusFilter === "ALL" ? undefined : orderStatusFilter,
+      userId: selectedUserId,
+      orderNo: filterValue(orderNoFilter),
+      createdFrom: createdFromFilter,
+      createdTo: createdToFilter
+    };
+    const requestOrderQueryKey = buildOrderQueryKey(requestOrderQuery);
+    try {
+      setOrderQueryLoading(true);
+      const orderResult = await apiFetch<{ orders: Order[] }>(
+        withQuery("/api/admin/orders", {
+          limit: 30,
+          ...requestOrderQuery
+        })
+      );
+      if (orderLoadSeq !== orderLoadSeqRef.current) {
+        return;
+      }
+      commitOrderResult(orderResult.orders, requestOrderQueryKey);
+      if (!preserveNotice && refreshSeq === refreshSeqRef.current) {
+        setNotice(null);
+      }
+    } catch (error) {
+      if (orderLoadSeq === orderLoadSeqRef.current && refreshSeq === refreshSeqRef.current) {
+        setSettledOrderQueryKey(requestOrderQueryKey);
+        setOrderQueryLoading(false);
+        setNotice({ tone: "danger", text: error instanceof Error ? error.message : "订单列表加载失败，请稍后重试。" });
+      }
     }
   }
 
@@ -1251,15 +1410,17 @@ export default function AdminPage() {
           </Field>
           <Field label="订单号筛选">
             <input
+              autoComplete="off"
               className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
               placeholder="输入订单号"
+              type="search"
               value={orderNoFilter}
               onChange={(event) => setOrderNoFilter(event.target.value)}
             />
           </Field>
           <Field label="筛选说明">
             <p className="rounded-2xl border border-white/10 bg-black/20 px-4 py-2 text-sm text-white/60">
-              时间、用户和订单号会同步作用于任务、图片和订单列表。
+              时间和用户会同步作用于任务、图片和订单列表；订单号和订单状态只筛选订单列表。
             </p>
           </Field>
         </div>
@@ -1487,7 +1648,10 @@ export default function AdminPage() {
             <div className="grid min-w-[260px] gap-2 sm:grid-cols-2">
               <Field label="订单号筛选">
                 <input
+                  autoComplete="off"
                   className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
+                  placeholder="输入订单号"
+                  type="search"
                   value={orderNoFilter}
                   onChange={(event) => setOrderNoFilter(event.target.value)}
                 />
@@ -1509,6 +1673,14 @@ export default function AdminPage() {
             </div>
           </div>
           <div className="space-y-3">
+            {orderQueryPending && visibleOrders.length > 0 ? (
+              <InlineNotice tone="info">
+                <span className="inline-flex items-center gap-2">
+                  <RefreshCw className="size-4 animate-spin" aria-hidden="true" />
+                  正在同步订单结果...
+                </span>
+              </InlineNotice>
+            ) : null}
             {visibleOrders.map((order) => (
               <article
                 key={order.id}
@@ -1542,12 +1714,20 @@ export default function AdminPage() {
               </article>
             ))}
             {visibleOrders.length === 0 ? (
-              <EmptyState
-                title="暂无符合条件的订单记录"
-                description="修改搜索词或状态筛选后再试，必要时执行一次刷新。"
-                actionLabel="刷新订单"
-                onAction={() => void load()}
-              />
+              orderQueryPending ? (
+                <EmptyState title="正在查询订单" description="筛选条件已生效，结果返回前不会先下没有订单的结论。" />
+              ) : (
+                <EmptyState
+                  title={hasActiveOrderFilter ? "未找到匹配订单" : "暂无订单记录"}
+                  description={
+                    hasActiveOrderFilter
+                      ? "当前订单号、状态、用户或时间条件下没有记录。"
+                      : "当前没有可展示的订单记录。"
+                  }
+                  actionLabel="刷新订单"
+                  onAction={() => void loadOrders()}
+                />
+              )
             ) : null}
           </div>
         </Panel>

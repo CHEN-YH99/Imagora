@@ -196,7 +196,7 @@ test("web core pages expose recoverable empty states and confirm destructive act
   assert.match(ordersPage, /继续支付/);
   assert.match(ordersPage, /checkoutUrl/);
   assert.match(ordersPage, /window\.location\.href/);
-  assert.match(ordersPage, /ORDER_NOT_PAYABLE|订单已关闭|订单已取消|订单已退款/);
+  assert.match(ordersPage, /ORDER_NOT_PAYABLE|订单已关闭|订单已取消|订单退款成功/);
   assert.match(ordersPage, /searchParams\.get\("paid"\)/);
   assert.match(ordersPage, /searchParams\.get\("canceled"\)/);
   assert.match(ordersPage, /支付完成回跳/);

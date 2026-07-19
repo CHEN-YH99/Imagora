@@ -38,6 +38,22 @@ import {
   type UserSession
 } from "../../lib/api";
 
+type ExceptionalOrderStatus = Exclude<Order["status"], "PAID">;
+type ExceptionalOrder = Order & { status: ExceptionalOrderStatus };
+
+const exceptionalOrderStatuses: ExceptionalOrderStatus[] = ["PENDING", "CLOSED", "CANCELED", "REFUNDED"];
+
+const exceptionalOrderDescriptions: Record<ExceptionalOrderStatus, string> = {
+  PENDING: "订单仍待支付，若已完成支付回跳但未到账，请先去订单页刷新状态。",
+  CLOSED: "订单已超时关闭，本次支付未完成，需要重新创建订单。",
+  CANCELED: "订单已取消，不会再自动发放积分。",
+  REFUNDED: "订单退款成功，请核对余额和订单状态。"
+};
+
+function isExceptionalOrder(order: Order): order is ExceptionalOrder {
+  return exceptionalOrderStatuses.includes(order.status as ExceptionalOrderStatus);
+}
+
 export default function AccountPage() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
@@ -274,9 +290,7 @@ export default function AccountPage() {
   const soonestExpiry = expiringSoonEntries
     .map((entry) => entry.expiresAt as string)
     .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
-  const exceptionalOrders = recentOrders.filter((order) =>
-    ["PENDING", "CLOSED", "CANCELED", "REFUNDED"].includes(order.status)
-  );
+  const exceptionalOrders = recentOrders.filter(isExceptionalOrder);
   const visibleRecentOrders = recentOrders.slice(0, 5);
   const paidOrders = recentOrders.filter((order) => order.status === "PAID");
 
@@ -634,13 +648,7 @@ export default function AccountPage() {
                       <StatusPill>{order.status}</StatusPill>
                     </div>
                     <p className="mt-3 text-sm text-white/62">
-                      {order.status === "PENDING"
-                        ? "订单仍待支付，若已完成支付回跳但未到账，请先去订单页刷新状态。"
-                        : order.status === "CLOSED"
-                          ? "订单已超时关闭，本次支付未完成，需要重新创建订单。"
-                          : order.status === "CANCELED"
-                            ? "订单已取消，不会再自动发放积分。"
-                            : "订单退款成功，请核对余额和订单状态。"}
+                      {exceptionalOrderDescriptions[order.status]}
                     </p>
                   </article>
                 ))}
