@@ -319,6 +319,10 @@ test("admin console exposes enterprise filters, detail drawers, and audit querie
   const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
   const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
 
+  assert.match(adminPage, /usePathname/);
+  assert.match(adminPage, /pathname !== "\/admin"/);
+  assert.match(adminPage, /Promise\.allSettled/);
+  assert.match(adminPage, /status === "fulfilled"/);
   assert.match(adminPage, /selectedDetail/);
   assert.match(adminPage, /openTaskDetail/);
   assert.match(adminPage, /openImageDetail/);

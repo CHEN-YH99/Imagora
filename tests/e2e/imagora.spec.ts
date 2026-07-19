@@ -17,6 +17,7 @@ type MockOptions = {
 };
 
 type MockState = {
+  adminDashboardRequests: number;
   downloadRequests: number;
   generationTaskPolls: number;
   historyTaskDetailPolls: number;
@@ -411,13 +412,22 @@ test("套餐、订单和支付沙箱链路可回归", async ({ page }) => {
 });
 
 test("管理后台关键操作覆盖详情、对账和安全规则", async ({ page }) => {
-  await setupApiMocks(page);
+  const state = await setupApiMocks(page);
 
   await page.goto("/admin");
   await expect(page.getByRole("heading", { name: "管理控制台" })).toBeVisible();
-  await expect(page.getByText("生成失败率")).toBeVisible();
+  await expect(page.getByText("生成失败率", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "最近异常", exact: true })).toBeVisible();
   await expect(page.getByText("Provider timeout while generating image.")).toBeVisible();
+
+  await expect.poll(() => state.adminDashboardRequests).toBeGreaterThan(0);
+  const initialDashboardRequests = state.adminDashboardRequests;
+  await page.getByRole("link", { name: "账户", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "账户中心" })).toBeVisible();
+  await page.getByRole("link", { name: "管理", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "管理控制台" })).toBeVisible();
+  await expect(page.getByText("生成失败率", { exact: true })).toBeVisible();
+  await expect.poll(() => state.adminDashboardRequests).toBeGreaterThan(initialDashboardRequests);
 
   await page.getByRole("button", { name: "订单对账" }).click();
   await page.getByRole("dialog").getByLabel("处理原因").fill("E2E 对账演练");
@@ -728,6 +738,7 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
 
 async function handleAdminRoute(route: Route, state: MockState, path: string, method: string): Promise<boolean> {
   if (method === "GET" && path === "/api/admin/dashboard") {
+    state.adminDashboardRequests += 1;
     await fulfillData(route, {
       metrics: {
         users: 2,
@@ -946,6 +957,7 @@ async function handleAdminRoute(route: Route, state: MockState, path: string, me
 
 function createMockState(): MockState {
   return {
+    adminDashboardRequests: 0,
     downloadRequests: 0,
     generationTaskPolls: 0,
     historyTaskDetailPolls: 0,

@@ -1,9 +1,17 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, BarChart3, Coins, Eye, EyeOff, Plus, RefreshCw, Save, X } from "lucide-react";
-import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill, ToastContainer } from "../../components/AppFrame";
+import {
+  AppFrame,
+  ConfirmDialog,
+  EmptyState,
+  InlineNotice,
+  Panel,
+  StatusPill,
+  ToastContainer
+} from "../../components/AppFrame";
 import { toast } from "sonner";
 import {
   apiFetch,
@@ -266,6 +274,7 @@ function formatMilliseconds(value: number | null | undefined): string {
 
 export default function AdminPage() {
   const router = useRouter();
+  const pathname = usePathname();
   const cachedUser = peekCurrentUser();
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [operationalMetrics, setOperationalMetrics] = useState<AdminOperationalMetrics | null>(null);
@@ -384,12 +393,13 @@ export default function AdminPage() {
   }, [selectedDetail]);
 
   useEffect(() => {
-    if (accessState !== "granted") {
+    if (accessState !== "granted" || pathname !== "/admin") {
       return;
     }
     void load();
   }, [
     accessState,
+    pathname,
     taskStatusFilter,
     safetyAppealStatusFilter,
     createdFrom,
@@ -547,18 +557,18 @@ export default function AdminPage() {
     try {
       setOrderQueryLoading(true);
       const [
-        dashboard,
-        operations,
-        userResult,
-        taskResult,
-        imageResult,
-        orderResult,
-        planResult,
-        ruleResult,
-        safetyEventResult,
-        safetyAppealResult,
-        logResult
-      ] = await Promise.all([
+        dashboardResult,
+        operationsResult,
+        usersResult,
+        tasksResult,
+        imagesResult,
+        ordersResult,
+        plansResult,
+        rulesResult,
+        safetyEventsResult,
+        safetyAppealsResult,
+        logsResult
+      ] = await Promise.allSettled([
         apiFetch<{ metrics: AdminMetrics }>("/api/admin/dashboard"),
         apiFetch<AdminOperationalMetrics>("/api/admin/metrics"),
         apiFetch<{ users: User[] }>(withQuery("/api/admin/users", { limit: 30 })),
@@ -604,38 +614,87 @@ export default function AdminPage() {
             targetId: filterValue(auditTargetIdFilter)
           })
         )
-      ]);
+      ] as const);
       if (pageLoadSeq !== pageLoadSeqRef.current) {
         return;
       }
-      setMetrics(dashboard.metrics);
-      setOperationalMetrics(operations);
-      setUsers(userResult.users);
-      setTasks(taskResult.tasks);
-      if (imageLoadSeq === imageLoadSeqRef.current) {
+
+      const failedSections: string[] = [];
+      function fulfilledValue<T>(result: PromiseSettledResult<T>, label: string): T | null {
+        if (result.status === "fulfilled") {
+          return result.value;
+        }
+        failedSections.push(label);
+        return null;
+      }
+
+      const dashboard = fulfilledValue(dashboardResult, "业务概览");
+      const operations = fulfilledValue(operationsResult, "运行指标");
+      const userResult = fulfilledValue(usersResult, "用户列表");
+      const taskResult = fulfilledValue(tasksResult, "任务列表");
+      const imageResult = fulfilledValue(imagesResult, "图片资产");
+      const orderResult = fulfilledValue(ordersResult, "订单列表");
+      const planResult = fulfilledValue(plansResult, "套餐配置");
+      const ruleResult = fulfilledValue(rulesResult, "安全规则");
+      const safetyEventResult = fulfilledValue(safetyEventsResult, "安全事件");
+      const safetyAppealResult = fulfilledValue(safetyAppealsResult, "申诉队列");
+      const logResult = fulfilledValue(logsResult, "审计日志");
+
+      if (dashboard) {
+        setMetrics(dashboard.metrics);
+      }
+      if (operations) {
+        setOperationalMetrics(operations);
+      }
+      if (userResult) {
+        setUsers(userResult.users);
+      }
+      if (taskResult) {
+        setTasks(taskResult.tasks);
+      }
+      if (imageResult && imageLoadSeq === imageLoadSeqRef.current) {
         setImages(imageResult.images);
       }
-      if (orderLoadSeq === orderLoadSeqRef.current) {
+      if (orderResult && orderLoadSeq === orderLoadSeqRef.current) {
         commitOrderResult(orderResult.orders, requestOrderQueryKey);
+      } else if (!orderResult && orderLoadSeq === orderLoadSeqRef.current) {
+        setSettledOrderQueryKey(requestOrderQueryKey);
+        setOrderQueryLoading(false);
       }
-      setPlans(planResult.plans);
-      setPlanEdits(
-        Object.fromEntries(
-          planResult.plans.map((plan) => [
-            plan.id,
-            {
-              priceCents: String(plan.priceCents),
-              credits: String(plan.credits),
-              sortOrder: String(plan.sortOrder)
-            }
-          ])
-        )
-      );
-      setRules(ruleResult.rules.slice(0, 12));
-      setSafetyEvents(safetyEventResult.events.slice(0, 12));
-      setSafetyAppeals(safetyAppealResult.appeals.slice(0, 12));
-      setLogs(logResult.logs.slice(0, 12));
-      if (!preserveNotice && refreshSeq === refreshSeqRef.current) {
+      if (planResult) {
+        setPlans(planResult.plans);
+        setPlanEdits(
+          Object.fromEntries(
+            planResult.plans.map((plan) => [
+              plan.id,
+              {
+                priceCents: String(plan.priceCents),
+                credits: String(plan.credits),
+                sortOrder: String(plan.sortOrder)
+              }
+            ])
+          )
+        );
+      }
+      if (ruleResult) {
+        setRules(ruleResult.rules.slice(0, 12));
+      }
+      if (safetyEventResult) {
+        setSafetyEvents(safetyEventResult.events.slice(0, 12));
+      }
+      if (safetyAppealResult) {
+        setSafetyAppeals(safetyAppealResult.appeals.slice(0, 12));
+      }
+      if (logResult) {
+        setLogs(logResult.logs.slice(0, 12));
+      }
+
+      if (failedSections.length > 0 && refreshSeq === refreshSeqRef.current) {
+        setNotice({
+          tone: "danger",
+          text: `部分后台数据加载失败：${failedSections.join("、")}。其他模块已正常显示，可稍后刷新重试。`
+        });
+      } else if (!preserveNotice && refreshSeq === refreshSeqRef.current) {
         setNotice(null);
       }
     } catch (error) {
@@ -1730,9 +1789,7 @@ export default function AdminPage() {
               <article
                 key={order.id}
                 className={`rounded-2xl border border-white/10 bg-black/20 p-4 transition-all duration-300 ${
-                  highlightedOrderId === order.id
-                    ? "ring-2 ring-mint/50 shadow-lg shadow-mint/20 bg-mint/5"
-                    : ""
+                  highlightedOrderId === order.id ? "ring-2 ring-mint/50 shadow-lg shadow-mint/20 bg-mint/5" : ""
                 }`}
               >
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1765,9 +1822,7 @@ export default function AdminPage() {
                 <EmptyState
                   title={hasActiveOrderFilter ? "未找到匹配订单" : "暂无订单记录"}
                   description={
-                    hasActiveOrderFilter
-                      ? "当前订单号、状态、用户或时间条件下没有记录。"
-                      : "当前没有可展示的订单记录。"
+                    hasActiveOrderFilter ? "当前订单号、状态、用户或时间条件下没有记录。" : "当前没有可展示的订单记录。"
                   }
                   actionLabel="刷新订单"
                   onAction={() => void loadOrders()}
