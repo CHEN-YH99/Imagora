@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { LogIn, RefreshCw, UserRound } from "lucide-react";
 import {
+  ApiRequestError,
   getCaptchaConfig,
   getLoginCaptcha,
   login,
@@ -49,6 +50,7 @@ function LoginForm() {
   const [captchaConfig, setCaptchaConfig] = useState<CaptchaConfig | null>(null);
   const [turnstileToken, setTurnstileToken] = useState("");
   const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+  const [loginRetryAvailable, setLoginRetryAvailable] = useState(false);
 
   const turnstileEnabled = captchaConfig?.turnstile.enabled ?? false;
 
@@ -79,6 +81,7 @@ function LoginForm() {
   }, []);
 
   async function refreshCaptcha() {
+    setLoginRetryAvailable(false);
     setCaptchaLoading(true);
     setCaptchaSelections([]);
     try {
@@ -97,6 +100,7 @@ function LoginForm() {
       turnstileEnabled,
       turnstileToken,
       captchaVerificationIds,
+      loginRetryAvailable,
       acceptLoginRules
     });
     if (validationMessage) {
@@ -114,16 +118,26 @@ function LoginForm() {
       );
       router.push(safeNextPath(searchParams.get("next")) ?? "/generate");
     } catch (error) {
-      // 后端在校验密码前会消费一次性验证材料；失败后前端必须重置对应验证态。
-      const baseMessage = error instanceof Error ? error.message : "登录失败，请检查账号信息后重试。";
-      setCaptchaVerificationIds([]);
-      setTurnstileToken("");
-      if (turnstileEnabled) {
-        setMessage(`${baseMessage}（人机验证已失效，请重新完成验证后再登录）`);
-        setTurnstileResetKey((key) => key + 1);
+      if (error instanceof ApiRequestError && error.code === "INVALID_CREDENTIALS") {
+        setCaptchaVerificationIds([]);
+        setTurnstileToken("");
+        setLoginRetryAvailable(true);
+        setMessage(error.message);
+      } else if (
+        error instanceof ApiRequestError &&
+        (error.code === "CAPTCHA_REQUIRED" || error.code === "CAPTCHA_INVALID")
+      ) {
+        setLoginRetryAvailable(false);
+        setCaptchaVerificationIds([]);
+        setTurnstileToken("");
+        setMessage(error.message);
+        if (turnstileEnabled) {
+          setTurnstileResetKey((key) => key + 1);
+        } else {
+          await refreshCaptcha();
+        }
       } else {
-        setMessage(`${baseMessage}（图片验证已失效，请重新完成验证后再登录）`);
-        await refreshCaptcha();
+        setMessage(error instanceof Error ? error.message : "登录失败，请检查账号信息后重试。");
       }
     } finally {
       setLoading(false);
@@ -162,6 +176,7 @@ function LoginForm() {
     setMessage("");
     try {
       const verification = await verifyLoginCaptcha(captcha.captchaId, captchaSelections);
+      setLoginRetryAvailable(false);
       const nextVerificationIds = [...captchaVerificationIds, verification.verificationId].slice(
         0,
         requiredCaptchaRounds
@@ -373,8 +388,10 @@ function LoginForm() {
               !email.trim() ||
               !password ||
               (turnstileEnabled
-                ? !turnstileToken
-                : captchaLoading || !acceptLoginRules || captchaVerificationIds.length < requiredCaptchaRounds)
+                ? !turnstileToken && !loginRetryAvailable
+                : captchaLoading ||
+                  !acceptLoginRules ||
+                  (!loginRetryAvailable && captchaVerificationIds.length < requiredCaptchaRounds))
             }
           >
             <LogIn className="size-4" aria-hidden="true" />
@@ -399,6 +416,7 @@ function validateLoginForm(
     turnstileEnabled: boolean;
     turnstileToken: string;
     captchaVerificationIds: string[];
+    loginRetryAvailable: boolean;
     acceptLoginRules: boolean;
   }
 ): string | null {
@@ -416,7 +434,7 @@ function validateLoginForm(
     return "密码长度不能超过 128 位。";
   }
   if (options.turnstileEnabled) {
-    if (!options.turnstileToken) {
+    if (!options.turnstileToken && !options.loginRetryAvailable) {
       return "请先完成人机验证。";
     }
     return null;
@@ -424,7 +442,7 @@ function validateLoginForm(
   if (!options.acceptLoginRules) {
     return "请先阅读并勾选登录安全准则。";
   }
-  if (options.captchaVerificationIds.length < requiredCaptchaRounds) {
+  if (!options.loginRetryAvailable && options.captchaVerificationIds.length < requiredCaptchaRounds) {
     return `请先完成 ${requiredCaptchaRounds} 次图片验证。`;
   }
   return null;

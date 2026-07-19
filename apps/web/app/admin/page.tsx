@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, BarChart3, Coins, Eye, EyeOff, Plus, RefreshCw, Save, X } from "lucide-react";
-import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
+import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill, showToast, ToastContainer } from "../../components/AppFrame";
 import {
   apiFetch,
   formatAuditAction,
@@ -833,6 +833,7 @@ export default function AdminPage() {
               ? { ...current, data: refreshedDetail ?? { ...current.data, order: result.order } }
               : current
           );
+          showToast("success", `订单 ${confirmState.orderNo} 已退款成功，用户余额回收后为 ${formatCredits(result.balanceAfter)}。`);
           setNotice({
             tone: "success",
             text: `订单 ${confirmState.orderNo} 已退款，用户余额回收后为 ${formatCredits(result.balanceAfter)}。`
@@ -844,7 +845,9 @@ export default function AdminPage() {
       }
       resetConfirm();
     } catch (error) {
-      setNotice({ tone: "danger", text: error instanceof Error ? error.message : "管理员操作失败，请稍后重试。" });
+      const errorMessage = error instanceof Error ? error.message : "管理员操作失败,请稍后重试。";
+      showToast("danger", errorMessage);
+      setNotice({ tone: "danger", text: errorMessage });
     } finally {
       setConfirmLoading(false);
       setMaintenanceRunning(false);
@@ -2157,6 +2160,8 @@ export default function AdminPage() {
           <p className="rounded-2xl border border-white/12 bg-ink px-6 py-4 text-sm text-white/70">正在加载详情...</p>
         </div>
       ) : null}
+
+      <ToastContainer />
     </AppFrame>
   );
 }

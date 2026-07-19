@@ -865,6 +865,7 @@ const apiErrorCodeMap: Record<string, string> = {
   CONFLICT: "账号信息无法完成注册，请检查邮箱或直接登录。",
   CAPTCHA_INVALID: "图片验证已失效或输入错误，请刷新后重试。",
   CAPTCHA_REQUIRED: "请先完成图片验证。",
+  INVALID_CREDENTIALS: "邮箱或密码不正确。",
   CONTENT_BLOCKED: "内容未通过安全规则，请调整提示词或参考图后重试。",
   CONTENT_REVIEW_REQUIRED: "内容已提交人工复核，暂时无法生成。如认为是误判，可在下方发起申诉。",
   FEATURE_DISABLED: "该功能当前暂不可用，请稍后再试。",

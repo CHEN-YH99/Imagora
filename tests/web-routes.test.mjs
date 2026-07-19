@@ -49,6 +49,10 @@ test("web auth pages validate inputs and registration does not ask for nickname"
   assert.match(loginPage, /已选择/);
   assert.match(loginPage, /aspect-\[18\/13\]/);
   assert.match(loginPage, /acceptLoginRules/);
+  assert.match(loginPage, /loginRetryAvailable/);
+  assert.match(loginPage, /error instanceof ApiRequestError && error\.code === "INVALID_CREDENTIALS"/);
+  assert.match(loginPage, /error\.code === "CAPTCHA_REQUIRED" \|\| error\.code === "CAPTCHA_INVALID"/);
+  assert.doesNotMatch(loginPage, /\$\{baseMessage\}（图片验证已失效，请重新完成验证后再登录）/);
   assert.match(loginPage, /captchaPanelOpen/);
   assert.match(loginPage, /点击文字进行图片验证/);
   assert.match(loginPage, /我已阅读并同意登录安全准则/);
@@ -72,6 +76,7 @@ test("web auth pages validate inputs and registration does not ask for nickname"
   assert.match(apiClient, /AbortController/);
   assert.match(apiClient, /verifyLoginCaptcha/);
   assert.match(apiClient, /captchaVerificationIds/);
+  assert.match(apiClient, /INVALID_CREDENTIALS: "邮箱或密码不正确。"/);
   assert.match(apiClient, /captchaSelections/);
   assert.match(apiClient, /请求超时，请检查网络后重试。/);
   assert.match(apiClient, /INVALID_RESET_TOKEN/);

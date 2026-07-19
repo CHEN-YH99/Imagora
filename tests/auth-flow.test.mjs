@@ -217,6 +217,7 @@ test("login attempt token lets a wrong password retry without redoing captcha", 
     payload: { email: TEST_EMAIL, password: "WrongPass999zzz", captchaVerificationIds: ids }
   });
   assert.equal(wrongRes.statusCode, 401, "wrong password should return 401");
+  assert.equal(body(wrongRes).error.code, "INVALID_CREDENTIALS");
   assert.ok(jar.has("imagora_login_attempt"), "a login attempt token should be issued");
   assert.ok(
     setCookieLines(wrongRes).some(

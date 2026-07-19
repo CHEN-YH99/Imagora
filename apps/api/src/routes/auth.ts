@@ -194,7 +194,7 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
       if (!user || !verifyPassword(input.password, user.passwordHash)) {
         return {
           ok: false as const,
-          error: new AppError("UNAUTHORIZED", "Invalid email or password", 401)
+          error: new AppError("INVALID_CREDENTIALS", "Invalid email or password", 401)
         };
       }
       if (user.status !== "ACTIVE") {

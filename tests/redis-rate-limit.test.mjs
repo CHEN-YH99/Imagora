@@ -133,7 +133,7 @@ test("redis rate limiter shares counters across api instances", async () => {
     const secondAttempt = await invalidLogin(secondBaseUrl);
 
     assert.equal(firstAttempt.status, 401);
-    assert.equal(firstAttempt.payload.error.code, "UNAUTHORIZED");
+    assert.equal(firstAttempt.payload.error.code, "INVALID_CREDENTIALS");
     assert.equal(secondAttempt.status, 429);
     assert.equal(secondAttempt.payload.error.code, "RATE_LIMITED");
   } finally {
