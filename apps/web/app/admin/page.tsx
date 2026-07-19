@@ -7,6 +7,7 @@ import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill, T
 import { toast } from "sonner";
 import {
   apiFetch,
+  ApiRequestError,
   formatAuditAction,
   formatCredits,
   formatMetricLabel,
@@ -155,6 +156,8 @@ const emptyPlanForm: PlanFormState = {
   status: "ACTIVE",
   sortOrder: "40"
 };
+
+const orderStatusOptions: Order["status"][] = ["PENDING", "PAID", "CLOSED", "CANCELED", "REFUNDED"];
 
 function withQuery(path: string, params: Record<string, string | number | undefined>): string {
   const query = new URLSearchParams();
@@ -1496,11 +1499,11 @@ export default function AdminPage() {
                   onChange={(event) => setOrderStatusFilter(event.target.value as "ALL" | Order["status"])}
                 >
                   <option value="ALL">全部状态</option>
-                  <option value="PENDING">待处理</option>
-                  <option value="PAID">已支付</option>
-                  <option value="CLOSED">已关闭</option>
-                  <option value="CANCELED">已取消</option>
-                  <option value="REFUNDED">已退款</option>
+                  {orderStatusOptions.map((status) => (
+                    <option key={status} value={status}>
+                      {formatStatusLabel(status)}
+                    </option>
+                  ))}
                 </select>
               </Field>
             </div>

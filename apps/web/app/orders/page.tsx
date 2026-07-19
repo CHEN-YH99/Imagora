@@ -156,7 +156,7 @@ function OrdersView() {
                 ) : null}
                 {order.status === "REFUNDED" ? (
                   <p className="mt-2 text-sm text-ember">
-                    订单已退款，请核对账户余额和订单状态，如需继续购买请重新下单。
+                    订单退款成功，请核对账户余额和订单状态，如需继续购买请重新下单。
                   </p>
                 ) : null}
               </div>

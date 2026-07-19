@@ -733,7 +733,7 @@ const labelMap: Record<string, string> = {
   PRIVATE: "私有",
   PUBLIC: "公开",
   REFUND: "退回",
-  REFUNDED: "已退款",
+  REFUNDED: "退款成功",
   REJECTED: "已驳回",
   RESOLVED: "已解决",
   REVIEW: "复核",

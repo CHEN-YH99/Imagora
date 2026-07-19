@@ -640,7 +640,7 @@ export default function AccountPage() {
                           ? "订单已超时关闭，本次支付未完成，需要重新创建订单。"
                           : order.status === "CANCELED"
                             ? "订单已取消，不会再自动发放积分。"
-                            : "订单已退款，请核对余额和退款记录。"}
+                            : "订单退款成功，请核对余额和订单状态。"}
                     </p>
                   </article>
                 ))}
@@ -648,7 +648,7 @@ export default function AccountPage() {
             ) : (
               <EmptyState
                 title="近期没有异常订单"
-                description="待支付、已关闭、已取消和已退款订单会在这里集中提示，省得你翻半天。"
+                description="待支付、已关闭、已取消和退款成功订单会在这里集中提示，省得你翻半天。"
                 actionLabel="查看全部订单"
                 actionHref="/orders"
               />
