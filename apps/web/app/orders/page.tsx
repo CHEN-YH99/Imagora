@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { apiFetch, formatMoney, formatPaymentProvider, type Order } from "../../lib/api";
+
+const ORDER_SYNC_INTERVAL_MS = 5000;
 
 export default function OrdersPage() {
   return (
@@ -30,6 +32,24 @@ function OrdersView() {
   const [returnNotice, setReturnNotice] = useState<{ tone: "success" | "danger" | "info"; text: string } | null>(null);
   const [payingOrderId, setPayingOrderId] = useState<string | null>(null);
 
+  const loadOrders = useCallback(async ({ background = false }: { background?: boolean } = {}) => {
+    if (!background) {
+      setMessage("");
+    }
+    try {
+      const result = await apiFetch<{ orders: Order[] }>("/api/orders");
+      setOrders(result.orders);
+    } catch (error) {
+      if (!background) {
+        setMessage(error instanceof Error ? error.message : "订单加载失败，请稍后重试。");
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadOrders();
+  }, [loadOrders]);
+
   useEffect(() => {
     const paid = searchParams.get("paid");
     const canceled = searchParams.get("canceled");
@@ -46,8 +66,26 @@ function OrdersView() {
       });
       clearPaymentReturnParams();
     }
-    void loadOrders();
-  }, []);
+  }, [router, searchParams]);
+
+  useEffect(() => {
+    function syncVisibleOrders() {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      void loadOrders({ background: true });
+    }
+
+    const intervalId = window.setInterval(syncVisibleOrders, ORDER_SYNC_INTERVAL_MS);
+    window.addEventListener("focus", syncVisibleOrders);
+    document.addEventListener("visibilitychange", syncVisibleOrders);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", syncVisibleOrders);
+      document.removeEventListener("visibilitychange", syncVisibleOrders);
+    };
+  }, [loadOrders]);
 
   function clearPaymentReturnParams() {
     if (typeof window === "undefined") {
@@ -57,13 +95,6 @@ function OrdersView() {
     url.searchParams.delete("paid");
     url.searchParams.delete("canceled");
     router.replace(`${url.pathname}${url.search}`);
-  }
-
-  async function loadOrders() {
-    setMessage("");
-    apiFetch<{ orders: Order[] }>("/api/orders")
-      .then((result) => setOrders(result.orders))
-      .catch((error) => setMessage(error instanceof Error ? error.message : "订单加载失败，请稍后重试。"));
   }
 
   async function continuePay(order: Order) {

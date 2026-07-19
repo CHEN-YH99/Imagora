@@ -314,8 +314,10 @@ export default function AdminPage() {
   const [settledOrderQueryKey, setSettledOrderQueryKey] = useState<string | null>(null);
   const [orderQueryLoading, setOrderQueryLoading] = useState(false);
   const pageLoadSeqRef = useRef(0);
+  const imageLoadSeqRef = useRef(0);
   const orderLoadSeqRef = useRef(0);
   const refreshSeqRef = useRef(0);
+  const imageFilterEffectReadyRef = useRef(false);
   const orderFilterEffectReadyRef = useRef(false);
 
   useEffect(() => {
@@ -389,7 +391,6 @@ export default function AdminPage() {
   }, [
     accessState,
     taskStatusFilter,
-    imageVisibilityFilter,
     safetyAppealStatusFilter,
     createdFrom,
     createdTo,
@@ -399,6 +400,17 @@ export default function AdminPage() {
     auditTargetTypeFilter,
     auditTargetIdFilter
   ]);
+
+  useEffect(() => {
+    if (accessState !== "granted") {
+      return;
+    }
+    if (!imageFilterEffectReadyRef.current) {
+      imageFilterEffectReadyRef.current = true;
+      return;
+    }
+    void loadImages();
+  }, [accessState, imageVisibilityFilter]);
 
   useEffect(() => {
     if (accessState !== "granted") {
@@ -518,6 +530,7 @@ export default function AdminPage() {
 
   async function load(preserveNotice = false) {
     const pageLoadSeq = ++pageLoadSeqRef.current;
+    const imageLoadSeq = ++imageLoadSeqRef.current;
     const orderLoadSeq = ++orderLoadSeqRef.current;
     const refreshSeq = ++refreshSeqRef.current;
     const createdFromFilter = toApiDateTime(createdFrom);
@@ -599,7 +612,9 @@ export default function AdminPage() {
       setOperationalMetrics(operations);
       setUsers(userResult.users);
       setTasks(taskResult.tasks);
-      setImages(imageResult.images);
+      if (imageLoadSeq === imageLoadSeqRef.current) {
+        setImages(imageResult.images);
+      }
       if (orderLoadSeq === orderLoadSeqRef.current) {
         commitOrderResult(orderResult.orders, requestOrderQueryKey);
       }
@@ -630,6 +645,36 @@ export default function AdminPage() {
       }
       if (pageLoadSeq === pageLoadSeqRef.current && refreshSeq === refreshSeqRef.current) {
         setNotice({ tone: "danger", text: error instanceof Error ? error.message : "后台数据加载失败，请稍后重试。" });
+      }
+    }
+  }
+
+  async function loadImages(preserveNotice = false) {
+    const imageLoadSeq = ++imageLoadSeqRef.current;
+    const refreshSeq = ++refreshSeqRef.current;
+    const createdFromFilter = toApiDateTime(createdFrom);
+    const createdToFilter = toApiDateTime(createdTo);
+    const selectedUserId = filterValue(userIdFilter);
+    try {
+      const imageResult = await apiFetch<{ images: GeneratedImage[] }>(
+        withQuery("/api/admin/images", {
+          limit: 24,
+          visibility: imageVisibilityFilter === "ALL" ? undefined : imageVisibilityFilter,
+          userId: selectedUserId,
+          createdFrom: createdFromFilter,
+          createdTo: createdToFilter
+        })
+      );
+      if (imageLoadSeq !== imageLoadSeqRef.current) {
+        return;
+      }
+      setImages(imageResult.images);
+      if (!preserveNotice && refreshSeq === refreshSeqRef.current) {
+        setNotice(null);
+      }
+    } catch (error) {
+      if (imageLoadSeq === imageLoadSeqRef.current && refreshSeq === refreshSeqRef.current) {
+        setNotice({ tone: "danger", text: error instanceof Error ? error.message : "图片列表加载失败，请稍后重试。" });
       }
     }
   }
@@ -914,7 +959,7 @@ export default function AdminPage() {
             method: "PATCH",
             body: { visibility: confirmState.nextVisibility, reason }
           });
-          await load(true);
+          await loadImages(true);
           setNotice({
             tone: "success",
             text: `图片 ${confirmState.imageLabel} 已${confirmState.nextVisibility === "HIDDEN" ? "隐藏" : "恢复显示"}。`
@@ -1635,7 +1680,7 @@ export default function AdminPage() {
                   title="暂无符合条件的图片资产"
                   description="当前筛选条件下没有可见图片，调整筛选后再看。"
                   actionLabel="刷新图片"
-                  onAction={() => void load()}
+                  onAction={() => void loadImages()}
                 />
               </div>
             ) : null}

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -37,6 +37,8 @@ import {
   type User,
   type UserSession
 } from "../../lib/api";
+
+const ACCOUNT_SYNC_INTERVAL_MS = 5000;
 
 type ExceptionalOrderStatus = Exclude<Order["status"], "PAID">;
 type ExceptionalOrder = Order & { status: ExceptionalOrderStatus };
@@ -88,12 +90,7 @@ export default function AccountPage() {
   const [deleteConfirming, setDeleteConfirming] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
 
-  useEffect(() => {
-    void loadAll();
-    void loadSessions();
-  }, []);
-
-  async function loadSessions() {
+  const loadSessions = useCallback(async () => {
     setSessionsLoading(true);
     try {
       const result = await getSessions();
@@ -104,7 +101,55 @@ export default function AccountPage() {
     } finally {
       setSessionsLoading(false);
     }
-  }
+  }, []);
+
+  const loadAll = useCallback(async ({ background = false }: { background?: boolean } = {}) => {
+    if (!background) {
+      setMessage("");
+    }
+    try {
+      const [userResult, accountResult, ledgerResult, ordersResult] = await Promise.all([
+        apiFetch<{ user: User }>("/api/users/me"),
+        apiFetch<{ account: CreditAccount }>("/api/users/me/credits"),
+        apiFetch<{ entries: CreditLedgerEntry[] }>("/api/users/me/credit-ledger?limit=50"),
+        apiFetch<{ orders: Order[] }>("/api/orders?limit=12")
+      ]);
+      setUser(userResult.user);
+      setAccount(accountResult.account);
+      setEntries(ledgerResult.entries);
+      setRecentOrders(ordersResult.orders);
+    } catch (error) {
+      if (!background) {
+        setMessageTone("danger");
+        setMessage(error instanceof Error ? error.message : "账户信息加载失败，请稍后重试。");
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAll();
+    void loadSessions();
+  }, [loadAll, loadSessions]);
+
+  useEffect(() => {
+    function syncVisibleAccount() {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      void loadAll({ background: true });
+      void loadSessions();
+    }
+
+    const intervalId = window.setInterval(syncVisibleAccount, ACCOUNT_SYNC_INTERVAL_MS);
+    window.addEventListener("focus", syncVisibleAccount);
+    document.addEventListener("visibilitychange", syncVisibleAccount);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", syncVisibleAccount);
+      document.removeEventListener("visibilitychange", syncVisibleAccount);
+    };
+  }, [loadAll, loadSessions]);
 
   async function submitChangePassword() {
     const validationMessage = validateNewPassword(currentPasswordForPwd, newPassword, confirmNewPassword);
@@ -198,25 +243,6 @@ export default function AccountPage() {
       setMessageTone("danger");
       setMessage(error instanceof Error ? error.message : "注销失败，请稍后重试。");
       setDeletingAccount(false);
-    }
-  }
-
-  async function loadAll() {
-    setMessage("");
-    try {
-      const [userResult, accountResult, ledgerResult, ordersResult] = await Promise.all([
-        apiFetch<{ user: User }>("/api/users/me"),
-        apiFetch<{ account: CreditAccount }>("/api/users/me/credits"),
-        apiFetch<{ entries: CreditLedgerEntry[] }>("/api/users/me/credit-ledger?limit=50"),
-        apiFetch<{ orders: Order[] }>("/api/orders?limit=12")
-      ]);
-      setUser(userResult.user);
-      setAccount(accountResult.account);
-      setEntries(ledgerResult.entries);
-      setRecentOrders(ordersResult.orders);
-    } catch (error) {
-      setMessageTone("danger");
-      setMessage(error instanceof Error ? error.message : "账户信息加载失败，请稍后重试。");
     }
   }
 
