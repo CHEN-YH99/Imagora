@@ -21,6 +21,9 @@ test("maintenance map and quick verification cover modular api routes", async ()
   assert.match(packageJson.scripts["verify:quick"], /tests\\?\/generation-state\.test\.mjs/);
   assert.match(packageJson.scripts["verify:quick"], /tests\\?\/api-route-modules\.test\.mjs/);
   assert.match(ciWorkflow, /npm run docs:maintenance:check/);
+  assert.match(ciWorkflow, /services:\s+postgres:/);
+  assert.match(ciWorkflow, /npm --workspace packages\/database run prisma:migrate-deploy/);
+  assert.match(ciWorkflow, /PRISMA_STORE_TEST_DATABASE_URL:/);
 
   assert.match(maintenanceScript, /process\.argv\.includes\("--check"\)/);
   assert.match(maintenanceScript, /collectApiRouteFiles/);

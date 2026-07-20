@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Prisma, PrismaClient } from "../generated/client/index.js";
 import { generationMetadataFromTask } from "@imagora/shared";
 import type { CreditLedgerEntry, GenerationMetadata, Plan, SafetyAppeal, StoreData, User } from "@imagora/shared";
+import { persistStoreDiff } from "./prisma-store-persistence.js";
 
 const workspaceRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const defaultPath = resolve(workspaceRoot, "data", "imagora-store.json");
@@ -152,6 +153,10 @@ export class PrismaStore implements Store {
 
   async read(): Promise<StoreData> {
     await this.ensureSeeded();
+    return this.readFromClient(this.prisma);
+  }
+
+  private async readFromClient(client: PrismaClient | Prisma.TransactionClient): Promise<StoreData> {
     const [
       users,
       sessions,
@@ -174,26 +179,26 @@ export class PrismaStore implements Store {
       operationalIncidents,
       alertNotifications
     ] = await Promise.all([
-      this.prisma.user.findMany(),
-      this.prisma.session.findMany(),
-      this.prisma.passwordResetToken.findMany(),
-      this.prisma.emailVerificationToken.findMany(),
-      this.prisma.userCreditAccount.findMany(),
-      this.prisma.creditLedgerEntry.findMany(),
-      this.prisma.generationTask.findMany(),
-      this.prisma.referenceImage.findMany(),
-      this.prisma.generatedImage.findMany(),
-      this.prisma.imageFavorite.findMany(),
-      this.prisma.imageProject.findMany(),
-      this.prisma.plan.findMany(),
-      this.prisma.order.findMany(),
-      this.prisma.paymentEvent.findMany(),
-      this.prisma.safetyEvent.findMany(),
-      this.prisma.safetyRule.findMany(),
-      this.prisma.safetyAppeal.findMany(),
-      this.prisma.adminAuditLog.findMany(),
-      this.prisma.operationalIncident.findMany(),
-      this.prisma.alertNotification.findMany()
+      client.user.findMany(),
+      client.session.findMany(),
+      client.passwordResetToken.findMany(),
+      client.emailVerificationToken.findMany(),
+      client.userCreditAccount.findMany(),
+      client.creditLedgerEntry.findMany(),
+      client.generationTask.findMany(),
+      client.referenceImage.findMany(),
+      client.generatedImage.findMany(),
+      client.imageFavorite.findMany(),
+      client.imageProject.findMany(),
+      client.plan.findMany(),
+      client.order.findMany(),
+      client.paymentEvent.findMany(),
+      client.safetyEvent.findMany(),
+      client.safetyRule.findMany(),
+      client.safetyAppeal.findMany(),
+      client.adminAuditLog.findMany(),
+      client.operationalIncident.findMany(),
+      client.alertNotification.findMany()
     ]);
 
     const generationTaskViews: StoreData["generationTasks"] = generationTasks.map((task) => ({
@@ -446,345 +451,14 @@ export class PrismaStore implements Store {
   }
 
   async write(data: StoreData): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
-      await tx.alertNotification.deleteMany();
-      await tx.operationalIncident.deleteMany();
-      await tx.adminAuditLog.deleteMany();
-      await tx.safetyAppeal.deleteMany();
-      await tx.safetyRule.deleteMany();
-      await tx.safetyEvent.deleteMany();
-      await tx.paymentEvent.deleteMany();
-      await tx.order.deleteMany();
-      await tx.imageFavorite.deleteMany();
-      await tx.generatedImage.deleteMany();
-      await tx.imageProject.deleteMany();
-      await tx.generationTask.deleteMany();
-      await tx.referenceImage.deleteMany();
-      await tx.creditLedgerEntry.deleteMany();
-      await tx.userCreditAccount.deleteMany();
-      await tx.passwordResetToken.deleteMany();
-      await tx.emailVerificationToken.deleteMany();
-      await tx.session.deleteMany();
-      await tx.plan.deleteMany();
-      await tx.user.deleteMany();
-
-      if (data.users.length) {
-        await tx.user.createMany({
-          data: data.users.map((user) => ({
-            id: user.id,
-            email: user.email,
-            passwordHash: user.passwordHash,
-            nickname: user.nickname,
-            avatarUrl: user.avatarUrl,
-            role: user.role,
-            status: user.status,
-            emailVerifiedAt: user.emailVerifiedAt ? toDate(user.emailVerifiedAt) : null,
-            createdAt: toDate(user.createdAt),
-            updatedAt: toDate(user.updatedAt),
-            lastLoginAt: user.lastLoginAt ? toDate(user.lastLoginAt) : null
-          }))
-        });
-      }
-      if (data.plans.length) {
-        await tx.plan.createMany({
-          data: data.plans.map((plan) => ({
-            id: plan.id,
-            name: plan.name,
-            description: plan.description,
-            priceCents: plan.priceCents,
-            currency: plan.currency,
-            credits: plan.credits,
-            validDays: plan.validDays,
-            status: plan.status,
-            sortOrder: plan.sortOrder,
-            createdAt: toDate(plan.createdAt),
-            updatedAt: toDate(plan.updatedAt)
-          }))
-        });
-      }
-      if (data.sessions.length) {
-        await tx.session.createMany({
-          data: data.sessions.map((session) => ({
-            token: session.token,
-            userId: session.userId,
-            createdAt: toDate(session.createdAt),
-            expiresAt: toDate(session.expiresAt)
-          }))
-        });
-      }
-      if (data.passwordResetTokens.length) {
-        await tx.passwordResetToken.createMany({
-          data: data.passwordResetTokens.map((token) => ({
-            id: token.id,
-            userId: token.userId,
-            tokenHash: token.tokenHash,
-            expiresAt: toDate(token.expiresAt),
-            usedAt: token.usedAt ? toDate(token.usedAt) : null,
-            createdAt: toDate(token.createdAt)
-          }))
-        });
-      }
-      if (data.emailVerificationTokens.length) {
-        await tx.emailVerificationToken.createMany({
-          data: data.emailVerificationTokens.map((token) => ({
-            id: token.id,
-            userId: token.userId,
-            tokenHash: token.tokenHash,
-            expiresAt: toDate(token.expiresAt),
-            usedAt: token.usedAt ? toDate(token.usedAt) : null,
-            createdAt: toDate(token.createdAt)
-          }))
-        });
-      }
-      if (data.creditAccounts.length) {
-        await tx.userCreditAccount.createMany({
-          data: data.creditAccounts.map((account) => ({
-            userId: account.userId,
-            balance: account.balance,
-            totalEarned: account.totalEarned,
-            totalSpent: account.totalSpent,
-            updatedAt: toDate(account.updatedAt)
-          }))
-        });
-      }
-      if (data.creditLedgerEntries.length) {
-        await tx.creditLedgerEntry.createMany({
-          data: data.creditLedgerEntries.map((entry) => ({
-            id: entry.id,
-            userId: entry.userId,
-            type: entry.type,
-            amount: entry.amount,
-            balanceAfter: entry.balanceAfter,
-            sourceType: entry.sourceType,
-            sourceId: entry.sourceId,
-            idempotencyKey: entry.idempotencyKey,
-            remark: entry.remark,
-            createdAt: toDate(entry.createdAt),
-            expiresAt: entry.expiresAt ? toDate(entry.expiresAt) : null
-          }))
-        });
-      }
-      if (data.referenceImages.length) {
-        await tx.referenceImage.createMany({
-          data: data.referenceImages.map((image) => ({
-            id: image.id,
-            userId: image.userId,
-            storageKey: image.storageKey,
-            publicUrl: image.publicUrl,
-            originalFileName: image.originalFileName,
-            mimeType: image.mimeType,
-            fileSize: image.fileSize,
-            width: image.width,
-            height: image.height,
-            contentHash: image.contentHash,
-            safetyStatus: image.safetyStatus,
-            createdAt: toDate(image.createdAt),
-            expiresAt: toDate(image.expiresAt),
-            deletedAt: image.deletedAt ? toDate(image.deletedAt) : null
-          }))
-        });
-      }
-      if (data.generationTasks.length) {
-        await tx.generationTask.createMany({
-          data: data.generationTasks.map((task) => ({
-            id: task.id,
-            userId: task.userId,
-            clientRequestId: task.clientRequestId,
-            referenceImageId: task.referenceImageId,
-            prompt: task.prompt,
-            negativePrompt: task.negativePrompt,
-            style: task.style,
-            aspectRatio: task.aspectRatio,
-            width: task.width,
-            height: task.height,
-            quantity: task.quantity,
-            quality: task.quality,
-            modelProvider: task.modelProvider,
-            modelName: task.modelName,
-            status: task.status,
-            creditCost: task.creditCost,
-            providerCostCents: task.providerCostCents,
-            failureCode: task.failureCode,
-            failureMessage: task.failureMessage,
-            startedAt: task.startedAt ? toDate(task.startedAt) : null,
-            completedAt: task.completedAt ? toDate(task.completedAt) : null,
-            createdAt: toDate(task.createdAt),
-            updatedAt: toDate(task.updatedAt)
-          }))
-        });
-      }
-      if (data.imageProjects.length) {
-        await tx.imageProject.createMany({
-          data: data.imageProjects.map((project) => ({
-            id: project.id,
-            userId: project.userId,
-            name: project.name,
-            description: project.description,
-            coverImageId: project.coverImageId,
-            createdAt: toDate(project.createdAt),
-            updatedAt: toDate(project.updatedAt),
-            archivedAt: project.archivedAt ? toDate(project.archivedAt) : null
-          }))
-        });
-      }
-      if (data.generatedImages.length) {
-        await tx.generatedImage.createMany({
-          data: data.generatedImages.map((image) => ({
-            id: image.id,
-            taskId: image.taskId,
-            userId: image.userId,
-            projectId: image.projectId,
-            storageKey: image.storageKey,
-            thumbnailKey: image.thumbnailKey,
-            thumbnailUrl: image.thumbnailUrl || null,
-            publicUrl: image.publicUrl || null,
-            width: image.width,
-            height: image.height,
-            fileSize: image.fileSize,
-            mimeType: image.mimeType,
-            safetyStatus: image.safetyStatus,
-            visibility: image.visibility,
-            generationMetadata: generationMetadataToJson(image.generationMetadata),
-            deletedAt: image.deletedAt ? toDate(image.deletedAt) : null,
-            createdAt: toDate(image.createdAt)
-          }))
-        });
-      }
-      if (data.imageFavorites.length) {
-        await tx.imageFavorite.createMany({
-          data: data.imageFavorites.map((favorite) => ({
-            userId: favorite.userId,
-            imageId: favorite.imageId,
-            createdAt: toDate(favorite.createdAt)
-          }))
-        });
-      }
-      if (data.orders.length) {
-        await tx.order.createMany({
-          data: data.orders.map((order) => ({
-            id: order.id,
-            userId: order.userId,
-            planId: order.planId,
-            orderNo: order.orderNo,
-            amountCents: order.amountCents,
-            currency: order.currency,
-            paymentProvider: order.paymentProvider,
-            paymentIntentId: order.paymentIntentId,
-            status: order.status,
-            paidAt: order.paidAt ? toDate(order.paidAt) : null,
-            createdAt: toDate(order.createdAt),
-            updatedAt: toDate(order.updatedAt)
-          }))
-        });
-      }
-      if (data.paymentEvents.length) {
-        await tx.paymentEvent.createMany({
-          data: data.paymentEvents.map((event) => ({
-            id: event.id,
-            provider: event.provider,
-            providerEventId: event.providerEventId,
-            orderId: event.orderId,
-            eventType: event.eventType,
-            payload: event.payload as Prisma.InputJsonValue,
-            processedAt: toDate(event.processedAt),
-            createdAt: toDate(event.createdAt)
-          }))
-        });
-      }
-      if (data.safetyEvents.length) {
-        await tx.safetyEvent.createMany({
-          data: data.safetyEvents.map((event) => ({
-            id: event.id,
-            userId: event.userId,
-            targetType: event.targetType,
-            targetId: event.targetId,
-            status: event.status,
-            reasonCode: event.reasonCode,
-            reasonMessage: event.reasonMessage,
-            provider: event.provider,
-            createdAt: toDate(event.createdAt)
-          }))
-        });
-      }
-      if (data.safetyRules.length) {
-        await tx.safetyRule.createMany({
-          data: data.safetyRules.map((rule) => ({
-            id: rule.id,
-            term: rule.term,
-            action: rule.action,
-            status: rule.status,
-            createdAt: toDate(rule.createdAt),
-            updatedAt: toDate(rule.updatedAt)
-          }))
-        });
-      }
-      if (data.safetyAppeals.length) {
-        await tx.safetyAppeal.createMany({
-          data: data.safetyAppeals.map((appeal) => ({
-            id: appeal.id,
-            userId: appeal.userId,
-            safetyEventId: appeal.safetyEventId,
-            reason: appeal.reason,
-            status: appeal.status,
-            adminNote: appeal.adminNote ?? null,
-            createdAt: toDate(appeal.createdAt),
-            resolvedAt: appeal.resolvedAt ? toDate(appeal.resolvedAt) : null
-          }))
-        });
-      }
-      if (data.adminAuditLogs.length) {
-        await tx.adminAuditLog.createMany({
-          data: data.adminAuditLogs.map((log) => ({
-            id: log.id,
-            adminUserId: log.adminUserId,
-            action: log.action,
-            targetType: log.targetType,
-            targetId: log.targetId,
-            reason: log.reason,
-            before: log.before === null ? Prisma.JsonNull : (log.before as Prisma.InputJsonValue),
-            after: log.after === null ? Prisma.JsonNull : (log.after as Prisma.InputJsonValue),
-            ipAddress: log.ipAddress,
-            userAgent: log.userAgent,
-            createdAt: toDate(log.createdAt)
-          }))
-        });
-      }
-      if (data.operationalIncidents.length) {
-        await tx.operationalIncident.createMany({
-          data: data.operationalIncidents.map((incident) => ({
-            id: incident.id,
-            severity: incident.severity,
-            area: incident.area,
-            status: incident.status,
-            message: incident.message,
-            errorCode: incident.errorCode,
-            requestId: incident.requestId,
-            userId: incident.userId,
-            taskId: incident.taskId,
-            orderId: incident.orderId,
-            route: incident.route,
-            createdAt: toDate(incident.createdAt),
-            updatedAt: toDate(incident.updatedAt),
-            resolvedAt: incident.resolvedAt ? toDate(incident.resolvedAt) : null
-          }))
-        });
-      }
-      if (data.alertNotifications.length) {
-        await tx.alertNotification.createMany({
-          data: data.alertNotifications.map((notification) => ({
-            id: notification.id,
-            alertId: notification.alertId,
-            channel: notification.channel,
-            status: notification.status,
-            severity: notification.severity,
-            dedupeKey: notification.dedupeKey,
-            message: notification.message,
-            createdAt: toDate(notification.createdAt),
-            sentAt: toDate(notification.sentAt)
-          }))
-        });
-      }
-    });
+    await this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(73341001)");
+        const before = await this.readFromClient(tx);
+        await persistStoreDiff(tx, before, data);
+      },
+      { timeout: 30_000 }
+    );
   }
 
   async update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
@@ -793,9 +467,11 @@ export class PrismaStore implements Store {
       await this.prisma.$transaction(
         async (tx) => {
           await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(73341001)");
-          const data = await this.read();
+          await this.seedIfEmpty(tx);
+          const data = await this.readFromClient(tx);
+          const before = structuredClone(data);
           result = await mutate(data);
-          await this.write(data);
+          await persistStoreDiff(tx, before, data);
         },
         { timeout: 30_000 }
       );
@@ -809,10 +485,21 @@ export class PrismaStore implements Store {
   }
 
   private async ensureSeeded(): Promise<void> {
-    const userCount = await this.prisma.user.count();
-    if (userCount === 0) {
-      await this.write(createInitialData());
+    await this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(73341001)");
+        await this.seedIfEmpty(tx);
+      },
+      { timeout: 30_000 }
+    );
+  }
+
+  private async seedIfEmpty(tx: Prisma.TransactionClient): Promise<void> {
+    if ((await tx.user.count()) > 0) {
+      return;
     }
+    const before = await this.readFromClient(tx);
+    await persistStoreDiff(tx, before, createInitialData());
   }
 }
 
@@ -1162,28 +849,6 @@ function isGenerationMetadata(value: unknown): value is GenerationMetadata {
     typeof metadata.creditCost === "number" &&
     typeof metadata.createdAt === "string"
   );
-}
-
-function generationMetadataToJson(metadata: GenerationMetadata): Prisma.InputJsonObject {
-  return {
-    taskId: metadata.taskId,
-    prompt: metadata.prompt,
-    negativePrompt: metadata.negativePrompt,
-    style: metadata.style,
-    aspectRatio: metadata.aspectRatio,
-    quality: metadata.quality,
-    quantity: metadata.quantity,
-    modelProvider: metadata.modelProvider,
-    modelName: metadata.modelName,
-    width: metadata.width,
-    height: metadata.height,
-    creditCost: metadata.creditCost,
-    createdAt: metadata.createdAt
-  };
-}
-
-function toDate(value: string): Date {
-  return new Date(value);
 }
 
 function shouldSeedDemoData(): boolean {

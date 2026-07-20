@@ -442,6 +442,24 @@ test("database schema includes performance indexes for release queries", async (
   assert.match(migration, /image_favorites_image_id_idx/);
 });
 
+test("prisma store persists entity diffs without full-table rewrites or nested transactions", async () => {
+  const databaseSource = await readFile("packages/database/src/index.ts", "utf8");
+  const persistenceSource = await readFile("packages/database/src/prisma-store-persistence.ts", "utf8");
+  const prismaStoreSource = databaseSource.slice(
+    databaseSource.indexOf("export class PrismaStore"),
+    databaseSource.indexOf("export function createInitialData")
+  );
+  const updateSource = prismaStoreSource.slice(prismaStoreSource.indexOf("async update<T>"));
+
+  assert.doesNotMatch(`${prismaStoreSource}\n${persistenceSource}`, /\.deleteMany\(\s*\)/);
+  assert.doesNotMatch(updateSource, /this\.read\(\)/);
+  assert.doesNotMatch(updateSource, /this\.write\(/);
+  assert.match(updateSource, /await this\.seedIfEmpty\(tx\);\s+const data = await this\.readFromClient\(tx\);/);
+  assert.match(prismaStoreSource, /persistStoreDiff/);
+  assert.match(persistenceSource, /\.upsert\(/);
+  assert.match(persistenceSource, /\.deleteMany\(\{/);
+});
+
 function pendingTask(id, createdAt) {
   return {
     id,

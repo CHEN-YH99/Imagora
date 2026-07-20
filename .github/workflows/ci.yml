@@ -8,6 +8,20 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: imagora
+          POSTGRES_PASSWORD: imagora
+          POSTGRES_DB: imagora
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U imagora -d imagora"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,7 +50,14 @@ jobs:
       - name: Validate Prisma schema
         run: npm --workspace packages/database run prisma:validate
 
+      - name: Apply Prisma migrations
+        env:
+          DATABASE_URL: postgresql://imagora:imagora@127.0.0.1:5432/imagora
+        run: npm --workspace packages/database run prisma:migrate-deploy
+
       - name: Test
+        env:
+          PRISMA_STORE_TEST_DATABASE_URL: postgresql://imagora:imagora@127.0.0.1:5432/imagora
         run: npm test
 
       - name: Build

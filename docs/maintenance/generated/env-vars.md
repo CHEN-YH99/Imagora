@@ -39,10 +39,10 @@
 | `CAPTCHA_VERIFICATION_TTL_SECONDS` | `apps/api/src/routes/auth.ts:91` |
 | `CREDIT_EXPIRING_SOON_DAYS` | `apps/api/src/main.ts:2277` |
 | `CSRF_ALLOWED_ORIGINS` | `apps/api/src/main.ts:1794` |
-| `DATA_STORE` | `apps/api/src/production-config.ts:47`<br>`apps/worker/src/main.ts:653`<br>`packages/database/src/index.ts:19` |
+| `DATA_STORE` | `apps/api/src/production-config.ts:47`<br>`apps/worker/src/main.ts:653`<br>`packages/database/src/index.ts:20` |
 | `DATABASE_URL` | `packages/database/scripts/prisma-cli.mjs:13` |
 | `DEPLOY_ENV_FILE` | `infra/scripts/deploy-local-prod.mjs:6` |
-| `DISABLE_PRISMA_DEV_FALLBACK` | `packages/database/src/index.ts:1201` |
+| `DISABLE_PRISMA_DEV_FALLBACK` | `packages/database/src/index.ts:866` |
 | `DOWNLOAD_URL_TTL_MINUTES` | `apps/api/src/routes/images.ts:68`<br>`apps/api/src/routes/images.ts:142` |
 | `EMAIL_VERIFICATION_TOKEN_TTL_HOURS` | `apps/api/src/routes/auth.ts:126`<br>`apps/api/src/routes/auth.ts:290`<br>`apps/api/src/routes/auth.ts:538` |
 | `EXPOSE_CAPTCHA_ANSWER_FOR_TESTS` | `apps/api/src/captcha-runtime.ts:194` |
@@ -58,10 +58,10 @@
 | `GENERATION_RUNNING_TIMEOUT_MS` | `apps/api/src/main.ts:679`<br>`apps/worker/src/main.ts:501` |
 | `IMAGE_MODEL_DEFAULT` | `packages/ai-providers/src/index.ts:456` |
 | `IMAGE_PROVIDER_DEFAULT` | `infra/scripts/release-drill.mjs:222` |
-| `IMAGORA_BOOTSTRAP_ADMIN_EMAIL` | `infra/scripts/load-smoke.mjs:142`<br>`infra/scripts/smoke-test.mjs:11`<br>`packages/database/src/index.ts:824` |
-| `IMAGORA_BOOTSTRAP_ADMIN_PASSWORD` | `infra/scripts/load-smoke.mjs:144`<br>`infra/scripts/smoke-test.mjs:13`<br>`packages/database/src/index.ts:825` |
-| `IMAGORA_SEED_DEMO_DATA` | `packages/database/src/index.ts:1190` |
-| `IMAGORA_STORE_PATH` | `infra/scripts/backup-json-store.mjs:5`<br>`infra/scripts/reconcile-credits.mjs:14`<br>`infra/scripts/restore-json-store.mjs:12`<br>`packages/database/src/index.ts:35` |
+| `IMAGORA_BOOTSTRAP_ADMIN_EMAIL` | `infra/scripts/load-smoke.mjs:142`<br>`infra/scripts/smoke-test.mjs:11`<br>`packages/database/src/index.ts:511` |
+| `IMAGORA_BOOTSTRAP_ADMIN_PASSWORD` | `infra/scripts/load-smoke.mjs:144`<br>`infra/scripts/smoke-test.mjs:13`<br>`packages/database/src/index.ts:512` |
+| `IMAGORA_SEED_DEMO_DATA` | `packages/database/src/index.ts:855` |
+| `IMAGORA_STORE_PATH` | `infra/scripts/backup-json-store.mjs:5`<br>`infra/scripts/reconcile-credits.mjs:14`<br>`infra/scripts/restore-json-store.mjs:12`<br>`packages/database/src/index.ts:36` |
 | `INCIDENT_RETENTION_MAX` | `apps/api/src/main.ts:1917`<br>`apps/worker/src/main.ts:489` |
 | `LOAD_ADMIN_EMAIL` | `infra/scripts/load-smoke.mjs:142` |
 | `LOAD_ADMIN_PASSWORD` | `infra/scripts/load-smoke.mjs:144` |
@@ -88,7 +88,7 @@
 | `MOCK_RECONCILE_PAID_ORDERS` | `packages/payments/src/index.ts:132` |
 | `NEXT_PUBLIC_API_BASE_URL` | `apps/web/lib/api.ts:518` |
 | `NEXT_PUBLIC_PAYMENT_PROVIDER` | `apps/web/app/pricing/page.tsx:17` |
-| `NODE_ENV` | `apps/api/src/auth-runtime.ts:68`<br>`apps/api/src/auth-runtime.ts:84`<br>`apps/api/src/auth-runtime.ts:106`<br>`apps/api/src/captcha-runtime.ts:194`<br>`apps/api/src/captcha-runtime.ts:221`<br>`apps/api/src/captcha-runtime.ts:249`<br>`apps/api/src/main.ts:143`<br>`apps/api/src/main.ts:1771`<br>`apps/api/src/runtime-state.ts:368`<br>`apps/web/next.config.mjs:15`<br>`apps/worker/src/main.ts:32`<br>`packages/database/src/index.ts:1194`<br>`packages/database/src/index.ts:1198`<br>`packages/storage/src/index.ts:142` |
+| `NODE_ENV` | `apps/api/src/auth-runtime.ts:68`<br>`apps/api/src/auth-runtime.ts:84`<br>`apps/api/src/auth-runtime.ts:106`<br>`apps/api/src/captcha-runtime.ts:194`<br>`apps/api/src/captcha-runtime.ts:221`<br>`apps/api/src/captcha-runtime.ts:249`<br>`apps/api/src/main.ts:143`<br>`apps/api/src/main.ts:1771`<br>`apps/api/src/runtime-state.ts:368`<br>`apps/web/next.config.mjs:15`<br>`apps/worker/src/main.ts:32`<br>`packages/database/src/index.ts:859`<br>`packages/database/src/index.ts:863`<br>`packages/storage/src/index.ts:142` |
 | `OPENAI_API_KEY` | `packages/ai-providers/src/index.ts:568` |
 | `OPENAI_BASE_URL` | `packages/ai-providers/src/index.ts:261` |
 | `OPENAI_IMAGE_MODEL` | `packages/ai-providers/src/index.ts:581` |

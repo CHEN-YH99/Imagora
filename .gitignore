@@ -33,3 +33,7 @@ runtime-logs/
 .DS_Store
 Thumbs.db
 Imagora本地开发闯关执行文档.md
+# Next.js 自动生成,不入库
+next-env.d.ts
+# 进度文档,本地维护不入库
+docs/上线前需完成任务.md
