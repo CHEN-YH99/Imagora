@@ -673,9 +673,7 @@ export default function AccountPage() {
                       </div>
                       <StatusPill>{order.status}</StatusPill>
                     </div>
-                    <p className="mt-3 text-sm text-white/62">
-                      {exceptionalOrderDescriptions[order.status]}
-                    </p>
+                    <p className="mt-3 text-sm text-white/62">{exceptionalOrderDescriptions[order.status]}</p>
                   </article>
                 ))}
               </div>

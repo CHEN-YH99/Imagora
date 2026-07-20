@@ -8,6 +8,7 @@ const root = process.cwd();
 test("maintenance map and quick verification cover modular api routes", async () => {
   const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   const maintenanceScript = await readFile(join(root, "infra/scripts/generate-maintenance-map.mjs"), "utf8");
+  const ciWorkflow = await readFile(join(root, ".github/workflows/ci.yml"), "utf8");
 
   assert.equal(packageJson.scripts["docs:maintenance"], "node infra/scripts/generate-maintenance-map.mjs");
   assert.equal(
@@ -19,6 +20,7 @@ test("maintenance map and quick verification cover modular api routes", async ()
   assert.match(packageJson.scripts["verify:quick"], /apps\/web run typecheck/);
   assert.match(packageJson.scripts["verify:quick"], /tests\\?\/generation-state\.test\.mjs/);
   assert.match(packageJson.scripts["verify:quick"], /tests\\?\/api-route-modules\.test\.mjs/);
+  assert.match(ciWorkflow, /npm run docs:maintenance:check/);
 
   assert.match(maintenanceScript, /process\.argv\.includes\("--check"\)/);
   assert.match(maintenanceScript, /collectApiRouteFiles/);
