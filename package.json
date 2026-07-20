@@ -3,6 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "description": "Imagora AI image generation platform",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11 <12"
+  },
+  "packageManager": "npm@11.8.0",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -27,6 +32,8 @@
     "smoke": "node infra/scripts/smoke-test.mjs",
     "smoke:env": "node --env-file=.env infra/scripts/smoke-test.mjs",
     "load:smoke": "node infra/scripts/load-smoke.mjs",
+    "load:postgres": "node infra/scripts/postgres-load-smoke.mjs",
+    "coverage:core": "npm run build:packages && npm --workspace apps/api run build && node infra/scripts/core-coverage.mjs",
     "backup:json": "node infra/scripts/backup-json-store.mjs",
     "restore:json": "node infra/scripts/restore-json-store.mjs",
     "backup:postgres": "node infra/scripts/backup-postgres.mjs",

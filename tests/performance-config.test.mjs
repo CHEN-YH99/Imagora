@@ -2,6 +2,20 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+test("performance engineering gates are scheduled and version-pinned", async () => {
+  const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+  const workflow = await readFile(".github/workflows/ci.yml", "utf8");
+
+  assert.deepEqual(packageJson.engines, { node: ">=24 <25", npm: ">=11 <12" });
+  assert.equal(packageJson.packageManager, "npm@11.8.0");
+  assert.equal(packageJson.scripts["load:postgres"], "node infra/scripts/postgres-load-smoke.mjs");
+  assert.match(packageJson.scripts["coverage:core"], /core-coverage\.mjs/);
+  assert.match(workflow, /schedule:\s*\n\s*- cron:/);
+  assert.match(workflow, /npm run load:smoke/);
+  assert.match(workflow, /npm run load:postgres/);
+  assert.match(workflow, /npm run coverage:core/);
+});
+
 test("queue worker settings expose bounded performance defaults", async () => {
   const { generationQueueJobOptions, resolveGenerationQueueProducerSettings, resolveGenerationWorkerSettings } =
     await import("../packages/queue/dist/index.js");

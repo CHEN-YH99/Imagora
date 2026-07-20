@@ -87,7 +87,8 @@ test("postgres backup and restore scripts wrap pg_dump with manifest verificatio
 
 test("production worker drains active generation jobs before shutdown", async () => {
   const compose = await readFile("infra/docker-compose.prod.yml", "utf8");
-  const workerBlock = compose.match(/\n {2}worker:\n(?<body>[\s\S]*?)(?:\n {2}web:|\nvolumes:)/)?.groups?.body ?? "";
+  const workerBlock =
+    compose.match(/\r?\n {2}worker:\r?\n(?<body>[\s\S]*?)(?:\r?\n {2}web:|\r?\nvolumes:)/)?.groups?.body ?? "";
   const workerSource = await readFile("apps/worker/src/main.ts", "utf8");
   const supervisorSource = await readFile("infra/scripts/worker-supervisor.mjs", "utf8");
 

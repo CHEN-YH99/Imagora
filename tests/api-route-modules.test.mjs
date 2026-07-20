@@ -22,6 +22,9 @@ test("api routes are registered through domain modules instead of main.ts", asyn
 
   assert.match(main, /import \{ registerApiRoutes \} from "\.\/routes\/index\.js";/);
   assert.match(main, /registerApiRoutes\(app, createRouteContext\(\)\);/);
+  assert.match(main, /import \{ createHash, randomUUID \} from "node:crypto"/);
+  assert.match(main, /createRouteContext\(\)[\s\S]*?createHash,/);
+  assert.match(authRoutes, /createHash\("sha256"\)/);
   assert.doesNotMatch(main, /app\.(get|post|patch|delete)\("\/api\/auth\//);
   assert.doesNotMatch(main, /app\.(get|post|patch|delete)\("\/api\/generation\//);
   assert.doesNotMatch(main, /app\.(get|post|patch|delete)\("\/api\/images/);

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import cors from "@fastify/cors";
 import pino from "pino";
@@ -59,7 +59,12 @@ import {
 } from "./captcha-runtime.js";
 import { createGenerationEnqueueRuntime } from "./generation-enqueue-runtime.js";
 import { createGenerationRuntime } from "./generation-runtime.js";
-import { contentTypeForStorageKey, extensionForMime, extensionForMimeType, inspectReferenceUpload } from "./image-upload.js";
+import {
+  contentTypeForStorageKey,
+  extensionForMime,
+  extensionForMimeType,
+  inspectReferenceUpload
+} from "./image-upload.js";
 import { createObservabilityRuntime } from "./observability.js";
 import { createOrderMaintenanceRuntime } from "./order-maintenance.js";
 import { validateProductionConfig } from "./production-config.js";
@@ -1801,6 +1806,7 @@ function createRouteContext(): ApiRouteContext {
     clearLoginAttempt,
     clearSessionCookie,
     consumeLoginAttempt,
+    createHash,
     contentTypeForStorageKey,
     createCaptchaChallenge,
     createOrderSchema,

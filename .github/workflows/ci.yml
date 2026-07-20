@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "20 18 * * *"
 
 jobs:
   quality:
@@ -59,6 +61,9 @@ jobs:
         env:
           PRISMA_STORE_TEST_DATABASE_URL: postgresql://imagora:imagora@127.0.0.1:5432/imagora
         run: npm test
+
+      - name: Check core coverage
+        run: npm run coverage:core
 
       - name: Build
         run: npm run build
@@ -173,3 +178,59 @@ jobs:
           CI: "true"
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm run test:e2e
+
+  daily-performance:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: imagora
+          POSTGRES_PASSWORD: imagora
+          POSTGRES_DB: imagora_performance
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U imagora -d imagora_performance"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Apply Prisma migrations
+        env:
+          DATABASE_URL: postgresql://imagora:imagora@127.0.0.1:5432/imagora_performance
+        run: npm --workspace packages/database run prisma:migrate-deploy
+
+      - name: Run read-only load smoke
+        env:
+          CI: "true"
+          NEXT_TELEMETRY_DISABLED: "1"
+          LOAD_REQUESTS: "120"
+          LOAD_CONCURRENCY: "12"
+        run: npm run load:smoke
+
+      - name: Run PostgreSQL write-path baseline
+        env:
+          POSTGRES_LOAD_DATABASE_URL: postgresql://imagora:imagora@127.0.0.1:5432/imagora_performance
+          POSTGRES_LOAD_REQUESTS: "60"
+          POSTGRES_LOAD_CONCURRENCY: "6"
+          POSTGRES_LOAD_P95_MS: "250"
+          POSTGRES_LOAD_AVG_MS: "150"
+          POSTGRES_LOAD_FAILURE_RATE_MAX: "0"
+        run: npm run load:postgres

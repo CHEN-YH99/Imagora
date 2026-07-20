@@ -4,7 +4,7 @@ import test from "node:test";
 
 const sharedPreviewFile = "apps/web/components/GeneratedImagePreview.tsx";
 const apiRateLimitFile = "apps/api/src/rate-limit-runtime.ts";
-const webApiFile = "apps/web/lib/api.ts";
+const webApiFile = "apps/web/lib/api/images.ts";
 const previewConsumerFiles = [
   "apps/web/app/favorites/page.tsx",
   "apps/web/app/generate/page.tsx",
