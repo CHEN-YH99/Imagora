@@ -7,6 +7,7 @@ build
 .npm-cache/
 .claude/
 .agents/
+.codex/
 .tmp/
 .tmp-test-store/
 .env
