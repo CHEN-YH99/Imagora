@@ -2,44 +2,22 @@
 
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, BarChart3, Coins, Eye, EyeOff, Plus, RefreshCw, Save, X } from "lucide-react";
-import {
-  AppFrame,
-  ConfirmDialog,
-  EmptyState,
-  InlineNotice,
-  Panel,
-  StatusPill,
-  ToastContainer
-} from "../../components/AppFrame";
+import { RefreshCw } from "lucide-react";
+import { AppFrame, ConfirmDialog, InlineNotice, Panel, ToastContainer } from "../../components/AppFrame";
 import { toast } from "sonner";
 import {
   apiFetch,
   ApiRequestError,
-  formatAuditAction,
   formatCredits,
-  formatMetricLabel,
   formatMoney,
-  formatNickname,
-  formatOperationalAlertMessage,
-  formatOperationalRunbook,
-  formatPaymentProvider,
   formatPlanName,
-  formatQualityLabel,
-  formatSafetyRuleTerm,
   formatStatusLabel,
-  formatStyleLabel,
-  getCurrentUser,
-  formatTargetType,
-  peekCurrentUser,
-  resolveImageSrc,
   type AuditLog,
   type AdminMetrics,
   type AdminOperationalMetrics,
   type GeneratedImage,
   type Order,
   type OrderMaintenance,
-  type PaymentEvent,
   type Plan,
   type SafetyAppeal,
   type SafetyEvent,
@@ -47,235 +25,44 @@ import {
   type Task,
   type User
 } from "../../lib/api";
-
-type UserDetail = {
-  user: User;
-  account: { balance: number; totalEarned: number; totalSpent: number } | undefined;
-  stats: {
-    totalOrders: number;
-    paidOrders: number;
-    totalTasks: number;
-    succeededTasks: number;
-    totalImages: number;
-  };
-  recentOrders: Order[];
-  recentTasks: Task[];
-};
-
-type TaskDetail = {
-  task: Task;
-  user: User;
-  images: GeneratedImage[];
-};
-
-type ImageDetail = {
-  image: GeneratedImage;
-  user: User;
-  task: Task;
-};
-
-type OrderDetail = {
-  order: Order;
-  user: User;
-  plan: Plan;
-  paymentEvents: PaymentEvent[];
-};
-
-type SelectedDetail =
-  | { kind: "user"; data: UserDetail }
-  | { kind: "task"; data: TaskDetail }
-  | { kind: "image"; data: ImageDetail }
-  | { kind: "order"; data: OrderDetail };
-
-type CreditAdjustmentDraft = {
-  amount: string;
-  reason: string;
-};
-
-type PlanFormState = {
-  name: string;
-  description: string;
-  priceCents: string;
-  currency: string;
-  credits: string;
-  validDays: string;
-  status: Plan["status"];
-  sortOrder: string;
-};
-
-type PlanPayload = {
-  name: string;
-  description: string;
-  priceCents: number;
-  currency: string;
-  credits: number;
-  validDays: number | null;
-  status: Plan["status"];
-  sortOrder: number;
-};
-
-type Notice = {
-  tone: "success" | "danger";
-  text: string;
-};
-
-type AdminAccessState = "checking" | "granted";
-
-type AdminOrderQuery = {
-  status?: Order["status"];
-  userId?: string;
-  orderNo?: string;
-  createdFrom?: string;
-  createdTo?: string;
-};
-
-// 与后端 ADMIN_CREDIT_ADJUST_THRESHOLD 默认值保持一致：
-// 单次调整绝对值达到该阈值即视为大额，必须走强制二次确认（confirm=true）。
-const LARGE_CREDIT_ADJUST_THRESHOLD = 1000;
-
-type ConfirmState =
-  | { kind: "reconcile" }
-  | { kind: "user-status"; userId: string; userEmail: string; nextStatus: User["status"] }
-  | { kind: "credit-adjust"; userId: string; userEmail: string; amount: number; clientRequestId: string }
-  | {
-      kind: "image-visibility";
-      imageId: string;
-      imageLabel: string;
-      nextVisibility: GeneratedImage["visibility"];
-    }
-  | { kind: "plan-status"; planId: string; planName: string; nextStatus: Plan["status"] }
-  | {
-      kind: "order-refund";
-      orderId: string;
-      orderNo: string;
-      amountCents: number;
-      currency: string;
-      clientRequestId: string;
-    }
-  | { kind: "plan-create"; plan: PlanPayload }
-  | {
-      kind: "plan-save";
-      planId: string;
-      planName: string;
-      patch: Pick<PlanPayload, "priceCents" | "credits" | "sortOrder">;
-    }
-  | { kind: "safety-event"; eventId: string; nextStatus: Exclude<SafetyEvent["status"], "REVIEW_REQUIRED"> }
-  | { kind: "safety-appeal"; appealId: string; nextStatus: Exclude<SafetyAppeal["status"], "PENDING"> };
-
-const emptyPlanForm: PlanFormState = {
-  name: "",
-  description: "",
-  priceCents: "900",
-  currency: "CNY",
-  credits: "220",
-  validDays: "30",
-  status: "ACTIVE",
-  sortOrder: "40"
-};
-
-const orderStatusOptions: Order["status"][] = ["PENDING", "PAID", "CLOSED", "CANCELED", "REFUNDED"];
-
-function withQuery(path: string, params: Record<string, string | number | undefined>): string {
-  const query = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined) {
-      query.set(key, String(value));
-    }
-  }
-  const queryString = query.toString();
-  return queryString ? `${path}?${queryString}` : path;
-}
-
-function filterValue(value: string): string | undefined {
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function toApiDateTime(value: string): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
-}
-
-function buildOrderQueryKey(query: AdminOrderQuery): string {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(query)) {
-    if (value) {
-      params.set(key, value);
-    }
-  }
-  return params.toString();
-}
-
-function compareOrderCreatedDesc(a: Order, b: Order): number {
-  return Date.parse(b.createdAt) - Date.parse(a.createdAt);
-}
-
-function mergeOrderCache(current: Order[], incoming: Order[]): Order[] {
-  const byId = new Map<string, Order>(current.map((order) => [order.id, order]));
-  for (const order of incoming) {
-    byId.set(order.id, order);
-  }
-  return Array.from(byId.values()).sort(compareOrderCreatedDesc);
-}
-
-function orderMatchesQuery(order: Order, query: AdminOrderQuery): boolean {
-  if (query.status && order.status !== query.status) {
-    return false;
-  }
-  if (query.userId && order.userId !== query.userId) {
-    return false;
-  }
-  if (query.orderNo && !order.orderNo.toLowerCase().includes(query.orderNo.toLowerCase())) {
-    return false;
-  }
-
-  const createdAt = Date.parse(order.createdAt);
-  const createdFrom = query.createdFrom ? Date.parse(query.createdFrom) : null;
-  const createdTo = query.createdTo ? Date.parse(query.createdTo) : null;
-  if (Number.isNaN(createdAt)) {
-    return createdFrom === null && createdTo === null;
-  }
-  if (createdFrom !== null && createdAt < createdFrom) {
-    return false;
-  }
-  if (createdTo !== null && createdAt > createdTo) {
-    return false;
-  }
-  return true;
-}
-
-function detailDialogLabel(kind: SelectedDetail["kind"]): string {
-  switch (kind) {
-    case "user":
-      return "用户";
-    case "task":
-      return "任务";
-    case "image":
-      return "图片";
-    case "order":
-      return "订单";
-    default:
-      return "详情";
-  }
-}
-
-function formatMilliseconds(value: number | null | undefined): string {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  if (value >= 1000) {
-    return `${(value / 1000).toFixed(1)} 秒`;
-  }
-  return `${value} ms`;
-}
+import {
+  LARGE_CREDIT_ADJUST_THRESHOLD,
+  emptyPlanForm,
+  type AdminOrderQuery,
+  type ConfirmState,
+  type CreditAdjustmentDraft,
+  type ImageDetail,
+  type Notice,
+  type OrderDetail,
+  type PlanFormState,
+  type PlanPayload,
+  type SelectedDetail,
+  type TaskDetail,
+  type UserDetail
+} from "./admin-types";
+import {
+  buildOrderQueryKey,
+  filterValue,
+  mergeOrderCache,
+  orderMatchesQuery,
+  toApiDateTime,
+  withQuery
+} from "./admin-utils";
+import { AdminAuditPanel } from "./components/AdminAuditPanel";
+import { AdminDetailDrawer } from "./components/AdminDetailDrawer";
+import { AdminFiltersPanel } from "./components/AdminFiltersPanel";
+import { AdminGenerationPanels } from "./components/AdminGenerationPanels";
+import { AdminModerationPanel } from "./components/AdminModerationPanel";
+import { AdminObservability } from "./components/AdminObservability";
+import { AdminOrdersPanel } from "./components/AdminOrdersPanel";
+import { AdminPlansPanel } from "./components/AdminPlansPanel";
+import { AdminUsersPanel } from "./components/AdminUsersPanel";
+import { useAdminAccess } from "./hooks/useAdminAccess";
+import { useAdminFilters } from "./hooks/useAdminFilters";
 
 export default function AdminPage() {
   const router = useRouter();
   const pathname = usePathname();
-  const cachedUser = peekCurrentUser();
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [operationalMetrics, setOperationalMetrics] = useState<AdminOperationalMetrics | null>(null);
   const [users, setUsers] = useState<User[]>([]);
@@ -292,20 +79,37 @@ export default function AdminPage() {
   const [newRuleAction, setNewRuleAction] = useState<"BLOCK" | "REVIEW">("BLOCK");
   const [notice, setNotice] = useState<Notice | null>(null);
   const [maintenanceRunning, setMaintenanceRunning] = useState(false);
-  const [taskStatusFilter, setTaskStatusFilter] = useState<"ALL" | Task["status"]>("ALL");
-  const [orderStatusFilter, setOrderStatusFilter] = useState<"ALL" | Order["status"]>("ALL");
-  const [imageVisibilityFilter, setImageVisibilityFilter] = useState<"ALL" | GeneratedImage["visibility"]>("ALL");
-  const [safetyAppealStatusFilter, setSafetyAppealStatusFilter] = useState<"ALL" | SafetyAppeal["status"]>("ALL");
-  const [createdFrom, setCreatedFrom] = useState("");
-  const [createdTo, setCreatedTo] = useState("");
-  const [userIdFilter, setUserIdFilter] = useState("");
-  const [orderNoFilter, setOrderNoFilter] = useState("");
-  const [userSearch, setUserSearch] = useState("");
-  const [userStatusFilter, setUserStatusFilter] = useState<"ALL" | User["status"]>("ALL");
-  const [adminUserIdFilter, setAdminUserIdFilter] = useState("");
-  const [auditActionFilter, setAuditActionFilter] = useState("");
-  const [auditTargetTypeFilter, setAuditTargetTypeFilter] = useState("");
-  const [auditTargetIdFilter, setAuditTargetIdFilter] = useState("");
+  const {
+    taskStatusFilter,
+    setTaskStatusFilter,
+    orderStatusFilter,
+    setOrderStatusFilter,
+    imageVisibilityFilter,
+    setImageVisibilityFilter,
+    safetyAppealStatusFilter,
+    setSafetyAppealStatusFilter,
+    createdFrom,
+    setCreatedFrom,
+    createdTo,
+    setCreatedTo,
+    userIdFilter,
+    setUserIdFilter,
+    orderNoFilter,
+    setOrderNoFilter,
+    userSearch,
+    setUserSearch,
+    userStatusFilter,
+    setUserStatusFilter,
+    adminUserIdFilter,
+    setAdminUserIdFilter,
+    auditActionFilter,
+    setAuditActionFilter,
+    auditTargetTypeFilter,
+    setAuditTargetTypeFilter,
+    auditTargetIdFilter,
+    setAuditTargetIdFilter,
+    resetEnterpriseFilters
+  } = useAdminFilters();
   const [selectedDetail, setSelectedDetail] = useState<SelectedDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [creditAdjustments, setCreditAdjustments] = useState<Record<string, CreditAdjustmentDraft>>({});
@@ -316,9 +120,7 @@ export default function AdminPage() {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [confirmReason, setConfirmReason] = useState("");
   const [confirmLoading, setConfirmLoading] = useState(false);
-  const [accessState, setAccessState] = useState<AdminAccessState>(
-    cachedUser?.role === "ADMIN" ? "granted" : "checking"
-  );
+  const accessState = useAdminAccess(router, setNotice);
   const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
   const [settledOrderQueryKey, setSettledOrderQueryKey] = useState<string | null>(null);
   const [orderQueryLoading, setOrderQueryLoading] = useState(false);
@@ -328,55 +130,6 @@ export default function AdminPage() {
   const refreshSeqRef = useRef(0);
   const imageFilterEffectReadyRef = useRef(false);
   const orderFilterEffectReadyRef = useRef(false);
-
-  useEffect(() => {
-    let active = true;
-
-    if (cachedUser !== undefined) {
-      if (!cachedUser) {
-        router.replace("/login?next=%2Fadmin");
-        return () => {
-          active = false;
-        };
-      }
-      if (cachedUser.role !== "ADMIN") {
-        router.replace("/generate");
-        return () => {
-          active = false;
-        };
-      }
-      setAccessState("granted");
-    }
-
-    getCurrentUser({ force: cachedUser === undefined })
-      .then((currentUser) => {
-        if (!active) {
-          return;
-        }
-        if (!currentUser) {
-          router.replace("/login?next=%2Fadmin");
-          return;
-        }
-        if (currentUser.role !== "ADMIN") {
-          router.replace("/generate");
-          return;
-        }
-        setAccessState("granted");
-      })
-      .catch((error) => {
-        if (!active) {
-          return;
-        }
-        setNotice({
-          tone: "danger",
-          text: error instanceof Error ? error.message : "管理员权限校验失败，请稍后重试。"
-        });
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [cachedUser, router]);
 
   // 详情抽屉支持 Escape 关闭：aria-modal 对话框的通用无障碍预期，也避免遮挡后续操作
   useEffect(() => {
@@ -869,13 +622,6 @@ export default function AdminPage() {
     openConfirm({ kind: "user-status", userId: user.id, userEmail: user.email, nextStatus });
   }
 
-  function resetEnterpriseFilters() {
-    setCreatedFrom("");
-    setCreatedTo("");
-    setUserIdFilter("");
-    setOrderNoFilter("");
-  }
-
   function requestCreditAdjustment(user: User) {
     const draft = creditAdjustments[user.id] ?? { amount: "10", reason: "人工调整积分" };
     const amount = Number(draft.amount);
@@ -923,6 +669,17 @@ export default function AdminPage() {
 
   function requestReconcile() {
     openConfirm({ kind: "reconcile" });
+  }
+
+  function requestOrderRefund(order: Order) {
+    openConfirm({
+      kind: "order-refund",
+      orderId: order.id,
+      orderNo: order.orderNo,
+      amountCents: order.amountCents,
+      currency: order.currency,
+      clientRequestId: crypto.randomUUID()
+    });
   }
 
   function requestSafetyEventReview(event: SafetyEvent, nextStatus: Exclude<SafetyEvent["status"], "REVIEW_REQUIRED">) {
@@ -1310,902 +1067,102 @@ export default function AdminPage() {
         </div>
       ) : null}
 
-      <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <Metric label="用户数" value={metrics?.users ?? 0} />
-        <Metric label="任务数" value={metrics?.tasks ?? 0} />
-        <Metric label="图片数" value={metrics?.images ?? 0} />
-        <Metric label="已支付订单" value={metrics?.paidOrders ?? 0} />
-        <Metric label="收入" value={formatMoney(metrics?.paidRevenueCents ?? 0, "CNY")} />
-        <Metric label="安全拦截" value={metrics?.blockedSafetyEvents ?? 0} />
-        <Metric label="待复核" value={metrics?.reviewRequiredSafetyEvents ?? 0} />
-      </div>
+      <AdminObservability
+        metrics={metrics}
+        operationalMetrics={operationalMetrics}
+        onRefresh={() => void load()}
+      />
 
-      <div className="mt-4 grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <Metric label="请求总数" value={operationalMetrics?.http.requestsTotal ?? 0} />
-        <Metric label="接口失败" value={operationalMetrics?.http.failuresTotal ?? 0} />
-        <Metric
-          label="生成成功率"
-          value={
-            operationalMetrics?.domain.generationSuccessRate === null ||
-            operationalMetrics?.domain.generationSuccessRate === undefined
-              ? "-"
-              : `${Math.round(operationalMetrics.domain.generationSuccessRate * 100)}%`
-          }
-        />
-        <Metric
-          label="生成失败率"
-          value={
-            operationalMetrics?.domain.generationFailureRate === null ||
-            operationalMetrics?.domain.generationFailureRate === undefined
-              ? "-"
-              : `${Math.round(operationalMetrics.domain.generationFailureRate * 100)}%`
-          }
-        />
-        <Metric
-          label="平均生成耗时"
-          value={formatMilliseconds(operationalMetrics?.domain.averageGenerationDurationMs)}
-        />
-        <Metric label="平均排队等待" value={formatMilliseconds(operationalMetrics?.domain.averageQueueWaitMs)} />
-        <Metric label="支付失败" value={operationalMetrics?.domain.paymentFailuresTotal ?? 0} />
-        <Metric label="退回异常" value={operationalMetrics?.domain.refundFailuresTotal ?? 0} />
-        <Metric label="参考图" value={operationalMetrics?.domain.referenceImagesTotal ?? 0} />
-        <Metric label="支付事件" value={operationalMetrics?.domain.paymentEventsTotal ?? 0} />
-      </div>
-
-      <div className="mt-4 grid gap-4 md:grid-cols-3">
-        <Metric label="关闭过期订单" value={operationalMetrics?.maintenance.closedExpiredOrders ?? 0} />
-        <Metric label="补发积分订单" value={operationalMetrics?.maintenance.reconciledPaidOrders ?? 0} />
-        <Metric label="补处理事件" value={operationalMetrics?.maintenance.reconciledPaymentEvents ?? 0} />
-      </div>
-
-      <div className="mt-4 grid gap-4 md:grid-cols-3 xl:grid-cols-5">
-        <Metric label="在途积分" value={operationalMetrics?.domain.creditsOutstanding ?? 0} />
-        <Metric label="7天内到期积分" value={operationalMetrics?.domain.creditsExpiringSoon ?? 0} />
-        <Metric label="累计已过期积分" value={operationalMetrics?.domain.creditsExpiredTotal ?? 0} />
-        <Metric label="AI成本" value={formatMoney(operationalMetrics?.domain.aiCostCents ?? 0, "CNY")} />
-        <Metric label="毛利" value={formatMoney(operationalMetrics?.domain.grossProfitCents ?? 0, "CNY")} />
-      </div>
-
-      <Panel className="mt-5">
-        <h2 className="mb-4 flex items-center gap-2 text-xl font-semibold">
-          <AlertTriangle className="size-5 text-volt" aria-hidden="true" />
-          运营告警
-        </h2>
-        {operationalMetrics?.alerts.length ? (
-          <div className="grid gap-3 lg:grid-cols-2">
-            {operationalMetrics.alerts.map((alert) => (
-              <article key={alert.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <p className="font-medium">{formatOperationalAlertMessage(alert.message)}</p>
-                    <p className="mt-1 text-sm text-white/50">
-                      {formatMetricLabel(alert.metric)}：{alert.value} / {alert.threshold}
-                    </p>
-                  </div>
-                  <StatusPill>{alert.severity}</StatusPill>
-                </div>
-                <p className="mt-3 text-sm text-white/60">{formatOperationalRunbook(alert.runbook)}</p>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <EmptyState
-            title="暂无运营告警"
-            description="当前服务指标没有触发阈值告警，继续关注失败率、积压和支付异常即可。"
-            actionLabel="刷新指标"
-            onAction={() => void load()}
-          />
-        )}
-      </Panel>
+      <AdminFiltersPanel
+        users={users}
+        createdFrom={createdFrom}
+        setCreatedFrom={setCreatedFrom}
+        createdTo={createdTo}
+        setCreatedTo={setCreatedTo}
+        userIdFilter={userIdFilter}
+        setUserIdFilter={setUserIdFilter}
+        orderNoFilter={orderNoFilter}
+        setOrderNoFilter={setOrderNoFilter}
+        onReset={resetEnterpriseFilters}
+      />
 
       <div className="mt-5 grid gap-5 xl:grid-cols-2">
-        <Panel>
-          <h2 className="mb-4 flex items-center gap-2 text-xl font-semibold">
-            <AlertTriangle className="size-5 text-volt" aria-hidden="true" />
-            最近异常
-          </h2>
-          {operationalMetrics?.recentIncidents.length ? (
-            <div className="space-y-3">
-              {operationalMetrics.recentIncidents.map((incident) => (
-                <article key={incident.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <p className="font-medium">{incident.message}</p>
-                      <p className="mt-1 text-sm text-white/50">
-                        {formatMetricLabel(incident.area)} · {incident.errorCode ?? "UNKNOWN"} ·{" "}
-                        {new Date(incident.createdAt).toLocaleString("zh-CN")}
-                      </p>
-                    </div>
-                    <StatusPill>{incident.severity}</StatusPill>
-                  </div>
-                  <div className="mt-3 grid gap-2 text-xs text-white/50 sm:grid-cols-2">
-                    <p>处理状态：{formatStatusLabel(incident.status)}</p>
-                    <p className="break-all">requestId：{incident.requestId ?? "-"}</p>
-                    <p className="break-all">taskId：{incident.taskId ?? "-"}</p>
-                    <p className="break-all">orderId：{incident.orderId ?? "-"}</p>
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <EmptyState
-              title="暂无最近异常"
-              description="生成、支付和接口错误会在这里保留最近记录，便于按 requestId、taskId 或 orderId 追踪。"
-              actionLabel="刷新异常"
-              onAction={() => void load()}
-            />
-          )}
-        </Panel>
-
-        <Panel>
-          <h2 className="mb-4 flex items-center gap-2 text-xl font-semibold">
-            <AlertTriangle className="size-5 text-mint" aria-hidden="true" />
-            告警通知
-          </h2>
-          {operationalMetrics?.alertNotifications.length ? (
-            <div className="space-y-3">
-              {operationalMetrics.alertNotifications.map((notification) => (
-                <article key={notification.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <p className="font-medium">{formatOperationalAlertMessage(notification.message)}</p>
-                      <p className="mt-1 text-sm text-white/50">
-                        本地通道 · {notification.alertId} · {new Date(notification.sentAt).toLocaleString("zh-CN")}
-                      </p>
-                    </div>
-                    <StatusPill>{notification.status}</StatusPill>
-                  </div>
-                  <p className="mt-3 break-all text-xs text-white/42">dedupeKey：{notification.dedupeKey}</p>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <EmptyState
-              title="暂无告警通知"
-              description="当运营告警触发时，本地通知通道会记录发送状态和去重键。"
-              actionLabel="刷新通知"
-              onAction={() => void load()}
-            />
-          )}
-        </Panel>
-      </div>
-
-      <Panel className="mt-5">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-xl font-semibold">组合筛选</h2>
-          <button
-            className="focus-ring rounded-full border border-white/12 bg-white/8 px-4 py-2 text-sm font-semibold text-white transition-colors hover:border-mint/70"
-            onClick={resetEnterpriseFilters}
-            type="button"
-          >
-            清空筛选
-          </button>
-        </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <Field label="时间范围">
-            <div className="grid gap-2 sm:grid-cols-2">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                type="datetime-local"
-                value={createdFrom}
-                onChange={(event) => setCreatedFrom(event.target.value)}
-              />
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                type="datetime-local"
-                value={createdTo}
-                onChange={(event) => setCreatedTo(event.target.value)}
-              />
-            </div>
-          </Field>
-          <Field label="用户筛选">
-            <select
-              className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-              value={userIdFilter}
-              onChange={(event) => setUserIdFilter(event.target.value)}
-            >
-              <option value="">全部用户</option>
-              {users.map((user) => (
-                <option key={user.id} value={user.id}>
-                  {user.email}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="订单号筛选">
-            <input
-              autoComplete="off"
-              className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-              placeholder="输入订单号"
-              type="search"
-              value={orderNoFilter}
-              onChange={(event) => setOrderNoFilter(event.target.value)}
-            />
-          </Field>
-          <Field label="筛选说明">
-            <p className="rounded-2xl border border-white/10 bg-black/20 px-4 py-2 text-sm text-white/60">
-              时间和用户会同步作用于任务、图片和订单列表；订单号和订单状态只筛选订单列表。
-            </p>
-          </Field>
-        </div>
-      </Panel>
-
-      <div className="mt-5 grid gap-5 xl:grid-cols-2">
-        <Panel>
-          <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
-            <h2 className="flex items-center gap-2 text-xl font-semibold">
-              <BarChart3 className="size-5 text-mint" aria-hidden="true" />
-              用户管理
-            </h2>
-            <div className="grid min-w-[240px] gap-2 sm:grid-cols-2">
-              <Field label="用户搜索">
-                <input
-                  className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                  value={userSearch}
-                  onChange={(event) => setUserSearch(event.target.value)}
-                />
-              </Field>
-              <Field label="状态筛选">
-                <select
-                  className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                  value={userStatusFilter}
-                  onChange={(event) => setUserStatusFilter(event.target.value as "ALL" | User["status"])}
-                >
-                  <option value="ALL">全部</option>
-                  <option value="ACTIVE">启用</option>
-                  <option value="SUSPENDED">停用</option>
-                  <option value="DELETED">已删除</option>
-                </select>
-              </Field>
-            </div>
-          </div>
-          <div className="space-y-3">
-            {visibleUsers.map((user) => (
-              <article key={user.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div>
-                    <p className="font-medium">{user.email}</p>
-                    <p className="mt-1 text-sm text-white/50">{formatNickname(user.nickname)}</p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <StatusPill>
-                      {formatStatusLabel(user.role)} · {formatStatusLabel(user.status)}
-                    </StatusPill>
-                    <button
-                      className="focus-ring rounded-full border border-white/12 bg-white/8 px-3 py-2 text-xs font-semibold text-white transition-colors hover:border-mint/70"
-                      onClick={() => void openUserDetail(user.id)}
-                      type="button"
-                    >
-                      详情
-                    </button>
-                    {user.role !== "ADMIN" ? (
-                      <button
-                        className="focus-ring rounded-full border border-white/12 bg-white/8 px-3 py-2 text-xs font-semibold text-white transition-colors hover:border-mint/70"
-                        onClick={() => requestUserStatusChange(user)}
-                        type="button"
-                      >
-                        {user.status === "ACTIVE" ? "停用" : "启用"}
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-                {user.role !== "ADMIN" ? (
-                  <div className="mt-4 grid gap-3 sm:grid-cols-[90px_1fr_auto]">
-                    <Field label="调整数量">
-                      <input
-                        className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                        inputMode="numeric"
-                        value={creditAdjustments[user.id]?.amount ?? "10"}
-                        onChange={(event) => updateCreditDraft(user.id, { amount: event.target.value })}
-                      />
-                    </Field>
-                    <Field label="调整原因">
-                      <input
-                        className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                        value={creditAdjustments[user.id]?.reason ?? "人工调整积分"}
-                        onChange={(event) => updateCreditDraft(user.id, { reason: event.target.value })}
-                      />
-                    </Field>
-                    <div className="flex items-end">
-                      <button
-                        className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-4 py-2 text-sm font-semibold text-ink transition-colors hover:bg-volt"
-                        onClick={() => requestCreditAdjustment(user)}
-                        type="button"
-                      >
-                        <Coins className="size-4" aria-hidden="true" />
-                        调整
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-              </article>
-            ))}
-            {visibleUsers.length === 0 ? (
-              <EmptyState
-                title="暂无符合条件的用户"
-                description="调整搜索词或状态筛选后再试，必要时刷新后台数据。"
-                actionLabel="刷新用户列表"
-                onAction={() => void load()}
-              />
-            ) : null}
-          </div>
-        </Panel>
-
-        <Panel>
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
-            <h2 className="text-xl font-semibold">生成任务</h2>
-            <Field label="任务状态">
-              <select
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={taskStatusFilter}
-                onChange={(event) => setTaskStatusFilter(event.target.value as "ALL" | Task["status"])}
-              >
-                <option value="ALL">全部状态</option>
-                <option value="PENDING">待处理</option>
-                <option value="RUNNING">处理中</option>
-                <option value="SUCCEEDED">已完成</option>
-                <option value="FAILED">失败</option>
-                <option value="BLOCKED">已拦截</option>
-                <option value="CANCELED">已取消</option>
-              </select>
-            </Field>
-          </div>
-          <div className="space-y-3">
-            {visibleTasks.map((task) => (
-              <article key={task.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="line-clamp-2 text-sm text-white/70">{task.prompt}</p>
-                    <p className="mt-1 break-all text-xs text-white/36">{task.userId}</p>
-                  </div>
-                  <div className="flex flex-wrap items-center justify-end gap-2">
-                    <StatusPill>{task.status}</StatusPill>
-                    <button
-                      className="focus-ring inline-flex items-center gap-1 rounded-full border border-white/12 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:border-mint/70"
-                      onClick={() => void openTaskDetail(task.id)}
-                      type="button"
-                    >
-                      <Eye className="size-3" aria-hidden="true" />
-                      详情
-                    </button>
-                  </div>
-                </div>
-                <p className="mt-2 text-xs text-white/42">
-                  {formatCredits(task.creditCost)} · {formatStyleLabel(task.style)} · {task.aspectRatio}
-                </p>
-              </article>
-            ))}
-            {visibleTasks.length === 0 ? (
-              <EmptyState
-                title="暂无符合条件的生成任务"
-                description="当前筛选条件下没有任务，调整状态筛选或刷新任务列表后再看。"
-                actionLabel="刷新任务"
-                onAction={() => void load()}
-              />
-            ) : null}
-          </div>
-        </Panel>
-
-        <Panel>
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
-            <h2 className="text-xl font-semibold">图片资产</h2>
-            <Field label="可见性筛选">
-              <select
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={imageVisibilityFilter}
-                onChange={(event) =>
-                  setImageVisibilityFilter(event.target.value as "ALL" | GeneratedImage["visibility"])
-                }
-              >
-                <option value="ALL">全部可见性</option>
-                <option value="PRIVATE">私有</option>
-                <option value="PUBLIC">公开</option>
-                <option value="HIDDEN">已隐藏</option>
-              </select>
-            </Field>
-          </div>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            {visibleImages.map((image) => (
-              <article key={image.id} className="overflow-hidden rounded-2xl border border-white/12 bg-black/20">
-                <AdminImagePreview image={image} alt="后台图片预览" className="aspect-square w-full object-cover" />
-                <div className="space-y-2 p-3">
-                  <StatusPill>{image.visibility}</StatusPill>
-                  <button
-                    className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full border border-white/12 px-2 py-2 text-xs text-white transition-colors hover:border-mint/70"
-                    onClick={() => void openImageDetail(image.id)}
-                    type="button"
-                  >
-                    <Eye className="size-3" aria-hidden="true" />
-                    详情
-                  </button>
-                  <button
-                    className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full border border-white/12 px-2 py-2 text-xs text-white transition-colors hover:border-mint/70"
-                    onClick={() => requestImageVisibilityChange(image)}
-                    type="button"
-                  >
-                    {image.visibility === "HIDDEN" ? (
-                      <Eye className="size-3" aria-hidden="true" />
-                    ) : (
-                      <EyeOff className="size-3" aria-hidden="true" />
-                    )}
-                    {image.visibility === "HIDDEN" ? "恢复显示" : "隐藏图片"}
-                  </button>
-                </div>
-              </article>
-            ))}
-            {visibleImages.length === 0 ? (
-              <div className="col-span-full">
-                <EmptyState
-                  title="暂无符合条件的图片资产"
-                  description="当前筛选条件下没有可见图片，调整筛选后再看。"
-                  actionLabel="刷新图片"
-                  onAction={() => void loadImages()}
-                />
-              </div>
-            ) : null}
-          </div>
-        </Panel>
-
-        <Panel>
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
-            <h2 className="text-xl font-semibold">订单管理</h2>
-            <div className="grid min-w-[260px] gap-2 sm:grid-cols-2">
-              <Field label="订单号筛选">
-                <input
-                  autoComplete="off"
-                  className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                  placeholder="输入订单号"
-                  type="search"
-                  value={orderNoFilter}
-                  onChange={(event) => setOrderNoFilter(event.target.value)}
-                />
-              </Field>
-              <Field label="订单状态">
-                <select
-                  className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                  value={orderStatusFilter}
-                  onChange={(event) => setOrderStatusFilter(event.target.value as "ALL" | Order["status"])}
-                >
-                  <option value="ALL">全部状态</option>
-                  {orderStatusOptions.map((status) => (
-                    <option key={status} value={status}>
-                      {formatStatusLabel(status)}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            </div>
-          </div>
-          <div className="space-y-3">
-            {orderQueryPending && visibleOrders.length > 0 ? (
-              <InlineNotice tone="info">
-                <span className="inline-flex items-center gap-2">
-                  <RefreshCw className="size-4 animate-spin" aria-hidden="true" />
-                  正在同步订单结果...
-                </span>
-              </InlineNotice>
-            ) : null}
-            {visibleOrders.map((order) => (
-              <article
-                key={order.id}
-                className={`rounded-2xl border border-white/10 bg-black/20 p-4 transition-all duration-300 ${
-                  highlightedOrderId === order.id ? "ring-2 ring-mint/50 shadow-lg shadow-mint/20 bg-mint/5" : ""
-                }`}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <p className="font-medium">{order.orderNo}</p>
-                    <p className="mt-1 text-sm text-white/50">
-                      {formatMoney(order.amountCents, order.currency)} · {formatPaymentProvider(order.paymentProvider)}
-                    </p>
-                    <p className="mt-1 break-all text-xs text-white/36">{order.userId}</p>
-                    <p className="mt-1 text-xs text-white/40">{new Date(order.createdAt).toLocaleString("zh-CN")}</p>
-                  </div>
-                  <div className="flex flex-wrap items-center justify-end gap-2">
-                    <StatusPill>{order.status}</StatusPill>
-                    <button
-                      className="focus-ring inline-flex items-center gap-1 rounded-full border border-white/12 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:border-mint/70"
-                      onClick={() => void openOrderDetail(order.id)}
-                      type="button"
-                    >
-                      <Eye className="size-3" aria-hidden="true" />
-                      详情
-                    </button>
-                  </div>
-                </div>
-              </article>
-            ))}
-            {visibleOrders.length === 0 ? (
-              orderQueryPending ? (
-                <EmptyState title="正在查询订单" description="筛选条件已生效，结果返回前不会先下没有订单的结论。" />
-              ) : (
-                <EmptyState
-                  title={hasActiveOrderFilter ? "未找到匹配订单" : "暂无订单记录"}
-                  description={
-                    hasActiveOrderFilter ? "当前订单号、状态、用户或时间条件下没有记录。" : "当前没有可展示的订单记录。"
-                  }
-                  actionLabel="刷新订单"
-                  onAction={() => void loadOrders()}
-                />
-              )
-            ) : null}
-          </div>
-        </Panel>
-
-        <Panel>
-          <h2 className="mb-4 text-xl font-semibold">套餐管理</h2>
-          <div className="mb-4 grid gap-3 rounded-2xl border border-white/10 bg-black/20 p-4 md:grid-cols-2">
-            <Field label="套餐名称">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={planDraft.name}
-                onChange={(event) => updatePlanDraft({ name: event.target.value })}
-              />
-            </Field>
-            <Field label="套餐描述">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={planDraft.description}
-                onChange={(event) => updatePlanDraft({ description: event.target.value })}
-              />
-            </Field>
-            <Field label="价格（分）">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                inputMode="numeric"
-                value={planDraft.priceCents}
-                onChange={(event) => updatePlanDraft({ priceCents: event.target.value })}
-              />
-            </Field>
-            <Field label="积分数量">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                inputMode="numeric"
-                value={planDraft.credits}
-                onChange={(event) => updatePlanDraft({ credits: event.target.value })}
-              />
-            </Field>
-            <Field label="币种代码">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={planDraft.currency}
-                onChange={(event) => updatePlanDraft({ currency: event.target.value })}
-              />
-            </Field>
-            <Field label="有效天数">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                inputMode="numeric"
-                value={planDraft.validDays}
-                onChange={(event) => updatePlanDraft({ validDays: event.target.value })}
-              />
-            </Field>
-            <Field label="套餐状态">
-              <select
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={planDraft.status}
-                onChange={(event) => updatePlanDraft({ status: event.target.value as Plan["status"] })}
-              >
-                <option value="ACTIVE">启用</option>
-                <option value="INACTIVE">停用</option>
-              </select>
-            </Field>
-            <Field label="排序值">
-              <div className="flex gap-2">
-                <input
-                  className="focus-ring min-w-0 flex-1 rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                  inputMode="numeric"
-                  value={planDraft.sortOrder}
-                  onChange={(event) => updatePlanDraft({ sortOrder: event.target.value })}
-                />
-                <button
-                  className="focus-ring inline-flex items-center gap-2 rounded-full bg-mint px-4 py-2 text-sm font-semibold text-ink transition-colors hover:bg-volt"
-                  onClick={requestPlanCreate}
-                  type="button"
-                >
-                  <Plus className="size-4" aria-hidden="true" />
-                  新增
-                </button>
-              </div>
-            </Field>
-          </div>
-          <div className="space-y-3">
-            {plans.map((plan) => (
-              <article key={plan.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div>
-                    <p className="font-medium">{formatPlanName(plan.name)}</p>
-                    <p className="mt-1 text-sm text-white/50">
-                      {formatMoney(plan.priceCents, plan.currency)} · {formatCredits(plan.credits)}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <StatusPill>{plan.status}</StatusPill>
-                    <button
-                      className="focus-ring rounded-full border border-white/12 bg-white/8 px-3 py-2 text-xs font-semibold text-white transition-colors hover:border-mint/70"
-                      onClick={() => requestPlanStatusChange(plan)}
-                      type="button"
-                    >
-                      {plan.status === "ACTIVE" ? "停用" : "启用"}
-                    </button>
-                  </div>
-                </div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_1fr_1fr_auto]">
-                  <Field label="价格（分）">
-                    <input
-                      className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                      inputMode="numeric"
-                      value={planEdits[plan.id]?.priceCents ?? String(plan.priceCents)}
-                      onChange={(event) => updatePlanEdit(plan.id, { priceCents: event.target.value })}
-                    />
-                  </Field>
-                  <Field label="积分数量">
-                    <input
-                      className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                      inputMode="numeric"
-                      value={planEdits[plan.id]?.credits ?? String(plan.credits)}
-                      onChange={(event) => updatePlanEdit(plan.id, { credits: event.target.value })}
-                    />
-                  </Field>
-                  <Field label="排序值">
-                    <input
-                      className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                      inputMode="numeric"
-                      value={planEdits[plan.id]?.sortOrder ?? String(plan.sortOrder)}
-                      onChange={(event) => updatePlanEdit(plan.id, { sortOrder: event.target.value })}
-                    />
-                  </Field>
-                  <div className="flex items-end">
-                    <button
-                      className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full border border-white/12 px-4 py-2 text-sm font-semibold text-white transition-colors hover:border-mint/70"
-                      onClick={() => requestPlanSave(plan)}
-                      type="button"
-                    >
-                      <Save className="size-4" aria-hidden="true" />
-                      保存
-                    </button>
-                  </div>
-                </div>
-              </article>
-            ))}
-            {plans.length === 0 ? (
-              <EmptyState
-                title="暂无套餐配置"
-                description="当前还没有套餐，先填写上面的表单并创建第一个积分套餐。"
-                actionLabel="刷新套餐"
-                onAction={() => void load()}
-              />
-            ) : null}
-          </div>
-        </Panel>
-
-        <Panel>
-          <h2 className="mb-4 text-xl font-semibold">安全规则</h2>
-          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end">
-            <Field className="flex-1" label="拦截词">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-4 py-3 text-sm text-white"
-                value={newRule}
-                onChange={(event) => setNewRule(event.target.value)}
-              />
-            </Field>
-            <Field label="处理动作">
-              <select
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-4 py-3 text-sm text-white sm:w-36"
-                value={newRuleAction}
-                onChange={(event) => setNewRuleAction(event.target.value === "REVIEW" ? "REVIEW" : "BLOCK")}
-              >
-                <option value="BLOCK">直接拦截</option>
-                <option value="REVIEW">人工复核</option>
-              </select>
-            </Field>
-            <button
-              className="focus-ring rounded-full bg-mint px-5 py-3 text-sm font-semibold text-ink transition-colors hover:bg-volt"
-              onClick={() => void addRule()}
-              type="button"
-            >
-              新增
-            </button>
-          </div>
-          <div className="space-y-3">
-            {rules.map((rule) => (
-              <article
-                key={rule.id}
-                className="flex items-center justify-between gap-4 rounded-2xl border border-white/10 bg-black/20 p-4"
-              >
-                <p className="font-medium">{formatSafetyRuleTerm(rule.term)}</p>
-                <StatusPill>
-                  {formatStatusLabel(rule.action)} · {formatStatusLabel(rule.status)}
-                </StatusPill>
-              </article>
-            ))}
-            {rules.length === 0 ? (
-              <EmptyState
-                title="暂无安全规则"
-                description="当前没有内容拦截规则，新增规则后后台会参与提示词和参考图安全判断。"
-                actionLabel="刷新规则"
-                onAction={() => void load()}
-              />
-            ) : null}
-          </div>
-        </Panel>
-
-        <Panel>
-          <h2 className="mb-4 text-xl font-semibold">安全事件</h2>
-          <div className="space-y-3">
-            {visibleSafetyEvents.map((event) => (
-              <article key={event.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <p className="font-medium">{formatStatusLabel(event.status)}</p>
-                    <p className="mt-1 text-sm text-white/65">
-                      {formatTargetType(event.targetType)} · {event.reasonMessage}
-                    </p>
-                    <p className="mt-2 font-mono text-xs text-white/45">
-                      {event.provider} / {event.reasonCode} / {event.targetId}
-                    </p>
-                  </div>
-                  {event.status === "REVIEW_REQUIRED" ? (
-                    <div className="flex shrink-0 flex-wrap gap-2">
-                      <button
-                        className="focus-ring rounded-full border border-mint/50 px-3 py-2 text-xs font-semibold text-mint hover:bg-mint/10"
-                        onClick={() => requestSafetyEventReview(event, "PASSED")}
-                        type="button"
-                      >
-                        复核通过
-                      </button>
-                      <button
-                        className="focus-ring rounded-full border border-red-300/40 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-400/10"
-                        onClick={() => requestSafetyEventReview(event, "BLOCKED")}
-                        type="button"
-                      >
-                        确认拦截
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-              </article>
-            ))}
-            {visibleSafetyEvents.length === 0 ? (
-              <EmptyState
-                title="暂无安全事件"
-                description="命中拦截或人工复核规则后，事件会进入这里供管理员处理和审计。"
-                actionLabel="刷新事件"
-                onAction={() => void load()}
-              />
-            ) : null}
-          </div>
-        </Panel>
-
-        <Panel>
-          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-xl font-semibold">申诉处理</h2>
-            <Field className="sm:w-40" label="申诉状态">
-              <select
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={safetyAppealStatusFilter}
-                onChange={(event) =>
-                  setSafetyAppealStatusFilter(
-                    event.target.value === "APPROVED" || event.target.value === "REJECTED"
-                      ? event.target.value
-                      : event.target.value === "PENDING"
-                        ? "PENDING"
-                        : "ALL"
-                  )
-                }
-              >
-                <option value="ALL">全部</option>
-                <option value="PENDING">待处理</option>
-                <option value="APPROVED">已通过</option>
-                <option value="REJECTED">已驳回</option>
-              </select>
-            </Field>
-          </div>
-          <div className="space-y-3">
-            {visibleSafetyAppeals.map((appeal) => (
-              <article key={appeal.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <StatusPill>{formatStatusLabel(appeal.status)}</StatusPill>
-                      <span className="font-mono text-xs text-white/42">safety-appeal / {appeal.id}</span>
-                    </div>
-                    <p className="mt-2 text-sm text-white/72">{appeal.reason}</p>
-                    <p className="mt-2 break-all text-xs text-white/42">
-                      用户 {appeal.userId} · 安全事件 {appeal.safetyEventId}
-                    </p>
-                    <p className="mt-1 text-xs text-white/42">
-                      提交于 {new Date(appeal.createdAt).toLocaleString("zh-CN")}
-                      {appeal.resolvedAt ? ` · 处理于 ${new Date(appeal.resolvedAt).toLocaleString("zh-CN")}` : ""}
-                    </p>
-                    {appeal.adminNote ? (
-                      <p className="mt-2 text-xs text-white/52">处理备注：{appeal.adminNote}</p>
-                    ) : null}
-                  </div>
-                  {appeal.status === "PENDING" ? (
-                    <div className="flex shrink-0 flex-wrap gap-2">
-                      <button
-                        className="focus-ring rounded-full border border-mint/50 px-3 py-2 text-xs font-semibold text-mint hover:bg-mint/10"
-                        onClick={() => requestSafetyAppealReview(appeal, "APPROVED")}
-                        type="button"
-                      >
-                        批准申诉
-                      </button>
-                      <button
-                        className="focus-ring rounded-full border border-red-300/40 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-400/10"
-                        onClick={() => requestSafetyAppealReview(appeal, "REJECTED")}
-                        type="button"
-                      >
-                        驳回申诉
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-              </article>
-            ))}
-            {visibleSafetyAppeals.length === 0 ? (
-              <EmptyState
-                title="暂无安全申诉"
-                description="用户对安全拦截或人工复核结果发起申诉后，会进入这里等待管理员处理。"
-                actionLabel="刷新申诉"
-                onAction={() => void load()}
-              />
-            ) : null}
-          </div>
-        </Panel>
-
-        <Panel>
-          <h2 className="mb-4 text-xl font-semibold">审计日志</h2>
-          <div className="mb-4 grid gap-3 md:grid-cols-4">
-            <Field label="管理员 ID">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={adminUserIdFilter}
-                onChange={(event) => setAdminUserIdFilter(event.target.value)}
-              />
-            </Field>
-            <Field label="操作">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={auditActionFilter}
-                onChange={(event) => setAuditActionFilter(event.target.value)}
-              />
-            </Field>
-            <Field label="目标类型">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={auditTargetTypeFilter}
-                onChange={(event) => setAuditTargetTypeFilter(event.target.value)}
-              />
-            </Field>
-            <Field label="目标 ID">
-              <input
-                className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                value={auditTargetIdFilter}
-                onChange={(event) => setAuditTargetIdFilter(event.target.value)}
-              />
-            </Field>
-          </div>
-          <div className="space-y-3">
-            {logs.map((log) => (
-              <article key={log.id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                <p className="font-medium">{formatAuditAction(log.action)}</p>
-                <p className="mt-1 text-sm text-white/50">
-                  {formatTargetType(log.targetType)} · {new Date(log.createdAt).toLocaleString("zh-CN")}
-                </p>
-                <p className="mt-1 break-all text-xs text-white/36">{log.targetId}</p>
-              </article>
-            ))}
-            {logs.length === 0 ? (
-              <EmptyState
-                title="暂无审计日志"
-                description="管理员执行状态变更、积分调整、套餐操作后，会在这里保留痕迹。"
-                actionLabel="刷新日志"
-                onAction={() => void load()}
-              />
-            ) : null}
-          </div>
-        </Panel>
+        <AdminUsersPanel
+          users={visibleUsers}
+          userSearch={userSearch}
+          setUserSearch={setUserSearch}
+          userStatusFilter={userStatusFilter}
+          setUserStatusFilter={setUserStatusFilter}
+          creditAdjustments={creditAdjustments}
+          onUpdateCreditDraft={updateCreditDraft}
+          onOpenDetail={(userId) => void openUserDetail(userId)}
+          onRequestStatusChange={requestUserStatusChange}
+          onRequestCreditAdjustment={requestCreditAdjustment}
+          onRefresh={() => void load()}
+        />
+        <AdminGenerationPanels
+          tasks={visibleTasks}
+          taskStatusFilter={taskStatusFilter}
+          setTaskStatusFilter={setTaskStatusFilter}
+          images={visibleImages}
+          imageVisibilityFilter={imageVisibilityFilter}
+          setImageVisibilityFilter={setImageVisibilityFilter}
+          onOpenTaskDetail={(taskId) => void openTaskDetail(taskId)}
+          onOpenImageDetail={(imageId) => void openImageDetail(imageId)}
+          onRequestImageVisibilityChange={requestImageVisibilityChange}
+          onRefresh={() => void load()}
+          onRefreshImages={() => void loadImages()}
+        />
+        <AdminOrdersPanel
+          orders={visibleOrders}
+          orderNoFilter={orderNoFilter}
+          setOrderNoFilter={setOrderNoFilter}
+          orderStatusFilter={orderStatusFilter}
+          setOrderStatusFilter={setOrderStatusFilter}
+          orderQueryPending={orderQueryPending}
+          hasActiveOrderFilter={hasActiveOrderFilter}
+          highlightedOrderId={highlightedOrderId}
+          onOpenDetail={(orderId) => void openOrderDetail(orderId)}
+          onRefresh={() => void loadOrders()}
+        />
+        <AdminPlansPanel
+          plans={plans}
+          planDraft={planDraft}
+          planEdits={planEdits}
+          onUpdatePlanDraft={updatePlanDraft}
+          onUpdatePlanEdit={updatePlanEdit}
+          onRequestCreate={requestPlanCreate}
+          onRequestSave={requestPlanSave}
+          onRequestStatusChange={requestPlanStatusChange}
+          onRefresh={() => void load()}
+        />
+        <AdminModerationPanel
+          rules={rules}
+          newRule={newRule}
+          setNewRule={setNewRule}
+          newRuleAction={newRuleAction}
+          setNewRuleAction={setNewRuleAction}
+          safetyEvents={visibleSafetyEvents}
+          safetyAppeals={visibleSafetyAppeals}
+          safetyAppealStatusFilter={safetyAppealStatusFilter}
+          setSafetyAppealStatusFilter={setSafetyAppealStatusFilter}
+          onAddRule={() => void addRule()}
+          onRequestSafetyEventReview={requestSafetyEventReview}
+          onRequestSafetyAppealReview={requestSafetyAppealReview}
+          onRefresh={() => void load()}
+        />
+        <AdminAuditPanel
+          logs={logs}
+          adminUserIdFilter={adminUserIdFilter}
+          setAdminUserIdFilter={setAdminUserIdFilter}
+          auditActionFilter={auditActionFilter}
+          setAuditActionFilter={setAuditActionFilter}
+          auditTargetTypeFilter={auditTargetTypeFilter}
+          setAuditTargetTypeFilter={setAuditTargetTypeFilter}
+          auditTargetIdFilter={auditTargetIdFilter}
+          setAuditTargetIdFilter={setAuditTargetIdFilter}
+          onRefresh={() => void load()}
+        />
       </div>
 
       {confirmMeta ? (
@@ -2235,334 +1192,15 @@ export default function AdminPage() {
         </ConfirmDialog>
       ) : null}
 
-      {selectedDetail ? (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-end bg-black/60 p-4"
-          onClick={() => setSelectedDetail(null)}
-          role="presentation"
-        >
-          <aside
-            aria-label={`${detailDialogLabel(selectedDetail.kind)}详情`}
-            aria-modal="true"
-            className="h-full w-full max-w-md overflow-y-auto rounded-[1.5rem] border border-white/12 bg-ink p-6"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-          >
-            <div className="mb-5 flex items-center justify-between gap-3">
-              <h2 className="text-xl font-semibold">{detailDialogLabel(selectedDetail.kind)}详情</h2>
-              <button
-                className="focus-ring inline-flex size-8 items-center justify-center rounded-full border border-white/12 text-white/60 hover:bg-white/10"
-                onClick={() => setSelectedDetail(null)}
-                type="button"
-              >
-                <X className="size-4" aria-hidden="true" />
-              </button>
-            </div>
-            {selectedDetail.kind === "user" ? (
-              <div className="space-y-4 text-sm">
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="font-medium">{selectedDetail.data.user.email}</p>
-                  <p className="mt-1 text-white/54">{formatNickname(selectedDetail.data.user.nickname)}</p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <StatusPill>{selectedDetail.data.user.role}</StatusPill>
-                    <StatusPill>{selectedDetail.data.user.status}</StatusPill>
-                    <StatusPill>{selectedDetail.data.user.emailVerifiedAt ? "ACTIVE" : "PENDING"}</StatusPill>
-                  </div>
-                </div>
-                {selectedDetail.data.account ? (
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                    <p className="text-white/50">积分余额</p>
-                    <p className="mt-1 text-2xl font-semibold text-volt">
-                      {formatCredits(selectedDetail.data.account.balance)}
-                    </p>
-                    <p className="mt-1 text-xs text-white/40">
-                      累计获得 {formatCredits(selectedDetail.data.account.totalEarned)} · 累计消耗{" "}
-                      {formatCredits(selectedDetail.data.account.totalSpent)}
-                    </p>
-                  </div>
-                ) : null}
-                <div className="grid grid-cols-3 gap-3">
-                  <MiniStat label="任务" value={selectedDetail.data.stats.totalTasks} />
-                  <MiniStat label="订单" value={selectedDetail.data.stats.paidOrders} />
-                  <MiniStat label="图片" value={selectedDetail.data.stats.totalImages} />
-                </div>
-                {selectedDetail.data.recentOrders.length > 0 ? (
-                  <div>
-                    <p className="mb-2 text-white/50">最近订单</p>
-                    <div className="space-y-2">
-                      {selectedDetail.data.recentOrders.map((order) => (
-                        <div
-                          key={order.id}
-                          className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-3"
-                        >
-                          <div>
-                            <p className="text-xs font-medium">{order.orderNo}</p>
-                            <p className="mt-0.5 text-xs text-white/40">
-                              {formatMoney(order.amountCents, order.currency)}
-                            </p>
-                          </div>
-                          <StatusPill>{order.status}</StatusPill>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-                {selectedDetail.data.recentTasks.length > 0 ? (
-                  <div>
-                    <p className="mb-2 text-white/50">最近任务</p>
-                    <div className="space-y-2">
-                      {selectedDetail.data.recentTasks.map((task) => (
-                        <div key={task.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
-                          <p className="line-clamp-1 text-xs text-white/70">{task.prompt}</p>
-                          <div className="mt-1 flex items-center gap-2">
-                            <StatusPill>{task.status}</StatusPill>
-                            <span className="text-xs text-white/40">{formatCredits(task.creditCost)}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            ) : selectedDetail.kind === "task" ? (
-              <div className="space-y-4 text-sm">
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="font-medium">{selectedDetail.data.task.prompt}</p>
-                  <p className="mt-1 text-xs text-white/40">{selectedDetail.data.user.email}</p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <StatusPill>{selectedDetail.data.task.status}</StatusPill>
-                    <StatusPill>{formatStyleLabel(selectedDetail.data.task.style)}</StatusPill>
-                    <StatusPill>{formatQualityLabel(selectedDetail.data.task.quality)}</StatusPill>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <MiniStat
-                    label="尺寸"
-                    value={`${selectedDetail.data.task.width}×${selectedDetail.data.task.height}`}
-                  />
-                  <MiniStat label="数量" value={selectedDetail.data.task.quantity} />
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-white/70">
-                  <p>客户端请求：{selectedDetail.data.task.clientRequestId}</p>
-                  <p className="mt-1">
-                    模型：{selectedDetail.data.task.modelProvider} / {selectedDetail.data.task.modelName}
-                  </p>
-                  <p className="mt-1">
-                    创建时间：{new Date(selectedDetail.data.task.createdAt).toLocaleString("zh-CN")}
-                  </p>
-                  <p className="mt-1">
-                    更新时间：{new Date(selectedDetail.data.task.updatedAt).toLocaleString("zh-CN")}
-                  </p>
-                  <p className="mt-1">
-                    开始时间：
-                    {selectedDetail.data.task.startedAt
-                      ? new Date(selectedDetail.data.task.startedAt).toLocaleString("zh-CN")
-                      : "-"}
-                  </p>
-                  <p className="mt-1">
-                    完成时间：
-                    {selectedDetail.data.task.completedAt
-                      ? new Date(selectedDetail.data.task.completedAt).toLocaleString("zh-CN")
-                      : "-"}
-                  </p>
-                  <p className="mt-1">失败码：{selectedDetail.data.task.failureCode ?? "-"}</p>
-                  <p className="mt-1">失败原因：{selectedDetail.data.task.failureMessage ?? "-"}</p>
-                </div>
-                {selectedDetail.data.images.length > 0 ? (
-                  <div>
-                    <p className="mb-2 text-white/50">关联图片</p>
-                    <div className="grid grid-cols-2 gap-3">
-                      {selectedDetail.data.images.map((image) => (
-                        <article
-                          key={image.id}
-                          className="overflow-hidden rounded-xl border border-white/10 bg-white/5"
-                        >
-                          <AdminImagePreview
-                            image={image}
-                            alt="任务图片"
-                            className="aspect-square w-full object-cover"
-                          />
-                          <div className="space-y-1 p-3 text-xs text-white/60">
-                            <p>{image.visibility}</p>
-                            <p>
-                              {image.width}×{image.height}
-                            </p>
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            ) : selectedDetail.kind === "image" ? (
-              <div className="space-y-4 text-sm">
-                <div className="overflow-hidden rounded-2xl border border-white/10 bg-white/5">
-                  <AdminImagePreview
-                    image={selectedDetail.data.image}
-                    alt="图片详情预览"
-                    className="w-full object-cover"
-                  />
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="font-medium">{selectedDetail.data.user.email}</p>
-                  <p className="mt-1 text-xs text-white/40">任务：{selectedDetail.data.task.id}</p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <StatusPill>{selectedDetail.data.image.visibility}</StatusPill>
-                    <StatusPill>{selectedDetail.data.image.safetyStatus ?? "UNKNOWN"}</StatusPill>
-                  </div>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-white/70">
-                  <p>图片编号：{selectedDetail.data.image.id}</p>
-                  <p className="mt-1">任务编号：{selectedDetail.data.image.taskId}</p>
-                  <p className="mt-1">用户编号：{selectedDetail.data.image.userId}</p>
-                  <p className="mt-1">
-                    尺寸：{selectedDetail.data.image.width}×{selectedDetail.data.image.height}
-                  </p>
-                  <p className="mt-1">
-                    创建时间：{new Date(selectedDetail.data.image.createdAt).toLocaleString("zh-CN")}
-                  </p>
-                  <p className="mt-1">删除时间：{selectedDetail.data.image.deletedAt ?? "-"}</p>
-                  <p className="mt-1">原图：{selectedDetail.data.image.publicUrl}</p>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-4 text-sm">
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="font-medium">{selectedDetail.data.order.orderNo}</p>
-                  <p className="mt-1 text-white/50">
-                    {formatMoney(selectedDetail.data.order.amountCents, selectedDetail.data.order.currency)} ·{" "}
-                    {formatPaymentProvider(selectedDetail.data.order.paymentProvider)}
-                  </p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <StatusPill>{selectedDetail.data.order.status}</StatusPill>
-                    <StatusPill>{selectedDetail.data.plan.name}</StatusPill>
-                  </div>
-                  {selectedDetail.data.order.status === "PAID" ? (
-                    <button
-                      className="focus-ring mt-3 inline-flex items-center gap-2 rounded-full border border-ember/50 bg-ember/12 px-4 py-2 text-xs font-semibold text-ember transition-colors hover:bg-ember/20 disabled:opacity-60"
-                      disabled={confirmLoading}
-                      onClick={() =>
-                        openConfirm({
-                          kind: "order-refund",
-                          orderId: selectedDetail.data.order.id,
-                          orderNo: selectedDetail.data.order.orderNo,
-                          amountCents: selectedDetail.data.order.amountCents,
-                          currency: selectedDetail.data.order.currency,
-                          clientRequestId: crypto.randomUUID()
-                        })
-                      }
-                      type="button"
-                    >
-                      发起退款
-                    </button>
-                  ) : null}
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-white/70">
-                  <p>用户：{selectedDetail.data.user.email}</p>
-                  <p className="mt-1">支付单号：{selectedDetail.data.order.paymentIntentId ?? "-"}</p>
-                  <p className="mt-1">套餐：{selectedDetail.data.plan.id}</p>
-                  <p className="mt-1">
-                    创建时间：{new Date(selectedDetail.data.order.createdAt).toLocaleString("zh-CN")}
-                  </p>
-                  <p className="mt-1">
-                    更新时间：
-                    {selectedDetail.data.order.updatedAt
-                      ? new Date(selectedDetail.data.order.updatedAt).toLocaleString("zh-CN")
-                      : "-"}
-                  </p>
-                  <p className="mt-1">
-                    支付时间：
-                    {selectedDetail.data.order.paidAt
-                      ? new Date(selectedDetail.data.order.paidAt).toLocaleString("zh-CN")
-                      : "-"}
-                  </p>
-                </div>
-                {selectedDetail.data.paymentEvents.length > 0 ? (
-                  <div>
-                    <p className="mb-2 text-white/50">支付事件</p>
-                    <div className="space-y-2">
-                      {selectedDetail.data.paymentEvents.map((event) => (
-                        <article key={event.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
-                          <p className="text-xs font-medium">{event.eventType}</p>
-                          <p className="mt-1 text-xs text-white/40">{event.providerEventId}</p>
-                          <p className="mt-1 text-xs text-white/40">
-                            {new Date(event.createdAt).toLocaleString("zh-CN")} · 处理于{" "}
-                            {new Date(event.processedAt).toLocaleString("zh-CN")}
-                          </p>
-                        </article>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            )}
-          </aside>
-        </div>
-      ) : null}
-
-      {detailLoading ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <p className="rounded-2xl border border-white/12 bg-ink px-6 py-4 text-sm text-white/70">正在加载详情...</p>
-        </div>
-      ) : null}
+      <AdminDetailDrawer
+        confirmLoading={confirmLoading}
+        detail={selectedDetail}
+        loading={detailLoading}
+        onClose={() => setSelectedDetail(null)}
+        onRequestRefund={requestOrderRefund}
+      />
 
       <ToastContainer />
     </AppFrame>
-  );
-}
-
-function AdminImagePreview({ image, alt, className }: { image: GeneratedImage; alt: string; className: string }) {
-  const imageSrc = resolveImageSrc(image.thumbnailUrl, image.publicUrl);
-
-  if (!imageSrc) {
-    return (
-      <div
-        aria-label={alt}
-        className={`flex min-h-24 items-center justify-center bg-black/30 px-3 text-center text-xs text-white/45 ${className}`}
-        role="img"
-        style={{ aspectRatio: `${image.width} / ${image.height}` }}
-      >
-        预览暂不可用
-      </div>
-    );
-  }
-
-  return (
-    <img
-      alt={alt}
-      className={className}
-      decoding="async"
-      height={image.height}
-      loading="lazy"
-      src={imageSrc}
-      width={image.width}
-    />
-  );
-}
-
-function Metric({ label, value }: { label: string; value: number | string }) {
-  return (
-    <Panel>
-      <p className="text-sm text-white/50">{label}</p>
-      <p className="mt-2 text-2xl font-semibold">{value}</p>
-    </Panel>
-  );
-}
-
-function MiniStat({ label, value }: { label: string; value: number | string }) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-3 text-center">
-      <p className="text-lg font-semibold">{value}</p>
-      <p className="mt-1 text-xs text-white/50">{label}</p>
-    </div>
-  );
-}
-
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
-  return (
-    <label className={`block text-xs text-white/52 ${className}`}>
-      <span className="mb-1.5 block">{label}</span>
-      {children}
-    </label>
   );
 }

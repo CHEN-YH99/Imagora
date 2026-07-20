@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Coins, Copy, Download, RefreshCw, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
@@ -39,6 +39,7 @@ import {
   resolveGenerationViewState,
   resolveProcessingPlaceholderCount
 } from "./generationState";
+import { useGenerationWorkspace } from "./hooks/useGenerationWorkspace";
 import { defaultPromptPreset, enhancePrompt, promptPresets, resolvePromptPreset } from "./promptPresets";
 
 const DEFAULT_PROMPT = "半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节";
@@ -80,30 +81,70 @@ function GenerateExperience() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialTaskId = searchParams.get("taskId");
-  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
-  const [negativePrompt, setNegativePrompt] = useState(DEFAULT_NEGATIVE_PROMPT);
-  const [selectedPresetId, setSelectedPresetId] = useState(resolveInitialPreset(searchParams.get("style")));
-  const [aspectRatio, setAspectRatio] = useState(resolveInitialAspectRatio(searchParams.get("aspectRatio")));
-  const [quantity, setQuantity] = useState(resolveInitialQuantity(searchParams.get("quantity")));
-  const [quantityInput, setQuantityInput] = useState(String(quantity));
-  const [quality, setQuality] = useState(resolveInitialQuality(searchParams.get("quality")));
-  const [model, setModel] = useState(resolveInitialModel(searchParams.get("model")));
-  const [quote, setQuote] = useState(0);
-  const [account, setAccount] = useState<CreditAccount | null>(null);
-  const [task, setTask] = useState<Task | null>(null);
-  const [images, setImages] = useState<GeneratedImage[]>([]);
-  const [selectedPreviewImage, setSelectedPreviewImage] = useState<GeneratedImage | null>(null);
-  const [message, setMessage] = useState("");
-  const [messageTone, setMessageTone] = useState<"info" | "success" | "danger">("danger");
-  const [loading, setLoading] = useState(false);
-  const [activeGenerationTaskId, setActiveGenerationTaskId] = useState<string | null>(initialTaskId);
-  const [appealEventId, setAppealEventId] = useState<string | null>(null);
-  const [showAppealForm, setShowAppealForm] = useState(false);
-  const [appealReason, setAppealReason] = useState("");
-  const [appealStatus, setAppealStatus] = useState<SafetyAppeal | null>(null);
-  const [appealLoading, setAppealLoading] = useState(false);
-  const [restoringTaskView, setRestoringTaskView] = useState(Boolean(initialTaskId));
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const initialQuantity = resolveInitialQuantity(searchParams.get("quantity"));
+  const {
+    prompt,
+    setPrompt,
+    negativePrompt,
+    setNegativePrompt,
+    selectedPresetId,
+    setSelectedPresetId,
+    aspectRatio,
+    setAspectRatio,
+    quantity,
+    setQuantity,
+    quantityInput,
+    setQuantityInput,
+    quality,
+    setQuality,
+    model,
+    setModel,
+    quote,
+    setQuote,
+    account,
+    setAccount,
+    task,
+    setTask,
+    images,
+    setImages,
+    selectedPreviewImage,
+    setSelectedPreviewImage,
+    message,
+    setMessage,
+    messageTone,
+    setMessageTone,
+    loading,
+    setLoading,
+    activeGenerationTaskId,
+    setActiveGenerationTaskId,
+    appealEventId,
+    setAppealEventId,
+    showAppealForm,
+    setShowAppealForm,
+    appealReason,
+    setAppealReason,
+    appealStatus,
+    setAppealStatus,
+    appealLoading,
+    setAppealLoading,
+    restoringTaskView,
+    setRestoringTaskView,
+    advancedOpen,
+    setAdvancedOpen,
+    applyTaskResult: applyWorkspaceTaskResult,
+    beginRestore,
+    beginSubmission
+  } = useGenerationWorkspace({
+    prompt: DEFAULT_PROMPT,
+    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+    selectedPresetId: resolveInitialPreset(searchParams.get("style")),
+    aspectRatio: resolveInitialAspectRatio(searchParams.get("aspectRatio")),
+    quantity: initialQuantity,
+    quality: resolveInitialQuality(searchParams.get("quality")),
+    model: resolveInitialModel(searchParams.get("model")),
+    activeGenerationTaskId: initialTaskId,
+    restoringTaskView: Boolean(initialTaskId)
+  });
   const browserStorageRestoredRef = useRef(false);
   const quoteRequestSequenceRef = useRef(0);
   const restoringTaskIdRef = useRef<string | null>(null);
@@ -340,18 +381,7 @@ function GenerateExperience() {
   async function restoreTask(taskId: string, options?: { preserveVisibleState?: boolean }) {
     restoringTaskIdRef.current = taskId;
     setActiveGenerationTaskId(taskId);
-    setLoading(true);
-    setMessage("");
-    setMessageTone("info");
-    if (!options?.preserveVisibleState) {
-      setTask(null);
-      setImages([]);
-      setSelectedPreviewImage(null);
-    }
-    setAppealEventId(null);
-    setAppealStatus(null);
-    setShowAppealForm(false);
-    setAppealReason("");
+    beginRestore(Boolean(options?.preserveVisibleState));
     try {
       const initialResult = await apiFetch<{ task: Task; images: GeneratedImage[] }>(`/api/generation/tasks/${taskId}`);
       applyTaskResult(initialResult);
@@ -378,8 +408,7 @@ function GenerateExperience() {
   }
 
   function applyTaskResult(result: { task: Task; images: GeneratedImage[] }) {
-    setTask(result.task);
-    setImages(result.images);
+    applyWorkspaceTaskResult(result);
   }
 
   function applyTaskParameters(nextTask: Task) {
@@ -583,22 +612,12 @@ function GenerateExperience() {
     submittingGenerationRef.current = true;
     submittedTaskIdRef.current = null;
     taskSyncSequenceRef.current += 1;
-    setActiveGenerationTaskId(null);
+    beginSubmission();
     clearActiveGenerationTaskId();
     router.replace(buildGeneratePath({ style: selectedPreset.style, aspectRatio, quality, quantity, model }), {
       scroll: false
     });
-    setLoading(true);
-    setMessage("");
-    setMessageTone("danger");
-    setTask(null);
-    setImages([]);
-    setSelectedPreviewImage(null);
     restoringTaskIdRef.current = null;
-    setAppealEventId(null);
-    setAppealStatus(null);
-    setShowAppealForm(false);
-    setAppealReason("");
     try {
       await ensureLoggedIn();
       const created = await apiFetch<{ task: Task; balanceAfter: number }>("/api/generation/tasks", {

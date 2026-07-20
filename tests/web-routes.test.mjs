@@ -5,6 +5,41 @@ import test from "node:test";
 
 const root = process.cwd();
 
+async function readWebApiSource() {
+  const files = [
+    "apps/web/lib/api.ts",
+    "apps/web/lib/api/admin.ts",
+    "apps/web/lib/api/auth.ts",
+    "apps/web/lib/api/client.ts",
+    "apps/web/lib/api/errors.ts",
+    "apps/web/lib/api/generation.ts",
+    "apps/web/lib/api/images.ts",
+    "apps/web/lib/api/orders.ts",
+    "apps/web/lib/api/types.ts"
+  ];
+  return (await Promise.all(files.map((file) => readFile(join(root, file), "utf8")))).join("\n");
+}
+
+async function readAdminSource() {
+  const files = [
+    "apps/web/app/admin/page.tsx",
+    "apps/web/app/admin/admin-types.ts",
+    "apps/web/app/admin/admin-utils.ts",
+    "apps/web/app/admin/hooks/useAdminAccess.ts",
+    "apps/web/app/admin/hooks/useAdminFilters.ts",
+    "apps/web/app/admin/components/AdminAuditPanel.tsx",
+    "apps/web/app/admin/components/AdminDetailDrawer.tsx",
+    "apps/web/app/admin/components/AdminFiltersPanel.tsx",
+    "apps/web/app/admin/components/AdminGenerationPanels.tsx",
+    "apps/web/app/admin/components/AdminModerationPanel.tsx",
+    "apps/web/app/admin/components/AdminObservability.tsx",
+    "apps/web/app/admin/components/AdminOrdersPanel.tsx",
+    "apps/web/app/admin/components/AdminPlansPanel.tsx",
+    "apps/web/app/admin/components/AdminUsersPanel.tsx"
+  ];
+  return (await Promise.all(files.map((file) => readFile(join(root, file), "utf8")))).join("\n");
+}
+
 test("web exposes image detail workflow from history and favorites", async () => {
   const detailPage = await readFile(join(root, "apps/web/app/images/[imageId]/page.tsx"), "utf8");
   const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
@@ -21,7 +56,7 @@ test("web exposes image detail workflow from history and favorites", async () =>
 });
 
 test("web auth pages validate inputs and registration does not ask for nickname", async () => {
-  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const apiClient = await readWebApiSource();
   const apiMain = await readFile(join(root, "apps/api/src/main.ts"), "utf8");
   const apiSchemas = await readFile(join(root, "apps/api/src/schemas.ts"), "utf8");
   const apiAuthRoutes = await readFile(join(root, "apps/api/src/routes/auth.ts"), "utf8");
@@ -93,7 +128,7 @@ test("web auth pages validate inputs and registration does not ask for nickname"
 });
 
 test("web auth pages wire Turnstile tokens through the configured captcha mode", async () => {
-  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const apiClient = await readWebApiSource();
   const apiAuthRoutes = await readFile(join(root, "apps/api/src/routes/auth.ts"), "utf8");
   const loginPage = await readFile(join(root, "apps/web/app/login/page.tsx"), "utf8");
   const registerPage = await readFile(join(root, "apps/web/app/register/page.tsx"), "utf8");
@@ -121,7 +156,7 @@ test("web auth pages wire Turnstile tokens through the configured captcha mode",
 });
 
 test("web falls back to login globally when a protected request returns 401", async () => {
-  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const apiClient = await readWebApiSource();
   const appFrame = await readFile(join(root, "apps/web/components/AppFrame.tsx"), "utf8");
   const loginPage = await readFile(join(root, "apps/web/app/login/page.tsx"), "utf8");
 
@@ -146,7 +181,7 @@ test("web falls back to login globally when a protected request returns 401", as
 test("web core pages expose recoverable empty states and confirm destructive actions", async () => {
   const apiSchemas = await readFile(join(root, "apps/api/src/schemas.ts"), "utf8");
   const accountPage = await readFile(join(root, "apps/web/app/account/page.tsx"), "utf8");
-  const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
+  const adminPage = await readAdminSource();
   const appFrame = await readFile(join(root, "apps/web/components/AppFrame.tsx"), "utf8");
   const detailPage = await readFile(join(root, "apps/web/app/images/[imageId]/page.tsx"), "utf8");
   const favoritesPage = await readFile(join(root, "apps/web/app/favorites/page.tsx"), "utf8");
@@ -316,8 +351,8 @@ test("generate page restores browser storage state after hydration", async () =>
 });
 
 test("admin console exposes enterprise filters, detail drawers, and audit queries", async () => {
-  const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
-  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const adminPage = await readAdminSource();
+  const apiClient = await readWebApiSource();
 
   assert.match(adminPage, /usePathname/);
   assert.match(adminPage, /pathname !== "\/admin"/);
@@ -327,7 +362,7 @@ test("admin console exposes enterprise filters, detail drawers, and audit querie
   assert.match(adminPage, /openTaskDetail/);
   assert.match(adminPage, /openImageDetail/);
   assert.match(adminPage, /openOrderDetail/);
-  assert.match(adminPage, /function detailDialogLabel\(/);
+  assert.match(adminPage, /detailDialogLabel\(/);
   assert.match(adminPage, /aria-label=\{`.*详情`\}/);
   assert.match(adminPage, /\/api\/admin\/generation\/tasks\/\$\{taskId\}/);
   assert.match(adminPage, /\/api\/admin\/images\/\$\{imageId\}/);
@@ -341,7 +376,7 @@ test("admin console exposes enterprise filters, detail drawers, and audit querie
   assert.match(adminPage, /发起退款/);
   assert.match(adminPage, /确认退款/);
   assert.match(adminPage, /余额可被扣为负/);
-  assert.match(adminPage, /selectedDetail\.data\.order\.status === "PAID"/);
+  assert.match(adminPage, /detail\.data\.order\.status === "PAID"/);
 
   assert.match(adminPage, /时间范围/);
   assert.match(adminPage, /createdFrom/);
@@ -363,8 +398,8 @@ test("admin console exposes enterprise filters, detail drawers, and audit querie
 });
 
 test("admin console exposes operational incidents and alert notifications", async () => {
-  const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
-  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const adminPage = await readAdminSource();
+  const apiClient = await readWebApiSource();
 
   assert.match(adminPage, /最近异常/);
   assert.match(adminPage, /处理状态/);
@@ -385,8 +420,8 @@ test("admin console exposes operational incidents and alert notifications", asyn
 });
 
 test("admin console exposes safety review queue and manual handling actions", async () => {
-  const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
-  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const adminPage = await readAdminSource();
+  const apiClient = await readWebApiSource();
 
   assert.match(adminPage, /安全事件/);
   assert.match(adminPage, /safetyEvents/);
@@ -402,8 +437,8 @@ test("admin console exposes safety review queue and manual handling actions", as
 });
 
 test("admin console exposes safety appeal queue and review actions", async () => {
-  const adminPage = await readFile(join(root, "apps/web/app/admin/page.tsx"), "utf8");
-  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const adminPage = await readAdminSource();
+  const apiClient = await readWebApiSource();
 
   assert.match(adminPage, /申诉处理/);
   assert.match(adminPage, /safetyAppeals/);
@@ -421,7 +456,7 @@ test("admin console exposes safety appeal queue and review actions", async () =>
 
 test("generate page exposes safety appeal entry after direct content blocking", async () => {
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
-  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const apiClient = await readWebApiSource();
 
   assert.match(generatePage, /async function loadLatestSafetyAppeal\(\)/);
   assert.match(generatePage, /await loadLatestSafetyAppeal\(\);/);
@@ -431,14 +466,15 @@ test("generate page exposes safety appeal entry after direct content blocking", 
 
 test("generation failures reconcile refunds and surface refunded credit copy", async () => {
   const apiMain = await readFile(join(root, "apps/api/src/main.ts"), "utf8");
+  const orderMaintenanceRuntime = await readFile(join(root, "apps/api/src/order-maintenance.ts"), "utf8");
   const apiAdminRoutes = await readFile(join(root, "apps/api/src/routes/admin.ts"), "utf8");
-  const apiClient = await readFile(join(root, "apps/web/lib/api.ts"), "utf8");
+  const apiClient = await readWebApiSource();
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
   const workerMain = await readFile(join(root, "apps/worker/src/main.ts"), "utf8");
 
   assert.match(apiMain, /runGenerationMaintenance/);
   assert.match(apiMain, /startBackgroundGenerationMaintenance/);
-  assert.match(apiMain, /GENERATION_MAINTENANCE_INTERVAL_MS/);
+  assert.match(orderMaintenanceRuntime, /GENERATION_MAINTENANCE_INTERVAL_MS/);
   assert.match(apiAdminRoutes, /\/api\/admin\/maintenance\/reconcile-generation/);
   assert.match(apiClient, /refundedCredits\?: number/);
   assert.match(generatePage, /generationFailureMessage/);
@@ -455,12 +491,13 @@ test("generation failures reconcile refunds and surface refunded credit copy", a
 
 test("generate page shows animated processing placeholders before results arrive", async () => {
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const workspace = await readFile(join(root, "apps/web/app/generate/hooks/useGenerationWorkspace.ts"), "utf8");
   const draftsFile = await readFile(join(root, "apps/web/lib/generateDrafts.ts"), "utf8");
   const stateFile = await readFile(join(root, "apps/web/app/generate/generationState.ts"), "utf8");
 
   assert.match(generatePage, /function GenerationProcessingPlaceholder/);
   assert.match(generatePage, /isGenerationProcessing/);
-  assert.match(generatePage, /setTask\(null\);/);
+  assert.match(workspace, /case "begin-submission":[\s\S]*task: null,[\s\S]*images: \[\]/);
   assert.match(generatePage, /resolveProcessingPlaceholderCount/);
   assert.match(generatePage, /Array\.from\(\{ length: processingPlaceholderCount \}/);
   assert.match(
@@ -487,13 +524,14 @@ test("generate page shows animated processing placeholders before results arrive
 
 test("generate page does not restore the previous successful task while submitting again", async () => {
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const workspace = await readFile(join(root, "apps/web/app/generate/hooks/useGenerationWorkspace.ts"), "utf8");
 
   assert.match(generatePage, /const submittingGenerationRef = useRef\(false\);/);
   assert.match(generatePage, /if \(submittingGenerationRef\.current && taskId\) \{/);
   assert.match(generatePage, /setRestoringTaskView\(false\);[\s\S]*return;/);
   assert.match(
-    generatePage,
-    /submittingGenerationRef\.current = true;[\s\S]*setLoading\(true\);[\s\S]*setTask\(null\);[\s\S]*setImages\(\[\]\);/
+    workspace,
+    /case "begin-submission":[\s\S]*loading: true,[\s\S]*task: null,[\s\S]*images: \[\]/
   );
   const submittedTaskBranchIndex = generatePage.indexOf("if (taskId && submittedTaskIdRef.current === taskId) {");
   const submittingTaskIdGuardIndex = generatePage.indexOf("if (submittingGenerationRef.current && taskId) {");
@@ -517,7 +555,7 @@ test("generate page does not restore the previous successful task while submitti
   assert.doesNotMatch(submittingWithoutTaskIdGuard.groups.body, /clearActiveGenerationTaskId\(\);/);
   assert.match(
     generatePage,
-    /submittingGenerationRef\.current = true;[\s\S]*taskSyncSequenceRef\.current \+= 1;[\s\S]*setActiveGenerationTaskId\(null\);[\s\S]*clearActiveGenerationTaskId\(\);[\s\S]*router\.replace\(buildGeneratePath/
+    /submittingGenerationRef\.current = true;[\s\S]*taskSyncSequenceRef\.current \+= 1;[\s\S]*beginSubmission\(\);[\s\S]*clearActiveGenerationTaskId\(\);[\s\S]*router\.replace\(buildGeneratePath/
   );
   assert.doesNotMatch(
     generatePage,

@@ -1,8 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import cors from "@fastify/cors";
 import pino from "pino";
-import { getActiveProviderMetadata, quoteImageGeneration, resolveProviderModel } from "@imagora/ai-providers";
 import { createStore, hashPassword, verifyPassword, withoutPassword } from "@imagora/database";
 import { buildVerificationEmail, createMailer } from "@imagora/mailer";
 import { createAlertNotifier } from "@imagora/notifier";
@@ -17,26 +16,19 @@ import {
   type AlertNotificationPayload,
   type AlertNotificationStatus,
   type ApiEnvelope,
-  type AspectRatio,
   aspectRatioDimensions,
-  DEFAULT_PENDING_TASK_TIMEOUT_MS,
-  DEFAULT_RUNNING_TASK_TIMEOUT_MS,
   creditSourceRemainders,
-  expireCredits,
   refundFailureCount,
   groupLedgerByUser,
   type GeneratedImage,
   type GenerationTask,
-  type ModelId,
   type Order,
   type PaymentEvent,
   publicUser,
-  type Quality,
   type ReferenceImage,
   runGenerationMaintenance,
   type SourceType,
   type StoreData,
-  type StyleId,
   taskRefundedCredits,
   type User
 } from "@imagora/shared";
@@ -66,6 +58,10 @@ import {
   verifyCaptchaVerifications
 } from "./captcha-runtime.js";
 import { createGenerationEnqueueRuntime } from "./generation-enqueue-runtime.js";
+import { createGenerationRuntime } from "./generation-runtime.js";
+import { contentTypeForStorageKey, extensionForMime, extensionForMimeType, inspectReferenceUpload } from "./image-upload.js";
+import { createObservabilityRuntime } from "./observability.js";
+import { createOrderMaintenanceRuntime } from "./order-maintenance.js";
 import { validateProductionConfig } from "./production-config.js";
 import { runtimeState, type HttpMetricsSnapshot } from "./runtime-state.js";
 import { captchaMode, turnstileConfigForClient, verifyTurnstileToken } from "./turnstile-runtime.js";
@@ -177,6 +173,19 @@ const generationEnqueueRuntime = createGenerationEnqueueRuntime({
     logger[level](details, message);
   }
 });
+const generationRuntime = createGenerationRuntime({
+  enqueueTask: (task) => generationEnqueueRuntime.enqueueTask(task)
+});
+const { enqueueGenerationTask, quote, resolveGenerationProviderSelection } = generationRuntime;
+const observabilityRuntime = createObservabilityRuntime({ store, runtimeState });
+const {
+  httpMetricsSnapshot,
+  recordHttpIncident,
+  recordOperationalIncident,
+  recordRequestMetric,
+  routeLabel,
+  stringDetail
+} = observabilityRuntime;
 
 const app = Fastify({
   loggerInstance: logger,
@@ -193,11 +202,6 @@ app.addHook("onClose", async () => {
   await runtimeState.close();
 });
 const serviceStartedAt = Date.now();
-const generationMaintenanceIntervalMs = envNumber("GENERATION_MAINTENANCE_INTERVAL_MS", 60_000);
-const orderMaintenanceIntervalMs = envNumber("ORDER_MAINTENANCE_INTERVAL_MS", 60_000);
-// 主动反查会打支付方 API，间隔默认放长（5min），避免高频外呼；设 0 关闭。
-const providerReconcileIntervalMs = envNumber("ORDER_PROVIDER_RECONCILE_INTERVAL_MS", 300_000);
-
 app.removeContentTypeParser("application/json");
 app.addContentTypeParser("application/json", { parseAs: "string" }, (request, body, done) => {
   const rawBody = typeof body === "string" ? body : body.toString("utf8");
@@ -360,31 +364,7 @@ interface FeatureFlags {
   downloads: boolean;
 }
 
-type UploadMimeType = ReferenceImage["mimeType"];
-
-interface InspectedReferenceUpload {
-  contentBase64: string;
-  contentHash: string;
-  fileSize: number;
-  mimeType: UploadMimeType;
-  width: number | null;
-  height: number | null;
-}
-
-interface OrderMaintenanceResult {
-  closedExpiredOrders: number;
-  reconciledPaidOrders: number;
-  reconciledPaymentEvents: number;
-  expiredCredits: number;
-  failedPendingGenerationTasks: number;
-  failedRunningGenerationTasks: number;
-  reconciledGenerationRefunds: number;
-  refundedGenerationCredits: number;
-}
-
 type OperationalAlertSeverity = "warning" | "critical";
-type OperationalIncidentSeverity = "info" | "warning" | "critical";
-type OperationalArea = "generation" | "payments" | "http" | "system";
 
 interface OperationalAlert {
   id: string;
@@ -395,18 +375,6 @@ interface OperationalAlert {
   threshold: number;
   message: string;
   runbook: string;
-}
-
-interface OperationalIncidentInput {
-  severity: OperationalIncidentSeverity;
-  area: OperationalArea;
-  message: string;
-  errorCode?: string | null;
-  requestId?: string | null;
-  userId?: string | null;
-  taskId?: string | null;
-  orderId?: string | null;
-  route?: string | null;
 }
 
 function envelope<T>(request: FastifyRequest, data: T): ApiEnvelope<T> {
@@ -437,81 +405,6 @@ function resolveTrustProxy(): boolean | number | string[] {
 function uploadBodyLimitBytes(): number {
   const base64Chars = envNumber("UPLOAD_MAX_BASE64_CHARS", 8_000_000);
   return Math.max(envNumber("API_BODY_LIMIT_BYTES", 1024 * 100), base64Chars + 16 * 1024);
-}
-
-async function enqueueGenerationTask(taskId: string, userId: string, requestedAt: string): Promise<boolean> {
-  const attempt = await generationEnqueueRuntime.enqueueTask({
-    id: taskId,
-    userId,
-    createdAt: requestedAt
-  });
-  return attempt.enqueued;
-}
-
-function quote(input: {
-  style: StyleId;
-  quality: Quality;
-  quantity: number;
-  aspectRatio: AspectRatio;
-  model?: ModelId;
-}): number {
-  const { model } = resolveGenerationProviderSelection(input.model);
-  return quoteImageGeneration({
-    style: input.style,
-    quality: input.quality,
-    quantity: input.quantity,
-    aspectRatio: input.aspectRatio,
-    model
-  }).creditCost;
-}
-
-function resolveGenerationProviderSelection(model?: ModelId): {
-  providerMetadata: ReturnType<typeof getActiveProviderMetadata>;
-  model: ModelId;
-} {
-  const requestedModel = parseGenerationModel(model);
-  const providerMetadata = getActiveProviderMetadata();
-  const fallbackModel = providerMetadata.modelName;
-  try {
-    const resolvedModel = resolveProviderModel(requestedModel ?? fallbackModel, providerMetadata.name);
-    return {
-      providerMetadata: {
-        ...providerMetadata,
-        modelName: resolvedModel
-      },
-      model: resolvedModel
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Provider model is not configured";
-    if (
-      providerMetadata.name === "mock" &&
-      requestedModel &&
-      isCompatibleOpenAiRequestForMockProvider(requestedModel)
-    ) {
-      return {
-        providerMetadata: {
-          ...providerMetadata,
-          modelName: fallbackModel
-        },
-        model: fallbackModel
-      };
-    }
-    throw new AppError("VALIDATION_ERROR", message, 400, { model: requestedModel });
-  }
-}
-
-function parseGenerationModel(model?: ModelId): ModelId | undefined {
-  const normalized = model?.trim();
-  return normalized ? normalized : undefined;
-}
-
-function isCompatibleOpenAiRequestForMockProvider(model: ModelId): boolean {
-  try {
-    resolveProviderModel(model, "openai");
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function mustFindUser(data: StoreData, userId: string): User {
@@ -652,204 +545,6 @@ function findOrderByClientRequestId(data: StoreData, userId: string, clientReque
     }
   }
   return null;
-}
-
-function runOrderMaintenance(data: StoreData): OrderMaintenanceResult {
-  const now = new Date().toISOString();
-  const expiredCredits = expireCredits(data);
-  const generationMaintenance = runGenerationMaintenance(data, generationMaintenanceOptions());
-  const closedExpiredOrders = closeExpiredPendingOrders(data, now);
-  const reconciledPaymentEvents = reconcileSucceededPaymentEvents(data, now);
-  const reconciledPaidOrders = reconcilePaidOrderCredits(data);
-  return {
-    closedExpiredOrders,
-    reconciledPaidOrders,
-    reconciledPaymentEvents,
-    expiredCredits,
-    failedPendingGenerationTasks: generationMaintenance.failedPendingTasks,
-    failedRunningGenerationTasks: generationMaintenance.failedRunningTasks,
-    reconciledGenerationRefunds: generationMaintenance.reconciledRefunds,
-    refundedGenerationCredits: generationMaintenance.refundedCredits
-  };
-}
-
-function generationMaintenanceOptions() {
-  return {
-    pendingTimeoutMs: envNumber("GENERATION_PENDING_TIMEOUT_MS", DEFAULT_PENDING_TASK_TIMEOUT_MS),
-    runningTimeoutMs: envNumber("GENERATION_RUNNING_TIMEOUT_MS", DEFAULT_RUNNING_TASK_TIMEOUT_MS)
-  };
-}
-
-function startBackgroundGenerationMaintenance(): void {
-  if (generationMaintenanceIntervalMs <= 0) {
-    return;
-  }
-
-  const timer = setInterval(() => {
-    store
-      .update((data) => {
-        const generationMaintenance = runGenerationMaintenance(data, generationMaintenanceOptions());
-        const expiredCredits = expireCredits(data);
-        if (
-          generationMaintenance.failedPendingTasks ||
-          generationMaintenance.failedRunningTasks ||
-          generationMaintenance.reconciledRefunds ||
-          expiredCredits
-        ) {
-          logger.warn(
-            {
-              failedPendingTasks: generationMaintenance.failedPendingTasks,
-              failedRunningTasks: generationMaintenance.failedRunningTasks,
-              reconciledGenerationRefunds: generationMaintenance.reconciledRefunds,
-              refundedGenerationCredits: generationMaintenance.refundedCredits,
-              expiredCredits
-            },
-            "background generation maintenance reconciled tasks"
-          );
-        }
-      })
-      .catch((error) => {
-        logger.error({ err: error }, "background generation maintenance failed");
-      });
-  }, generationMaintenanceIntervalMs);
-
-  timer.unref();
-}
-
-function startBackgroundOrderMaintenance(): void {
-  if (orderMaintenanceIntervalMs <= 0) {
-    return;
-  }
-
-  const timer = setInterval(() => {
-    store
-      .update((data) => {
-        const maintenance = runOrderMaintenance(data);
-        if (
-          maintenance.closedExpiredOrders ||
-          maintenance.reconciledPaymentEvents ||
-          maintenance.reconciledPaidOrders
-        ) {
-          logger.warn(
-            {
-              closedExpiredOrders: maintenance.closedExpiredOrders,
-              reconciledPaymentEvents: maintenance.reconciledPaymentEvents,
-              reconciledPaidOrders: maintenance.reconciledPaidOrders
-            },
-            "background order maintenance reconciled orders"
-          );
-        }
-      })
-      .catch((error) => {
-        logger.error({ err: error }, "background order maintenance failed");
-      });
-  }, orderMaintenanceIntervalMs);
-
-  timer.unref();
-}
-
-/**
- * webhook 丢失兜底：主动向支付方反查"超时仍 PENDING"的订单是否其实已付款。
- *
- * 与 runOrderMaintenance 里的 reconcileSucceededPaymentEvents 的区别：
- * - reconcileSucceededPaymentEvents 只在【本地已收到过 payment.succeeded 事件】时补账，
- *   webhook 根本没送达时它翻遍全库也找不到。
- * - 本函数不依赖本地事件，直接调支付方 API 问"这单付没付"，补的是 webhook 彻底丢失的洞。
- *
- * 必须在 store.update 事务【外】反查（网络 IO 不能进同步事务），查到 paid 再进事务补发。
- * applyPaymentSucceeded 自带 provider+providerEventId 幂等 + 金额/币种/orderNo 三重校验，
- * 即便同一单 webhook 迟到 + 反查同时命中也只入账一次。
- *
- * TODO(verify-with-live-stripe): retrieveOrderPaymentStatus 的 Stripe 真实实现需用实弹
- *   STRIPE_SECRET_KEY 联网验证一次（触发一笔真实超时订单，确认反查能补发且不重复）。
- */
-async function reconcilePendingOrdersWithProvider(): Promise<void> {
-  const expiresMs = envNumber("ORDER_PENDING_TTL_MINUTES", 30) * 60 * 1000;
-  if (expiresMs <= 0) {
-    return;
-  }
-  // 反查只针对已过 PENDING 超时窗口的订单：刚下单的还在正常支付流程里，别去打支付方 API。
-  const cutoff = Date.now() - expiresMs;
-  const snapshot = await store.read();
-  const staleOrders = snapshot.orders.filter(
-    (order) =>
-      order.status === "PENDING" &&
-      order.paymentProvider === paymentProvider.name &&
-      new Date(order.createdAt).getTime() <= cutoff
-  );
-  if (staleOrders.length === 0) {
-    return;
-  }
-
-  let reconciled = 0;
-  for (const order of staleOrders) {
-    let result: Awaited<ReturnType<typeof paymentProvider.retrieveOrderPaymentStatus>>;
-    try {
-      result = await paymentProvider.retrieveOrderPaymentStatus({
-        orderId: order.id,
-        orderNo: order.orderNo,
-        paymentIntentId: order.paymentIntentId,
-        amountCents: order.amountCents,
-        currency: order.currency
-      });
-    } catch (error) {
-      // retrieveOrderPaymentStatus 约定不抛错，这里是双保险：单单失败不拖垮整轮。
-      logger.error({ err: error, orderId: order.id }, "order payment status retrieve threw");
-      continue;
-    }
-    if (result.status !== "paid" || !result.event) {
-      continue;
-    }
-    const event = result.event;
-    try {
-      const applied = await store.update((data) =>
-        applyPaymentSucceeded(data, {
-          provider: event.provider,
-          providerEventId: event.providerEventId,
-          orderId: event.orderId,
-          orderNo: event.orderNo,
-          eventType: event.eventType,
-          amountCents: event.amountCents,
-          currency: event.currency,
-          paymentIntentId: event.paymentIntentId,
-          route: "background:reconcile-pending-orders",
-          // 主动反查没有原始 webhook 报文，构造一个标注来源的 payload；
-          // normalizedPaymentPayload 会用标准字段覆盖，这里只需提供对象。
-          payload: { source: "provider-reconcile", reconciledAt: new Date().toISOString() }
-        })
-      );
-      if (applied.credited) {
-        reconciled += 1;
-        logger.warn(
-          { orderId: order.id, balanceAfter: applied.balanceAfter },
-          "recovered lost-webhook order via provider reconcile"
-        );
-      } else if (applied.reason && applied.reason !== "DUPLICATE_EVENT") {
-        logger.error(
-          { orderId: order.id, reason: applied.reason },
-          "provider reconcile found paid order but could not credit"
-        );
-      }
-    } catch (error) {
-      logger.error({ err: error, orderId: order.id }, "provider reconcile apply failed");
-    }
-  }
-
-  if (reconciled > 0) {
-    logger.warn({ reconciled }, "background provider reconcile recovered paid orders");
-  }
-}
-
-function startBackgroundProviderReconcile(): void {
-  if (providerReconcileIntervalMs <= 0) {
-    return;
-  }
-  const timer = setInterval(() => {
-    reconcilePendingOrdersWithProvider().catch((error) => {
-      logger.error({ err: error }, "background provider reconcile failed");
-    });
-  }, providerReconcileIntervalMs);
-  timer.unref();
 }
 
 function taskWithRefund(data: StoreData, task: GenerationTask): GenerationTask & { refundedCredits: number } {
@@ -1542,194 +1237,6 @@ function matchesCreatedRange(
   return true;
 }
 
-function inspectReferenceUpload(input: z.infer<typeof referenceUploadSchema>): InspectedReferenceUpload {
-  const contentBase64 = normalizeBase64(input.contentBase64);
-  const bytes = decodeBase64(contentBase64);
-  const fileSize = bytes.byteLength;
-  const maxBytes = envNumber("UPLOAD_MAX_BYTES", 5 * 1024 * 1024);
-  if (fileSize > maxBytes) {
-    throw new AppError("VALIDATION_ERROR", "Reference image is too large", 400, { maxBytes, fileSize });
-  }
-
-  const mimeType = detectImageMime(bytes);
-  if (!mimeType) {
-    throw new AppError("VALIDATION_ERROR", "Reference image signature is not supported", 400);
-  }
-  if (mimeType !== input.mimeType) {
-    throw new AppError("VALIDATION_ERROR", "Reference image MIME does not match file signature", 400, {
-      declared: input.mimeType,
-      detected: mimeType
-    });
-  }
-
-  const dimensions = readImageDimensions(bytes, mimeType);
-  if (!dimensions) {
-    throw new AppError("VALIDATION_ERROR", "Reference image dimensions could not be read", 400);
-  }
-  const maxDimension = envNumber("UPLOAD_MAX_DIMENSION", 8192);
-  if (
-    dimensions.width <= 0 ||
-    dimensions.height <= 0 ||
-    dimensions.width > maxDimension ||
-    dimensions.height > maxDimension
-  ) {
-    throw new AppError("VALIDATION_ERROR", "Reference image dimensions are not allowed", 400, {
-      maxDimension,
-      width: dimensions.width,
-      height: dimensions.height
-    });
-  }
-
-  return {
-    contentBase64,
-    contentHash: createHash("sha256").update(bytes).digest("hex"),
-    fileSize,
-    mimeType,
-    width: dimensions.width,
-    height: dimensions.height
-  };
-}
-
-function normalizeBase64(value: string): string {
-  const trimmed = value.trim();
-  const dataUrl = /^data:([^;]+);base64,(.+)$/i.exec(trimmed);
-  return (dataUrl?.[2] ?? trimmed).replace(/\s/g, "");
-}
-
-function decodeBase64(value: string): Buffer {
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 === 1) {
-    throw new AppError("VALIDATION_ERROR", "Reference image content is not valid base64", 400);
-  }
-  const bytes = Buffer.from(value, "base64");
-  if (!bytes.length) {
-    throw new AppError("VALIDATION_ERROR", "Reference image content is empty", 400);
-  }
-  return bytes;
-}
-
-function detectImageMime(bytes: Buffer): UploadMimeType | null {
-  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    return "image/png";
-  }
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return "image/jpeg";
-  }
-  if (
-    bytes.length >= 12 &&
-    bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
-    bytes.subarray(8, 12).toString("ascii") === "WEBP"
-  ) {
-    return "image/webp";
-  }
-  return null;
-}
-
-function readImageDimensions(bytes: Buffer, mimeType: UploadMimeType): { width: number; height: number } | null {
-  switch (mimeType) {
-    case "image/png":
-      return bytes.length >= 24 ? { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) } : null;
-    case "image/jpeg":
-      return readJpegDimensions(bytes);
-    case "image/webp":
-      return readWebpDimensions(bytes);
-  }
-}
-
-function readJpegDimensions(bytes: Buffer): { width: number; height: number } | null {
-  let offset = 2;
-  while (offset + 9 < bytes.length) {
-    if (bytes[offset] !== 0xff) {
-      offset += 1;
-      continue;
-    }
-    const marker = bytes[offset + 1];
-    const segmentLength = bytes.readUInt16BE(offset + 2);
-    if (segmentLength < 2) {
-      return null;
-    }
-    if (
-      (marker >= 0xc0 && marker <= 0xc3) ||
-      (marker >= 0xc5 && marker <= 0xc7) ||
-      (marker >= 0xc9 && marker <= 0xcb)
-    ) {
-      return { height: bytes.readUInt16BE(offset + 5), width: bytes.readUInt16BE(offset + 7) };
-    }
-    offset += 2 + segmentLength;
-  }
-  return null;
-}
-
-function readWebpDimensions(bytes: Buffer): { width: number; height: number } | null {
-  const chunk = bytes.subarray(12, 16).toString("ascii");
-  if (chunk === "VP8X" && bytes.length >= 30) {
-    return {
-      width: 1 + bytes.readUIntLE(24, 3),
-      height: 1 + bytes.readUIntLE(27, 3)
-    };
-  }
-  if (chunk === "VP8L" && bytes.length >= 25 && bytes[20] === 0x2f) {
-    const b1 = bytes[21];
-    const b2 = bytes[22];
-    const b3 = bytes[23];
-    const b4 = bytes[24];
-    return {
-      width: 1 + (((b2 & 0x3f) << 8) | b1),
-      height: 1 + (((b4 & 0x0f) << 10) | (b3 << 2) | ((b2 & 0xc0) >> 6))
-    };
-  }
-  if (chunk === "VP8 " && bytes.length >= 30 && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
-    return {
-      width: bytes.readUInt16LE(26) & 0x3fff,
-      height: bytes.readUInt16LE(28) & 0x3fff
-    };
-  }
-  return null;
-}
-
-function extensionForMime(mimeType: UploadMimeType): string {
-  switch (mimeType) {
-    case "image/jpeg":
-      return "jpg";
-    case "image/png":
-      return "png";
-    case "image/webp":
-      return "webp";
-  }
-}
-
-function extensionForMimeType(mimeType: string): string {
-  switch (mimeType) {
-    case "image/jpeg":
-      return "jpg";
-    case "image/png":
-      return "png";
-    case "image/webp":
-      return "webp";
-    case "image/svg+xml":
-      return "svg";
-    default:
-      return "img";
-  }
-}
-
-// 由 storage key 的扩展名反推 content-type，供 /api/files 回读时设置响应头。
-function contentTypeForStorageKey(key: string): string {
-  const extension = key.split(".").pop()?.toLowerCase() ?? "";
-  switch (extension) {
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "png":
-      return "image/png";
-    case "webp":
-      return "image/webp";
-    case "svg":
-      return "image/svg+xml";
-    default:
-      return "application/octet-stream";
-  }
-}
-
 function featureFlags(): FeatureFlags {
   return {
     generation: envBool("FEATURE_GENERATION_ENABLED", true),
@@ -1834,87 +1341,6 @@ function localDevelopmentOriginAlias(origin: string): string | null {
     return null;
   }
   return null;
-}
-
-async function recordRequestMetric(request: FastifyRequest, statusCode: number): Promise<void> {
-  const route = `${request.method} ${request.routeOptions.url ?? pathOnly(request.url)}`;
-  const durationMs = Math.max(0, Date.now() - (request.startedAt ?? Date.now()));
-  try {
-    await runtimeState.recordHttpMetric(route, statusCode, durationMs);
-  } catch (error) {
-    // 指标写入失败不能改变已经完成的 HTTP 响应，只记录故障供运维排查。
-    request.log.error({ error, route }, "Runtime HTTP metrics update failed");
-  }
-}
-
-async function recordHttpIncident(
-  request: FastifyRequest,
-  input: Pick<OperationalIncidentInput, "severity" | "message" | "errorCode" | "taskId" | "orderId">
-): Promise<void> {
-  try {
-    await store.update((data) => {
-      recordOperationalIncident(data, {
-        severity: input.severity,
-        area: "http",
-        message: input.message,
-        errorCode: input.errorCode,
-        requestId: request.requestId ?? null,
-        userId: request.userId ?? null,
-        taskId: input.taskId ?? null,
-        orderId: input.orderId ?? null,
-        route: routeLabel(request)
-      });
-    });
-  } catch {
-    request.log.warn({ errorCode: "INCIDENT_RECORD_FAILED" }, "Operational incident record failed");
-  }
-}
-
-function recordOperationalIncident(data: StoreData, input: OperationalIncidentInput): void {
-  data.operationalIncidents ??= [];
-  const now = new Date().toISOString();
-  const existing = data.operationalIncidents.find((incident) => {
-    if (incident.status !== "OPEN" || incident.errorCode !== (input.errorCode ?? null)) {
-      return false;
-    }
-    if (input.taskId) {
-      return incident.taskId === input.taskId;
-    }
-    if (input.orderId) {
-      return incident.orderId === input.orderId;
-    }
-    return input.requestId ? incident.requestId === input.requestId : false;
-  });
-
-  if (existing) {
-    existing.severity = input.severity;
-    existing.message = sanitizeOperationalMessage(input.message);
-    existing.requestId = input.requestId ?? existing.requestId;
-    existing.userId = input.userId ?? existing.userId;
-    existing.route = input.route ?? existing.route;
-    existing.updatedAt = now;
-    return;
-  }
-
-  data.operationalIncidents.push({
-    id: randomUUID(),
-    severity: input.severity,
-    area: input.area,
-    status: "OPEN",
-    message: sanitizeOperationalMessage(input.message),
-    errorCode: input.errorCode ?? null,
-    requestId: input.requestId ?? null,
-    userId: input.userId ?? null,
-    taskId: input.taskId ?? null,
-    orderId: input.orderId ?? null,
-    route: input.route ?? null,
-    createdAt: now,
-    updatedAt: now,
-    resolvedAt: null
-  });
-  data.operationalIncidents = data.operationalIncidents
-    .sort(descUpdated)
-    .slice(0, envNumber("INCIDENT_RETENTION_MAX", 100));
 }
 
 function alertCooldownMs(): number {
@@ -2116,25 +1542,6 @@ function startBackgroundAlertEvaluation(): void {
     });
   }, intervalMs);
   timer.unref();
-}
-
-function routeLabel(request: FastifyRequest): string {
-  return `${request.method} ${request.routeOptions.url ?? pathOnly(request.url)}`;
-}
-
-function stringDetail(details: Record<string, unknown> | undefined, key: string): string | null {
-  const value = details?.[key];
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function sanitizeOperationalMessage(message: string): string {
-  return message
-    .replace(/(password|passwd|token|captcha|secret|api[_-]?key|authorization)\s*[:=]\s*[^,\s}]+/gi, "$1=[redacted]")
-    .slice(0, 280);
-}
-
-async function httpMetricsSnapshot(): Promise<HttpMetricsSnapshot> {
-  return runtimeState.httpMetricsSnapshot();
 }
 
 function operationalAlertsSnapshot(data: StoreData, http: HttpMetricsSnapshot): OperationalAlert[] {
@@ -2339,6 +1746,25 @@ function countBy<T>(items: T[], selectKey: (item: T) => string): Record<string, 
   }, {});
 }
 
+const orderMaintenanceRuntime = createOrderMaintenanceRuntime({
+  store,
+  paymentProvider,
+  closeExpiredPendingOrders,
+  reconcileSucceededPaymentEvents,
+  reconcilePaidOrderCredits,
+  applyPaymentSucceeded,
+  onLog(level, details, message) {
+    logger[level](details, message);
+  }
+});
+const {
+  generationMaintenanceOptions,
+  runOrderMaintenance,
+  startBackgroundGenerationMaintenance,
+  startBackgroundOrderMaintenance,
+  startBackgroundProviderReconcile
+} = orderMaintenanceRuntime;
+
 function createRouteContext(): ApiRouteContext {
   return {
     AppError,
@@ -2377,7 +1803,6 @@ function createRouteContext(): ApiRouteContext {
     consumeLoginAttempt,
     contentTypeForStorageKey,
     createCaptchaChallenge,
-    createHash,
     createOrderSchema,
     defaultNicknameForEmail,
     deleteAccountSchema,

@@ -88,6 +88,23 @@ test("api runtime helpers are split out of main entrypoint", async () => {
   }
 });
 
+test("api generation, upload, order, and observability runtimes are split out of main entrypoint", async () => {
+  const main = await readProjectFile("apps/api/src/main.ts");
+  const generationRuntime = await readProjectFile("apps/api/src/generation-runtime.ts");
+  const imageUpload = await readProjectFile("apps/api/src/image-upload.ts");
+  const orderMaintenance = await readProjectFile("apps/api/src/order-maintenance.ts");
+  const observability = await readProjectFile("apps/api/src/observability.ts");
+
+  assert.match(main, /from "\.\/generation-runtime\.js"/);
+  assert.match(main, /from "\.\/image-upload\.js"/);
+  assert.match(main, /from "\.\/order-maintenance\.js"/);
+  assert.match(main, /from "\.\/observability\.js"/);
+  assert.match(generationRuntime, /export function createGenerationRuntime\b/);
+  assert.match(imageUpload, /export function inspectReferenceUpload\b/);
+  assert.match(orderMaintenance, /export function createOrderMaintenanceRuntime\b/);
+  assert.match(observability, /export function createObservabilityRuntime\b/);
+});
+
 test("api production readiness checks are isolated from main entrypoint", async () => {
   const main = await readProjectFile("apps/api/src/main.ts");
   const productionConfig = await readProjectFile("apps/api/src/production-config.ts");
