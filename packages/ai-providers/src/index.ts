@@ -1,4 +1,32 @@
 import { aspectRatioDimensions, type AspectRatio, type ModelId, type Quality, type StyleId } from "@imagora/shared";
+import {
+  createChannelHealthStore,
+  createResilientChannelHealthStore,
+  type ChannelHealthStore
+} from "./channel-health.js";
+import { resolveImageChannels, type ImageChannelConfig } from "./channels.js";
+
+export {
+  createChannelHealthStore,
+  createResilientChannelHealthStore,
+  DEFAULT_CHANNEL_COOLDOWN_MS,
+  DEFAULT_CHANNEL_FAILURE_THRESHOLD,
+  DEFAULT_CHANNEL_FAILURE_WINDOW_MS,
+  readChannelHealthSettings,
+  resolveChannelHealthProvider,
+  type ChannelHealthProvider,
+  type ChannelHealthSettings,
+  type ChannelHealthState,
+  type ChannelHealthStore,
+  type ChannelHealthStoreOptions
+} from "./channel-health.js";
+export {
+  hasConfiguredImageChannel,
+  parseImageChannels,
+  resolveAllImageChannels,
+  resolveImageChannels,
+  type ImageChannelConfig
+} from "./channels.js";
 
 export const DEFAULT_OPENAI_MODEL = "gpt-image-2" as const;
 export const MOCK_MODEL = "mock" as const;
@@ -42,7 +70,76 @@ export interface ProviderImage {
 export interface GenerateImageResult {
   providerRequestId: string;
   images: ProviderImage[];
+  /**
+   * 本次实际发生的供应商成本（分）。多渠道下各站定价不同，由 provider 按命中渠道汇总；
+   * 未提供时调用方回落到模型配置的估算值。
+   */
+  providerCostCents?: number;
+  /** 本次每张图实际命中的渠道名，按图片顺序 */
+  channels?: string[];
   raw?: unknown;
+}
+
+export interface OpenAiImageGenerationProviderOptions {
+  channels?: ImageChannelConfig[];
+  healthStore?: ChannelHealthStore;
+  /**
+   * 超时是否参与渠道切换。默认 false：超时后上游可能仍在出图，
+   * 换渠道重发会双份计费、双份出图。
+   */
+  failoverOnTimeout?: boolean;
+  onChannelEvent?: (event: ImageChannelEvent) => void;
+}
+
+export type ImageChannelEvent =
+  | {
+      type: "channel_succeeded";
+      channel: string;
+      taskId: string;
+      imageIndex: number;
+    }
+  | {
+      type: "channel_failed";
+      channel: string;
+      taskId: string;
+      imageIndex: number;
+      code: ProviderErrorCode;
+      statusCode?: number;
+      message: string;
+      tripped: boolean;
+      willFailover: boolean;
+    }
+  | {
+      type: "health_store_degraded";
+      operation: string;
+      message: string;
+    };
+
+export interface ImageChannelHealthReport {
+  provider: "memory" | "redis";
+  channels: Array<{
+    name: string;
+    baseUrl: string;
+    priority: number;
+    tripped: boolean;
+    failures: number;
+  }>;
+}
+
+interface ChannelAttemptOutcome {
+  channel: ImageChannelConfig;
+  image: { bytes: string; mimeType: ProviderImage["mimeType"] };
+  requestId?: string;
+}
+
+interface OpenAiGenerationRequestBody {
+  model: string;
+  prompt: string;
+  size: OpenAiImageSize;
+  quality: OpenAiImageQuality;
+  n: number;
+  response_format: "b64_json";
+  output_format: "png";
 }
 
 export interface ImageGenerationProvider {
@@ -96,6 +193,40 @@ export class ProviderError extends Error {
 export interface ProviderMetadata {
   name: SupportedProviderName;
   modelName: SupportedImageModel | string;
+}
+
+/**
+ * 该错误是否应该切换到下一个渠道重发。
+ *
+ * PROVIDER_TIMEOUT 刻意不在其中：请求已发出但等不到响应时，上游任务可能仍在执行，
+ * 换渠道重发等于重复付费且两边都可能出图。超时仍会计入熔断（见 isChannelHealthSignal），
+ * 后续任务自动绕开摆烂渠道，但当前这张图直接失败退积分。
+ *
+ * PROVIDER_CONTENT_BLOCKED 同样不切：内容审查在任何渠道都会拦，重发纯属浪费。
+ */
+export function shouldFailoverToNextChannel(error: ProviderError): boolean {
+  switch (error.code) {
+    case "PROVIDER_AUTH_FAILED":
+    case "PROVIDER_RATE_LIMITED":
+    case "PROVIDER_BAD_RESPONSE":
+    case "PROVIDER_EMPTY_RESULT":
+      return true;
+    case "PROVIDER_FAILED":
+      // 5xx 与「请求未送达」（连接失败/DNS/TLS）都归到这里，上游没有产生计费副作用。
+      return true;
+    case "PROVIDER_TIMEOUT":
+    case "PROVIDER_CONTENT_BLOCKED":
+      return false;
+  }
+}
+
+/**
+ * 该错误是否说明「渠道本身有问题」，需要计入熔断计数。
+ * 超时不切换但要计数：摆烂的站只会让第一个用户倒霉，后续请求自动绕开。
+ * 内容审查是用户提示词的问题，不能算渠道的账。
+ */
+export function isChannelHealthSignal(error: ProviderError): boolean {
+  return error.code !== "PROVIDER_CONTENT_BLOCKED";
 }
 
 export interface QuoteImageGenerationInput {
@@ -257,13 +388,32 @@ export class MockImageGenerationProvider implements ImageGenerationProvider {
 export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   readonly name = "openai";
   readonly modelName = resolveDefaultImageModel(this.name);
-  private readonly apiKey = requiredEnv("OPENAI_API_KEY");
-  private readonly baseUrl = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
-  private readonly allowInsecureLocalImageFetch = isLocalHttpUrl(this.baseUrl);
+  private readonly channels: ImageChannelConfig[];
+  private readonly healthStore: ChannelHealthStore;
+  private readonly failoverOnTimeout: boolean;
+  private readonly onChannelEvent?: (event: ImageChannelEvent) => void;
   private readonly runtimeConfig = readOpenAiGenerationRuntimeConfig();
   private readonly timeoutMs = this.runtimeConfig.timeoutMs;
   private readonly maxRetries = this.runtimeConfig.maxRetries;
   private readonly initialBackoffMs = this.runtimeConfig.initialBackoffMs;
+
+  constructor(options: OpenAiImageGenerationProviderOptions = {}) {
+    this.channels = options.channels ?? resolveImageChannels();
+    if (!this.channels.length) {
+      throw new Error("OPENAI_API_KEY is required (or configure IMAGE_CHANNELS with at least one enabled channel)");
+    }
+    this.failoverOnTimeout = options.failoverOnTimeout ?? envBool("IMAGE_CHANNEL_FAILOVER_ON_TIMEOUT", false);
+    this.onChannelEvent = options.onChannelEvent;
+    this.healthStore =
+      options.healthStore ??
+      createResilientChannelHealthStore(createChannelHealthStore(), (error, operation) => {
+        this.onChannelEvent?.({
+          type: "health_store_degraded",
+          operation,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+  }
 
   async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
     const model = resolveProviderModel(input.model, this.name);
@@ -289,37 +439,21 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     const quality = openAiQuality(input.quality);
     const images: ProviderImage[] = [];
     const requestIds = new Set<string>();
+    const usedChannels: string[] = [];
+    let providerCostCents = 0;
 
+    // 按张切换而非按任务重跑：第 N 张失败时前面的图已在旧渠道出图并计费，
+    // 整任务换渠道重跑等于重复付费。
     for (let index = 0; index < input.quantity; index += 1) {
-      const payload = await this.requestGeneration(
-        {
-          model: modelConfig.upstreamModel,
-          prompt: buildPrompt(input),
-          size,
-          quality,
-          n: 1,
-          response_format: "b64_json",
-          output_format: "png"
-        },
-        1
-      );
-      if (payload.id) {
-        requestIds.add(payload.id);
+      const attempt = await this.generateSingleImage(input, index, modelConfig, size, quality);
+      if (attempt.requestId) {
+        requestIds.add(attempt.requestId);
       }
-      const image = await extractOpenAiImage(payload.data[0], payload, {
-        timeoutMs: Math.min(this.resolveRequestTimeoutMs(1), DEFAULT_OPENAI_REMOTE_IMAGE_TIMEOUT_MS),
-        allowInsecureLocalhost: this.allowInsecureLocalImageFetch
-      });
-      if (!image.bytes) {
-        throw new ProviderError("PROVIDER_EMPTY_RESULT", "OpenAI 未返回图片数据。", {
-          retryable: false,
-          provider: this.name,
-          details: payload
-        });
-      }
+      usedChannels.push(attempt.channel.name);
+      providerCostCents += channelCostCentsPerImage(attempt.channel, modelConfig, input.quality, size);
       images.push({
-        bytes: image.bytes,
-        mimeType: image.mimeType,
+        bytes: attempt.image.bytes,
+        mimeType: attempt.image.mimeType,
         width: input.width,
         height: input.height,
         index
@@ -336,32 +470,166 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     return {
       providerRequestId: requestIds.size === 1 ? [...requestIds][0] : `openai_${input.taskId}`,
       images,
+      // 命中哪个渠道就按哪个渠道记账，避免多渠道定价不同导致毛利报表失真
+      providerCostCents: Math.round(providerCostCents),
+      channels: usedChannels,
       raw: {
         provider: this.name,
         model,
         upstreamModel: modelConfig.upstreamModel,
         requestIds: [...requestIds],
-        responseImageCount: images.length
+        responseImageCount: images.length,
+        channels: usedChannels
       }
     };
   }
 
+  /** 运维查看渠道池与熔断状态 */
+  async channelHealth(): Promise<ImageChannelHealthReport> {
+    const states = await this.healthStore.snapshot(this.channels.map((channel) => channel.name));
+    return {
+      provider: this.healthStore.provider,
+      channels: this.channels.map((channel, index) => ({
+        name: channel.name,
+        baseUrl: channel.baseUrl,
+        priority: channel.priority,
+        tripped: states[index]?.tripped ?? false,
+        failures: states[index]?.failures ?? 0
+      }))
+    };
+  }
+
+  async close(): Promise<void> {
+    await this.healthStore.close();
+  }
+
+  private async generateSingleImage(
+    input: GenerateImageInput,
+    imageIndex: number,
+    modelConfig: ProviderModelConfig,
+    size: OpenAiImageSize,
+    quality: OpenAiImageQuality
+  ): Promise<ChannelAttemptOutcome> {
+    const candidates = await this.orderCandidateChannels();
+    let lastError: ProviderError | null = null;
+
+    for (let position = 0; position < candidates.length; position += 1) {
+      const channel = candidates[position];
+      const hasRemainingChannel = position < candidates.length - 1;
+      try {
+        const outcome = await this.requestChannelImage(channel, input, modelConfig, size, quality);
+        await this.healthStore.recordSuccess(channel.name);
+        this.onChannelEvent?.({
+          type: "channel_succeeded",
+          channel: channel.name,
+          taskId: input.taskId,
+          imageIndex
+        });
+        return outcome;
+      } catch (error) {
+        const providerError = normalizeProviderError(error, this.name);
+
+        // 内容拦截换渠道也一样被拦，直接失败，别浪费额度和时间
+        if (!isChannelFailureSignal(providerError)) {
+          throw providerError;
+        }
+
+        // 超时代表请求已发出、上游可能仍在出图，换渠道重发会双份计费。
+        // 但仍记入熔断：后续任务自动绕开这个摆烂的渠道。
+        const canFailover = providerError.code !== "PROVIDER_TIMEOUT" || this.failoverOnTimeout;
+        const tripped = await this.healthStore.recordFailure(channel.name);
+        this.onChannelEvent?.({
+          type: "channel_failed",
+          channel: channel.name,
+          taskId: input.taskId,
+          imageIndex,
+          code: providerError.code,
+          statusCode: providerError.statusCode,
+          message: providerError.message,
+          tripped,
+          willFailover: canFailover && hasRemainingChannel
+        });
+
+        if (!canFailover) {
+          throw providerError;
+        }
+        lastError = providerError;
+      }
+    }
+
+    throw (
+      lastError ??
+      new ProviderError("PROVIDER_FAILED", "所有图像渠道均不可用，请稍后重试。", {
+        retryable: true,
+        provider: this.name
+      })
+    );
+  }
+
+  /**
+   * 健康渠道优先，冷却中的渠道降级到队尾而不是直接剔除：
+   * 全部渠道都在冷却时仍要尝试出图，熔断不能变成全站停摆。
+   */
+  private async orderCandidateChannels(): Promise<ImageChannelConfig[]> {
+    const healthy: ImageChannelConfig[] = [];
+    const cooling: ImageChannelConfig[] = [];
+    for (const channel of this.channels) {
+      if (await this.healthStore.isTripped(channel.name)) {
+        cooling.push(channel);
+      } else {
+        healthy.push(channel);
+      }
+    }
+    return [...healthy, ...cooling];
+  }
+
+  private async requestChannelImage(
+    channel: ImageChannelConfig,
+    input: GenerateImageInput,
+    modelConfig: ProviderModelConfig,
+    size: OpenAiImageSize,
+    quality: OpenAiImageQuality
+  ): Promise<ChannelAttemptOutcome> {
+    const payload = await this.requestGeneration(
+      channel,
+      {
+        model: channel.upstreamModel ?? modelConfig.upstreamModel,
+        prompt: buildPrompt(input),
+        size,
+        quality,
+        n: 1,
+        response_format: "b64_json",
+        output_format: "png"
+      },
+      1
+    );
+    const image = await extractOpenAiImage(payload.data[0], payload, {
+      timeoutMs: Math.min(this.resolveRequestTimeoutMs(1), DEFAULT_OPENAI_REMOTE_IMAGE_TIMEOUT_MS),
+      allowInsecureLocalhost: isLocalHttpUrl(channel.baseUrl)
+    });
+    if (!image.bytes) {
+      throw new ProviderError("PROVIDER_EMPTY_RESULT", "OpenAI 未返回图片数据。", {
+        retryable: false,
+        provider: this.name,
+        details: payload
+      });
+    }
+    return {
+      channel,
+      image,
+      ...(payload.id ? { requestId: payload.id } : {})
+    };
+  }
+
   private async requestGeneration(
-    body: {
-      model: string;
-      prompt: string;
-      size: OpenAiImageSize;
-      quality: OpenAiImageQuality;
-      n: number;
-      response_format: "b64_json";
-      output_format: "png";
-    },
+    channel: ImageChannelConfig,
+    body: OpenAiGenerationRequestBody,
     quantity: number
   ): Promise<NormalizedOpenAiImageResponse> {
     let attempt = 0;
     while (true) {
       try {
-        return await this.performRequest(body, quantity);
+        return await this.performRequest(channel, body, quantity);
       } catch (error) {
         const providerError = normalizeProviderError(error, this.name);
         if (!shouldRetryOpenAiRequest(providerError) || attempt >= this.maxRetries) {
@@ -374,24 +642,17 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   }
 
   private async performRequest(
-    body: {
-      model: string;
-      prompt: string;
-      size: OpenAiImageSize;
-      quality: OpenAiImageQuality;
-      n: number;
-      response_format: "b64_json";
-      output_format: "png";
-    },
+    channel: ImageChannelConfig,
+    body: OpenAiGenerationRequestBody,
     quantity: number
   ): Promise<NormalizedOpenAiImageResponse> {
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/images/generations`, {
+      response = await fetch(`${channel.baseUrl}/images/generations`, {
         method: "POST",
         signal: AbortSignal.timeout(this.resolveRequestTimeoutMs(quantity)),
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${channel.apiKey}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify(body)
@@ -421,6 +682,37 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   private resolveRequestTimeoutMs(quantity: number): number {
     return this.timeoutMs * Math.max(1, Math.trunc(quantity));
   }
+}
+
+/**
+ * 判定失败是否属于「这个渠道不行」的信号：
+ * 鉴权失败（key 挂了/余额清零）、限流、5xx、连接失败、返回格式垃圾都算，
+ * 内容拦截不算（换渠道同样被拦）。
+ */
+function isChannelFailureSignal(error: ProviderError): boolean {
+  switch (error.code) {
+    case "PROVIDER_CONTENT_BLOCKED":
+      return false;
+    case "PROVIDER_AUTH_FAILED":
+    case "PROVIDER_RATE_LIMITED":
+    case "PROVIDER_TIMEOUT":
+    case "PROVIDER_EMPTY_RESULT":
+    case "PROVIDER_FAILED":
+      return true;
+    case "PROVIDER_BAD_RESPONSE":
+      // 4xx 参数错误换渠道也一样错；5xx 与格式异常才是渠道问题
+      return error.statusCode === undefined || error.statusCode >= 500;
+  }
+}
+
+function channelCostCentsPerImage(
+  channel: ImageChannelConfig,
+  modelConfig: ProviderModelConfig,
+  quality: Quality,
+  size: OpenAiImageSize
+): number {
+  const baseCost = channel.costCentsPerImage ?? modelConfig.costCentsPerImage;
+  return baseCost * modelConfig.qualityMultiplier[quality] * modelConfig.sizeMultiplier[size];
 }
 
 export function resolveDefaultImageProvider(): SupportedProviderName {
@@ -474,12 +766,15 @@ export function getImageModelConfig(modelId: ModelId): ProviderModelConfig {
   return providerModelConfigs[normalizeModelId(modelId)];
 }
 
-export function createImageGenerationProvider(name = resolveDefaultImageProvider()): ImageGenerationProvider {
+export function createImageGenerationProvider(
+  name: string = resolveDefaultImageProvider(),
+  options: OpenAiImageGenerationProviderOptions = {}
+): ImageGenerationProvider {
   switch (normalizeProviderName(name)) {
     case "mock":
       return new MockImageGenerationProvider();
     case "openai":
-      return new OpenAiImageGenerationProvider();
+      return new OpenAiImageGenerationProvider(options);
   }
 }
 
@@ -1089,17 +1384,17 @@ function openAiQuality(quality: Quality): OpenAiImageQuality {
   }
 }
 
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is required`);
-  }
-  return value;
-}
-
 function envNumber(name: string, fallback: number, allowZero = false): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && (allowZero ? value >= 0 : value > 0) ? value : fallback;
+}
+
+function envBool(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+  return value === "true" || value === "1";
 }
 
 function isAbortError(error: unknown): boolean {

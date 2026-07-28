@@ -8,7 +8,8 @@ import {
   quoteImageGeneration,
   readOpenAiGenerationRuntimeConfig,
   resolveDefaultImageModel,
-  resolveDefaultImageProvider
+  resolveDefaultImageProvider,
+  resolveImageChannels
 } from "@imagora/ai-providers";
 import { createStore } from "@imagora/database";
 import { startGenerationWorker, type GenerationQueueJob, type GenerationWorkerHandle } from "@imagora/queue";
@@ -48,7 +49,21 @@ const logger = pino({
 validateProductionConfig();
 
 const store = createStore();
-const provider = createImageGenerationProvider();
+const provider = createImageGenerationProvider(undefined, {
+  onChannelEvent(event) {
+    switch (event.type) {
+      case "channel_succeeded":
+        logger.debug({ ...event }, "image channel succeeded");
+        return;
+      case "channel_failed":
+        logger.warn({ ...event }, "image channel failed");
+        return;
+      case "health_store_degraded":
+        logger.error({ ...event }, "image channel health store degraded");
+        return;
+    }
+  }
+});
 const storage = createObjectStorage();
 const safety = createSafetyProvider();
 const queueProvider = process.env.QUEUE_PROVIDER ?? "inline";
@@ -251,10 +266,17 @@ async function executeTask({ task, referenceImageUrl }: ClaimedTask): Promise<Ta
       aspectRatio: task.aspectRatio,
       model: task.modelName || undefined
     });
+    // 多渠道下各中转站定价不同，优先用 provider 回报的实际渠道成本；
+    // mock 等不回报成本的 provider 仍回落到报价估算。
+    const providerCostCents =
+      result.providerCostCents ??
+      (createdImages.length === result.images.length
+        ? deliveredQuote.providerCostCents
+        : Math.round((deliveredQuote.providerCostCents * createdImages.length) / result.images.length));
     return {
       kind: "succeeded",
       createdImages,
-      providerCostCents: deliveredQuote.providerCostCents,
+      providerCostCents,
       creditDifference: task.creditCost - deliveredQuote.creditCost
     };
   } catch (error) {
@@ -639,7 +661,7 @@ function validateProductionConfig(): void {
 
   requireProductionValue("DATABASE_URL");
   requireProductionValue("REDIS_URL");
-  requireProductionValue("OPENAI_API_KEY");
+  requireProductionImageChannels();
   requireProductionValue("OPENAI_TIMEOUT_MS");
   requireProductionValue("OPENAI_MAX_RETRIES");
   requireProductionValue("S3_ENDPOINT");
@@ -681,6 +703,24 @@ function requireProductionNumber(name: string): number {
     throw new Error(`Unsafe production config: ${name} must be a positive number`);
   }
   return value;
+}
+
+// 多渠道模式下不再强制单一 OPENAI_API_KEY：要求渠道池里至少有一个启用渠道。
+// 同时提前引爆 IMAGE_CHANNELS 的 JSON / URL 格式错误，避免运行时才发现。
+function requireProductionImageChannels(): void {
+  let channels: ReturnType<typeof resolveImageChannels>;
+  try {
+    channels = resolveImageChannels();
+  } catch (error) {
+    throw new Error(
+      `Unsafe production config: ${error instanceof Error ? error.message : "IMAGE_CHANNELS is invalid"}`
+    );
+  }
+  if (!channels.length) {
+    throw new Error(
+      "Unsafe production config: at least one enabled image channel is required (set OPENAI_API_KEY or IMAGE_CHANNELS)"
+    );
+  }
 }
 
 function requireProductionImageProvider(...allowedValues: string[]): void {

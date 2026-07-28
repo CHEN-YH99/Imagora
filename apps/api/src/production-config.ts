@@ -2,7 +2,8 @@ import {
   assertProductionOpenAiGenerationConfig,
   readOpenAiGenerationRuntimeConfig,
   resolveDefaultImageModel,
-  resolveDefaultImageProvider
+  resolveDefaultImageProvider,
+  resolveImageChannels
 } from "@imagora/ai-providers";
 import { maxQuantity } from "@imagora/shared";
 import { envBool } from "./runtime.js";
@@ -22,7 +23,7 @@ export function validateProductionConfig(options: ProductionConfigOptions): void
   rejectLocalhostProductionValue("WEB_ORIGIN");
   requireProductionValue("DATABASE_URL");
   requireProductionValue("REDIS_URL");
-  requireProductionValue("OPENAI_API_KEY");
+  requireProductionImageChannels();
   requireProductionValue("OPENAI_TIMEOUT_MS");
   requireProductionValue("OPENAI_MAX_RETRIES");
   requireProductionValue("S3_ENDPOINT");
@@ -115,6 +116,24 @@ function requireProductionImageModel(): void {
   } catch (error) {
     throw new Error(
       `Unsafe production config: ${error instanceof Error ? error.message : "image model is not configured"}`
+    );
+  }
+}
+
+// 多渠道模式下不再强制单一 OPENAI_API_KEY：要求渠道池里至少有一个启用渠道。
+// 同时提前引爆 IMAGE_CHANNELS 的 JSON / URL 格式错误，避免运行时才发现。
+function requireProductionImageChannels(): void {
+  let channels: ReturnType<typeof resolveImageChannels>;
+  try {
+    channels = resolveImageChannels();
+  } catch (error) {
+    throw new Error(
+      `Unsafe production config: ${error instanceof Error ? error.message : "IMAGE_CHANNELS is invalid"}`
+    );
+  }
+  if (!channels.length) {
+    throw new Error(
+      "Unsafe production config: at least one enabled image channel is required (set OPENAI_API_KEY or IMAGE_CHANNELS)"
     );
   }
 }
