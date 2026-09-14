@@ -156,8 +156,10 @@ docker compose -f infra/docker-compose.yml up -d
 | `WEB_ORIGIN` | 前端地址 | `http://127.0.0.1:3100` |
 | `DATABASE_URL` | PostgreSQL 连接串 | - |
 | `REDIS_URL` | Redis 连接串 | - |
-| `IMAGE_PROVIDER_DEFAULT` | 默认图片 Provider（`mock` / `openai`） | 自动：有 `OPENAI_API_KEY` 则 `openai`，否则 `mock` |
+| `IMAGE_PROVIDER_DEFAULT` | 默认图片 Provider（`mock` / `openai`） | 自动：有可用 `IMAGE_CHANNELS` 或 `OPENAI_API_KEY` 则 `openai`，否则 `mock` |
 | `IMAGE_MODEL_DEFAULT` | 默认图片模型（如 `openai:gpt-image-2`） | Provider 内置默认 |
+| `IMAGE_CHANNELS` | 生图 API 通道池：地址、密钥或 `apiKeyEnv`、优先级、启用状态 | 回退到旧 OpenAI 配置 |
+| `IMAGE_MODELS` | 模型目录：展示名、上游模型、请求格式、绑定通道、价格及能力 | 兼容旧的 GPT Image 2 / Mock 模式 |
 | `OPENAI_API_KEY` | OpenAI API Key | - |
 | `STORAGE_PROVIDER` | 存储 Provider（`inline` / `filesystem` / `s3` / `r2`） | `inline` |
 | `PAYMENT_PROVIDER` | 支付 Provider（`mock` / `stripe`） | `mock` |
@@ -166,7 +168,9 @@ docker compose -f infra/docker-compose.yml up -d
 | `SAFETY_PROVIDER` | 安全审核 Provider（`local` / `http`） | `local` |
 | `CAPTCHA_PROVIDER` | 验证码 Provider（`builtin` / `turnstile`） | `builtin` |
 
-兼容说明：旧字段 `AI_PROVIDER`、`OPENAI_IMAGE_MODEL` 仍可识别，但新配置统一建议使用 `IMAGE_PROVIDER_DEFAULT`、`IMAGE_MODEL_DEFAULT`。本地开发如果只填写 `OPENAI_API_KEY`，系统会自动切到 `openai`；不填则默认走 `mock`。
+兼容说明：旧字段 `AI_PROVIDER`、`OPENAI_IMAGE_MODEL` 仍可识别，但新配置统一建议使用 `IMAGE_PROVIDER_DEFAULT`、`IMAGE_MODEL_DEFAULT`。配置了有效通道池或 `OPENAI_API_KEY` 时，系统默认使用 `openai` 兼容接口适配器；否则默认走 `mock`。
+
+多 API、多模型的完整配置示例见 [多模型生图配置](docs/多模型生图配置.md)。首页和生成工作台通过 `GET /api/generation/models` 获取同一份可用模型目录，浏览器不接收上游地址或密钥；后台只在所选模型绑定的通道内做故障切换，不会把 GPT 请求改成 Grok。修改服务端环境配置后必须重启 API 和 Worker。
 
 ## 架构设计
 

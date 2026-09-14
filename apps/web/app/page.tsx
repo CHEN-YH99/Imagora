@@ -26,15 +26,10 @@ import {
   X,
   Zap
 } from "lucide-react";
-import {
-  DEFAULT_IMAGE_MODEL_ID,
-  formatCredits,
-  getCurrentUser,
-  IMAGE_MODEL_OPTIONS,
-  peekCurrentUser
-} from "../lib/api";
+import { getCurrentUser, peekCurrentUser, validateImageModelSelection } from "../lib/api";
 import { buildGeneratePath, saveGenerationDraft, type GenerationDraft } from "../lib/generateDrafts";
 import type { PromptPresetId } from "./generate/promptPresets";
+import { useImageModelCatalog } from "./generate/hooks/useImageModelCatalog";
 
 type StyleOption = {
   id: PromptPresetId;
@@ -197,7 +192,6 @@ const pricingPlans = [
   }
 ];
 
-const qualityMultiplier: Record<Quality, number> = { "1k": 0.7, "2k": 1, "4k": 1.65 };
 const qualityToGenerateValue: Record<Quality, "draft" | "standard" | "high"> = {
   "1k": "draft",
   "2k": "standard",
@@ -217,7 +211,7 @@ export default function HomePage() {
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(DEFAULT_IMAGE_MODEL_ID);
+  const [requestedModel, setSelectedModel] = useState("");
   const [aspectRatio, setAspectRatio] = useState("1:1");
   const [quality, setQuality] = useState<Quality>("2k");
   const [quantity, setQuantity] = useState(2);
@@ -228,6 +222,17 @@ export default function HomePage() {
   const [promptLoopPhase, setPromptLoopPhase] = useState<PromptLoopPhase>("typing");
   const [authCheckState, setAuthCheckState] = useState<"idle" | "checking">("idle");
   const [entryNotice, setEntryNotice] = useState<{ tone: "info" | "danger"; text: string } | null>(null);
+  const { catalog: modelCatalog, loading: modelsLoading, error: modelsError } = useImageModelCatalog();
+  const selectedModel = requestedModel || modelCatalog.defaultModel || "";
+  const activeModel = modelCatalog.models.find((model) => model.id === selectedModel);
+  const modelSelectionError = modelsLoading
+    ? "正在加载可用模型，请稍候。"
+    : (modelsError ??
+      validateImageModelSelection(activeModel, {
+        quality: qualityToGenerateValue[quality],
+        aspectRatio,
+        quantity
+      }));
 
   useEffect(() => {
     const cachedUser = peekCurrentUser();
@@ -246,7 +251,6 @@ export default function HomePage() {
       });
   }, []);
 
-  const creditCost = useMemo(() => Math.ceil(8 * qualityMultiplier[quality] * quantity), [quality, quantity]);
   const activePromptTemplate = promptExamples[promptLoopIndex] ?? promptExamples[0] ?? "";
   const promptValue = promptMode === "auto" ? activePromptTemplate.slice(0, Math.max(promptLoopLength, 0)) : prompt;
   const effectivePrompt = (promptMode === "auto" ? activePromptTemplate : prompt).trim();
@@ -363,6 +367,10 @@ export default function HomePage() {
   }
 
   async function handleGenerate() {
+    if (modelSelectionError) {
+      setEntryNotice({ tone: "danger", text: modelSelectionError });
+      return;
+    }
     if (!effectivePrompt) {
       return;
     }
@@ -371,9 +379,14 @@ export default function HomePage() {
   }
 
   async function handleStyleOption(option: StyleOption) {
+    if (modelSelectionError) {
+      setEntryNotice({ tone: "danger", text: modelSelectionError });
+      return;
+    }
+    const presetRatio = activeModel?.aspectRatios.includes(option.aspectRatio) ? option.aspectRatio : aspectRatio;
     const path = buildGeneratePath({
       style: option.id,
-      aspectRatio: option.aspectRatio,
+      aspectRatio: presetRatio,
       quality: qualityToGenerateValue[quality],
       quantity,
       model: selectedModel
@@ -381,11 +394,25 @@ export default function HomePage() {
     await enterGenerateWorkspace(path, {
       prompt: option.prompt,
       style: option.id,
-      aspectRatio: option.aspectRatio,
+      aspectRatio: presetRatio,
       quality: qualityToGenerateValue[quality],
       quantity,
       model: selectedModel
     });
+  }
+
+  function selectImageModel(modelId: string) {
+    const nextModel = modelCatalog.models.find((model) => model.id === modelId);
+    if (!nextModel) return;
+    setSelectedModel(nextModel.id);
+    if (!nextModel.qualities.includes(qualityToGenerateValue[quality])) {
+      const nextQuality = (["1k", "2k", "4k"] as Quality[]).find((option) =>
+        nextModel.qualities.includes(qualityToGenerateValue[option])
+      );
+      setQuality(nextQuality ?? "2k");
+    }
+    if (!nextModel.aspectRatios.includes(aspectRatio)) setAspectRatio(nextModel.aspectRatios[0]);
+    setQuantity((current) => Math.min(current, nextModel.maxQuantity));
   }
 
   return (
@@ -616,12 +643,14 @@ export default function HomePage() {
                   <select
                     className="focus-ring w-full rounded-2xl border border-white/12 bg-black/40 px-3 py-2 text-white"
                     value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value)}
+                    onChange={(event) => selectImageModel(event.target.value)}
                     aria-label="选择模型"
+                    disabled={modelsLoading || !modelCatalog.models.length}
                   >
-                    {IMAGE_MODEL_OPTIONS.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
+                    {!activeModel ? <option value="">{modelsLoading ? "加载模型中…" : "暂无可用模型"}</option> : null}
+                    {modelCatalog.models.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
                       </option>
                     ))}
                   </select>
@@ -632,7 +661,7 @@ export default function HomePage() {
                     aria-label="选择比例"
                   >
                     {aspectRatioOptions.map((o) => (
-                      <option key={o.value} value={o.value}>
+                      <option key={o.value} value={o.value} disabled={!activeModel?.aspectRatios.includes(o.value)}>
                         {o.label}
                       </option>
                     ))}
@@ -653,7 +682,7 @@ export default function HomePage() {
                         className="focus-ring rounded-full px-2 text-white/70 hover:bg-white/10 hover:text-white"
                         type="button"
                         aria-label="增加生成数量"
-                        onClick={() => setQuantity((v) => Math.min(4, v + 1))}
+                        onClick={() => setQuantity((current) => Math.min(activeModel?.maxQuantity ?? 4, current + 1))}
                       >
                         +
                       </button>
@@ -662,7 +691,7 @@ export default function HomePage() {
                 </div>
                 <button
                   type="button"
-                  disabled={authCheckState === "checking" || !effectivePrompt}
+                  disabled={authCheckState === "checking" || !effectivePrompt || Boolean(modelSelectionError)}
                   onClick={() => void handleGenerate()}
                   className="focus-ring mt-4 inline-flex items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 text-sm font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:cursor-not-allowed disabled:opacity-60"
                 >
@@ -681,6 +710,7 @@ export default function HomePage() {
                     type="button"
                     aria-pressed={quality === item}
                     onClick={() => setQuality(item)}
+                    disabled={!activeModel?.qualities.includes(qualityToGenerateValue[item])}
                     className={`focus-ring rounded-full border px-4 py-2 text-sm transition-colors duration-200 ${quality === item ? "border-mint bg-mint text-ink" : "border-white/14 bg-white/8 text-white/72 hover:bg-white/14 hover:text-white"}`}
                   >
                     {item.toUpperCase()}
@@ -690,7 +720,7 @@ export default function HomePage() {
               <div className={`flex items-center gap-3 rounded-full border px-4 py-2 text-sm ${actionHintToneClass}`}>
                 <span className="inline-flex items-center gap-2">
                   <Coins className="size-4 text-volt" aria-hidden="true" />
-                  {formatCredits(creditCost)}
+                  积分以工作台报价为准
                 </span>
                 <span className="h-4 w-px bg-white/18" aria-hidden="true" />
                 <span>{authCheckState === "checking" ? "检查中" : isLoggedIn ? "已登录直达" : "登录后保留预设"}</span>
@@ -718,6 +748,11 @@ export default function HomePage() {
                   </div>
                 </div>
               </div>
+              {modelSelectionError ? (
+                <p className="mt-3 text-sm text-ember" role={modelsLoading ? "status" : "alert"}>
+                  {modelSelectionError}
+                </p>
+              ) : null}
               {entryNotice ? (
                 <p
                   className={`mt-3 rounded-2xl border px-3 py-2 text-sm ${

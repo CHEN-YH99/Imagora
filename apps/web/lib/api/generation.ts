@@ -6,7 +6,19 @@ const defaultTaskWaitTimeoutMs = 5 * 60_000;
 
 export const DEFAULT_IMAGE_MODEL_ID = "openai:gpt-image-2";
 export const DEFAULT_MOCK_IMAGE_MODEL_ID = "mock:default";
-export const IMAGE_MODEL_OPTIONS = [{ value: DEFAULT_IMAGE_MODEL_ID, label: "GPT Image 2" }] as const;
+
+export interface ImageModelOption {
+  id: string;
+  label: string;
+  qualities: string[];
+  aspectRatios: string[];
+  maxQuantity: number;
+}
+
+export interface ImageModelCatalog {
+  models: ImageModelOption[];
+  defaultModel: string | null;
+}
 
 export function normalizeImageModel(modelName?: string | null): string {
   const normalized = modelName?.trim();
@@ -23,8 +35,20 @@ export function normalizeImageModel(modelName?: string | null): string {
 }
 
 export function resolveSelectableImageModel(modelName?: string | null): string {
-  const normalized = normalizeImageModel(modelName);
-  return IMAGE_MODEL_OPTIONS.some((option) => option.value === normalized) ? normalized : DEFAULT_IMAGE_MODEL_ID;
+  return normalizeImageModel(modelName);
+}
+
+export function validateImageModelSelection(
+  model: ImageModelOption | undefined,
+  input: { quality: string; aspectRatio: string; quantity: number }
+): string | null {
+  if (!model) return "所选模型未配置或已停用，请重新选择。";
+  if (!model.qualities.includes(input.quality)) return "所选模型不支持当前画质，请重新选择。";
+  if (!model.aspectRatios.includes(input.aspectRatio)) return "所选模型不支持当前画面比例，请重新选择。";
+  if (!Number.isInteger(input.quantity) || input.quantity < 1 || input.quantity > model.maxQuantity) {
+    return `所选模型每次最多生成 ${model.maxQuantity} 张图片。`;
+  }
+  return null;
 }
 
 export class TaskWaitTimeoutError extends Error {

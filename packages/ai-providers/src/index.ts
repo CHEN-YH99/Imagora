@@ -4,7 +4,21 @@ import {
   createResilientChannelHealthStore,
   type ChannelHealthStore
 } from "./channel-health.js";
-import { resolveImageChannels, type ImageChannelConfig } from "./channels.js";
+import { hasConfiguredImageChannel, resolveImageChannels, type ImageChannelConfig } from "./channels.js";
+import {
+  publicImageModel,
+  readImageModelConfigs,
+  resolveModelChannels,
+  type ProviderModelConfig,
+  type PublicImageModel
+} from "./models.js";
+
+export {
+  readImageModelConfigs,
+  resolveModelChannels,
+  type ProviderModelConfig,
+  type PublicImageModel
+} from "./models.js";
 
 export {
   createChannelHealthStore,
@@ -40,7 +54,7 @@ export const MAX_PRODUCTION_OPENAI_MAX_RETRIES = 1 as const;
 const DEFAULT_OPENAI_REMOTE_IMAGE_TIMEOUT_MS = 60_000;
 const MAX_OPENAI_REMOTE_IMAGE_BYTES = 20 * 1024 * 1024;
 
-type SupportedImageModel = (typeof SUPPORTED_IMAGE_MODELS)[number];
+type SupportedImageModel = ModelId;
 type SupportedProviderName = "mock" | "openai";
 type OpenAiImageSize = "1024x1024" | "1024x1536" | "1536x1024";
 type OpenAiImageQuality = "low" | "medium" | "high";
@@ -135,11 +149,12 @@ interface ChannelAttemptOutcome {
 interface OpenAiGenerationRequestBody {
   model: string;
   prompt: string;
-  size: OpenAiImageSize;
-  quality: OpenAiImageQuality;
+  size?: OpenAiImageSize;
+  aspect_ratio?: AspectRatio;
+  quality?: OpenAiImageQuality;
   n: number;
   response_format: "b64_json";
-  output_format: "png";
+  output_format?: "png";
 }
 
 export interface ImageGenerationProvider {
@@ -249,18 +264,6 @@ export interface ImageGenerationQuote {
   quality: OpenAiImageQuality;
 }
 
-interface ProviderModelConfig {
-  provider: SupportedProviderName;
-  modelId: SupportedImageModel;
-  upstreamModel: string;
-  label: string;
-  qualityMultiplier: Record<Quality, number>;
-  sizeMultiplier: Record<OpenAiImageSize, number>;
-  quantityMultiplier: number;
-  // 供应商侧每张图的真实成本（分），用于毛利核算；mock 为 0
-  costCentsPerImage: number;
-}
-
 export interface OpenAiGenerationRuntimeConfig {
   timeoutMs: number;
   maxRetries: number;
@@ -298,45 +301,6 @@ interface OpenAiRemoteImageFetchOptions {
   timeoutMs: number;
   allowInsecureLocalhost: boolean;
 }
-
-const providerModelConfigs: Record<SupportedImageModel, ProviderModelConfig> = {
-  [DEFAULT_OPENAI_MODEL_ID]: {
-    provider: "openai",
-    modelId: DEFAULT_OPENAI_MODEL_ID,
-    upstreamModel: DEFAULT_OPENAI_MODEL,
-    label: "GPT Image 2",
-    qualityMultiplier: {
-      draft: 0.75,
-      standard: 1,
-      high: 1.7
-    },
-    sizeMultiplier: {
-      "1024x1024": 1,
-      "1024x1536": 1.22,
-      "1536x1024": 1.22
-    },
-    quantityMultiplier: 7,
-    costCentsPerImage: 4
-  },
-  [MOCK_MODEL_ID]: {
-    provider: "mock",
-    modelId: MOCK_MODEL_ID,
-    upstreamModel: MOCK_MODEL,
-    label: "Imagora Mock",
-    qualityMultiplier: {
-      draft: 0.4,
-      standard: 0.65,
-      high: 1
-    },
-    sizeMultiplier: {
-      "1024x1024": 1,
-      "1024x1536": 1.1,
-      "1536x1024": 1.1
-    },
-    quantityMultiplier: 4,
-    costCentsPerImage: 0
-  }
-};
 
 const modelAliases: Record<string, SupportedImageModel> = {
   [DEFAULT_OPENAI_MODEL]: DEFAULT_OPENAI_MODEL_ID,
@@ -418,6 +382,7 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
   async generateImage(input: GenerateImageInput): Promise<GenerateImageResult> {
     const model = resolveProviderModel(input.model, this.name);
     const modelConfig = getImageModelConfig(model);
+    validateImageModelOptions(modelConfig, input);
     if (modelConfig.provider !== this.name) {
       throw new ProviderError("PROVIDER_BAD_RESPONSE", `OpenAI provider does not support model "${model}"`, {
         retryable: false,
@@ -510,7 +475,13 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
     size: OpenAiImageSize,
     quality: OpenAiImageQuality
   ): Promise<ChannelAttemptOutcome> {
-    const candidates = await this.orderCandidateChannels();
+    const candidates = await this.orderCandidateChannels(modelConfig);
+    if (!candidates.length) {
+      throw new ProviderError("PROVIDER_FAILED", "所选模型暂无可用的生图通道，请联系管理员。", {
+        retryable: false,
+        provider: this.name
+      });
+    }
     let lastError: ProviderError | null = null;
 
     for (let position = 0; position < candidates.length; position += 1) {
@@ -570,10 +541,10 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
    * 健康渠道优先，冷却中的渠道降级到队尾而不是直接剔除：
    * 全部渠道都在冷却时仍要尝试出图，熔断不能变成全站停摆。
    */
-  private async orderCandidateChannels(): Promise<ImageChannelConfig[]> {
+  private async orderCandidateChannels(modelConfig: ProviderModelConfig): Promise<ImageChannelConfig[]> {
     const healthy: ImageChannelConfig[] = [];
     const cooling: ImageChannelConfig[] = [];
-    for (const channel of this.channels) {
+    for (const channel of resolveModelChannels(modelConfig, this.channels)) {
       if (await this.healthStore.isTripped(channel.name)) {
         cooling.push(channel);
       } else {
@@ -595,11 +566,10 @@ export class OpenAiImageGenerationProvider implements ImageGenerationProvider {
       {
         model: channel.upstreamModel ?? modelConfig.upstreamModel,
         prompt: buildPrompt(input),
-        size,
-        quality,
         n: 1,
         response_format: "b64_json",
-        output_format: "png"
+        ...(modelConfig.apiFormat === "grok-image" ? { aspect_ratio: input.aspectRatio } : { size }),
+        ...(modelConfig.apiFormat === "gpt-image" ? { quality, output_format: "png" } : {})
       },
       1
     );
@@ -720,7 +690,7 @@ export function resolveDefaultImageProvider(): SupportedProviderName {
   if (configuredProvider) {
     return normalizeProviderName(configuredProvider);
   }
-  return hasConfiguredOpenAiApiKey() ? "openai" : "mock";
+  return hasConfiguredImageChannel() ? "openai" : "mock";
 }
 
 export function readOpenAiGenerationRuntimeConfig(): OpenAiGenerationRuntimeConfig {
@@ -748,8 +718,8 @@ export function resolveDefaultImageModel(providerName = resolveDefaultImageProvi
   const configuredModel = process.env.IMAGE_MODEL_DEFAULT?.trim();
   if (configuredModel) {
     const resolvedModel = normalizeModelId(configuredModel);
-    const config = providerModelConfigs[resolvedModel];
-    if (config.provider !== provider) {
+    const config = getImageModelConfig(resolvedModel);
+    if (config.provider !== provider || !config.enabled) {
       throw new Error(`IMAGE_MODEL_DEFAULT "${configuredModel}" does not match provider "${provider}"`);
     }
     return resolvedModel;
@@ -763,7 +733,8 @@ export function resolveDefaultImageModel(providerName = resolveDefaultImageProvi
 }
 
 export function getImageModelConfig(modelId: ModelId): ProviderModelConfig {
-  return providerModelConfigs[normalizeModelId(modelId)];
+  const normalized = normalizeModelId(modelId);
+  return readImageModelConfigs().find((model) => model.modelId === normalized)!;
 }
 
 export function createImageGenerationProvider(
@@ -788,7 +759,24 @@ export function getActiveProviderMetadata(name = resolveDefaultImageProvider()):
 
 export function listSupportedModels(name?: string): SupportedImageModel[] {
   const provider = name ? normalizeProviderName(name) : undefined;
-  return SUPPORTED_IMAGE_MODELS.filter((model) => !provider || providerModelConfigs[model].provider === provider);
+  return readImageModelConfigs()
+    .filter((model) => model.enabled && (!provider || model.provider === provider))
+    .map((model) => model.modelId);
+}
+
+export function getImageModelCatalog(name = resolveDefaultImageProvider()): {
+  models: PublicImageModel[];
+  defaultModel: string | null;
+} {
+  const provider = normalizeProviderName(name);
+  const channels = provider === "openai" ? resolveImageChannels() : [];
+  const models = readImageModelConfigs()
+    .filter((model) => model.enabled && model.provider === provider)
+    .filter((model) => provider === "mock" || resolveModelChannels(model, channels).length > 0)
+    .map(publicImageModel);
+  if (!models.length) return { models, defaultModel: null };
+  const preferred = resolveDefaultImageModel(provider);
+  return { models, defaultModel: models.find((model) => model.id === preferred)?.id ?? models[0].id };
 }
 
 export function resolveProviderModel(
@@ -798,8 +786,8 @@ export function resolveProviderModel(
   const provider = normalizeProviderName(providerName);
   const requestedModel = inputModel ? normalizeModelId(inputModel) : resolveDefaultImageModel(provider);
 
-  const config = providerModelConfigs[requestedModel];
-  if (!config || config.provider !== provider) {
+  const config = getImageModelConfig(requestedModel);
+  if (!config.enabled || config.provider !== provider) {
     throw new ProviderError(
       "PROVIDER_BAD_RESPONSE",
       `Provider "${provider}" does not support model "${requestedModel}".`,
@@ -810,13 +798,21 @@ export function resolveProviderModel(
     );
   }
 
+  if (config.channels && !resolveModelChannels(config, resolveImageChannels()).length) {
+    throw new ProviderError("PROVIDER_BAD_RESPONSE", "所选模型暂无可用的生图通道，请联系管理员。", {
+      retryable: false,
+      provider
+    });
+  }
+
   return requestedModel;
 }
 
 export function quoteImageGeneration(input: QuoteImageGenerationInput): ImageGenerationQuote {
   const provider = normalizeProviderName(input.provider ?? resolveDefaultImageProvider());
   const model = resolveProviderModel(input.model, provider);
-  const config = providerModelConfigs[model];
+  const config = getImageModelConfig(model);
+  validateImageModelOptions(config, input);
   const dimension = aspectRatioDimensions[input.aspectRatio];
   const size = openAiSize(dimension.width, dimension.height);
   const quality = openAiQuality(input.quality);
@@ -825,11 +821,19 @@ export function quoteImageGeneration(input: QuoteImageGenerationInput): ImageGen
   // 供应商成本随质量/尺寸缩放，与计费口径一致，便于后续毛利核算
   const providerCostPerImage =
     config.costCentsPerImage * config.qualityMultiplier[input.quality] * config.sizeMultiplier[size];
+  const creditCost = Math.ceil(modelUnitCost * input.quantity);
+  const providerCostCents = Math.round(providerCostPerImage * input.quantity);
+  if (!Number.isSafeInteger(creditCost) || creditCost < 1 || !Number.isSafeInteger(providerCostCents)) {
+    throw new ProviderError("PROVIDER_BAD_RESPONSE", "所选模型的计费配置无效，请联系管理员。", {
+      retryable: false,
+      provider
+    });
+  }
   return {
     provider,
     model,
-    creditCost: Math.ceil(modelUnitCost * input.quantity),
-    providerCostCents: Math.round(providerCostPerImage * input.quantity),
+    creditCost,
+    providerCostCents,
     width: dimension.width,
     height: dimension.height,
     size,
@@ -859,14 +863,10 @@ function firstNonEmptyEnv(...names: string[]): string | undefined {
   return undefined;
 }
 
-function hasConfiguredOpenAiApiKey(): boolean {
-  return Boolean(process.env.OPENAI_API_KEY?.trim());
-}
-
 function normalizeModelId(modelId: ModelId): SupportedImageModel {
   const normalized = modelId.trim();
-  const resolved = modelAliases[normalized];
-  if (resolved) {
+  const resolved = modelAliases[normalized] ?? normalized;
+  if (readImageModelConfigs().some((model) => model.modelId === resolved)) {
     return resolved;
   }
   throw new Error(`Unsupported image model: ${modelId}`);
@@ -875,13 +875,31 @@ function normalizeModelId(modelId: ModelId): SupportedImageModel {
 function resolveConfiguredOpenAiModel(): SupportedImageModel {
   const value = process.env.OPENAI_IMAGE_MODEL?.trim();
   if (!value) {
-    return DEFAULT_OPENAI_MODEL_ID;
+    return (
+      readImageModelConfigs().find((model) => model.provider === "openai" && model.enabled)?.modelId ??
+      DEFAULT_OPENAI_MODEL_ID
+    );
   }
   const modelId = normalizeModelId(value);
-  if (providerModelConfigs[modelId].provider !== "openai") {
+  const config = getImageModelConfig(modelId);
+  if (config.provider !== "openai" || !config.enabled) {
     throw new Error(`Unsupported OPENAI_IMAGE_MODEL: ${value}`);
   }
   return modelId;
+}
+
+function validateImageModelOptions(
+  model: ProviderModelConfig,
+  input: Pick<GenerateImageInput, "quality" | "aspectRatio" | "quantity">
+): void {
+  let message: string | undefined;
+  if (!model.qualities.includes(input.quality)) message = "所选模型不支持当前画质，请重新选择。";
+  else if (!model.aspectRatios.includes(input.aspectRatio)) message = "所选模型不支持当前画面比例，请重新选择。";
+  else if (!Number.isInteger(input.quantity) || input.quantity < 1 || input.quantity > model.maxQuantity) {
+    message = `所选模型每次最多生成 ${model.maxQuantity} 张图片。`;
+  }
+  if (message)
+    throw new ProviderError("PROVIDER_BAD_RESPONSE", message, { retryable: false, provider: model.provider });
 }
 
 function normalizeProviderError(error: unknown, provider: SupportedProviderName): ProviderError {

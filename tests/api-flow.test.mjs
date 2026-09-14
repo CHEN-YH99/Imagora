@@ -5,7 +5,7 @@ import { access, mkdtemp, rm } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { JsonStore } from "../packages/database/dist/index.js";
 
@@ -1747,6 +1747,126 @@ test("api and worker complete generation and enforce admin safety rules", async 
     api.kill();
     worker.kill();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("api and worker route multiple selected models to their own image gateways", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-api-model-routing-"));
+  const port = await reserveUnusedPort();
+  const makeResponse = () => ({ status: 200, body: { data: [{ b64_json: onePixelPngBase64 }] } });
+  const gptGateway = createFakeOpenAiServer([makeResponse()]);
+  const grokGateway = createFakeOpenAiServer([makeResponse()]);
+  await gptGateway.listen();
+  await grokGateway.listen();
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    IMAGORA_STORE_PATH: join(dir, "store.json"),
+    DATA_STORE: "json",
+    STORAGE_PROVIDER: "inline",
+    RUNTIME_STATE_PROVIDER: "memory",
+    RATE_LIMIT_PROVIDER: "memory",
+    IMAGE_CHANNEL_HEALTH_PROVIDER: "memory",
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    WORKER_POLL_INTERVAL_MS: "100",
+    QUEUE_PROVIDER: "inline",
+    IMAGE_PROVIDER_DEFAULT: "openai",
+    IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
+    OPENAI_API_KEY: "",
+    OPENAI_BASE_URL: "",
+    OPENAI_TIMEOUT_MS: "1000",
+    OPENAI_MAX_RETRIES: "0",
+    OPENAI_RETRY_BASE_MS: "10",
+    IMAGE_CHANNELS: JSON.stringify([
+      { name: "gpt", baseUrl: `http://127.0.0.1:${gptGateway.port}/v1`, apiKey: "fake-gpt-key", priority: 0 },
+      { name: "grok", baseUrl: `http://127.0.0.1:${grokGateway.port}/v1`, apiKey: "fake-grok-key", priority: 1 }
+    ]),
+    IMAGE_MODELS: JSON.stringify([
+      {
+        id: "openai:gpt-image-2",
+        label: "GPT Image 2",
+        upstreamModel: "gpt-image-2",
+        apiFormat: "gpt-image",
+        channels: ["gpt"],
+        creditsPerImage: 7,
+        costCentsPerImage: 4
+      },
+      {
+        id: "xai:grok-imagine-image",
+        label: "Grok Imagine",
+        upstreamModel: "grok-imagine-image",
+        apiFormat: "grok-image",
+        channels: ["grok"],
+        creditsPerImage: 3,
+        costCentsPerImage: 2
+      }
+    ])
+  };
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore", windowsHide: true });
+  const worker = spawn(process.execPath, ["apps/worker/dist/main.js"], { env, stdio: "ignore", windowsHide: true });
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl);
+    const catalogResponse = await fetch(baseUrl + "/api/generation/models");
+    assert.equal(catalogResponse.status, 200);
+    const catalog = await catalogResponse.json();
+    assert.deepEqual(
+      catalog.data.models.map((model) => model.id),
+      ["openai:gpt-image-2", "xai:grok-imagine-image"]
+    );
+    assert.doesNotMatch(JSON.stringify(catalog.data), /fake-.*-key|127\.0\.0\.1|apiKey|channels|upstreamModel/);
+    const { session } = await login(baseUrl, "demo@imagora.local", "Demo123!");
+    const before = await get(baseUrl, "/api/users/me/credits", session);
+    for (const choice of [
+      { id: "openai:gpt-image-2", credits: 7 },
+      { id: "xai:grok-imagine-image", credits: 3 }
+    ]) {
+      const input = {
+        clientRequestId: randomUUID(),
+        prompt: "A calm harbour at dawn with warm natural light",
+        style: "realistic",
+        aspectRatio: "1:1",
+        quality: "standard",
+        quantity: 1,
+        model: choice.id
+      };
+      const quote = await post(baseUrl, "/api/generation/quote", input, session);
+      assert.equal(quote.data.creditCost, choice.credits);
+      const created = await post(baseUrl, "/api/generation/tasks", input, session);
+      assert.equal(created.data.task.modelName, choice.id);
+      assert.equal(created.data.task.creditCost, choice.credits);
+      const completed = await waitForTask(baseUrl, session, created.data.task.id);
+      assert.equal(completed.data.task.status, "SUCCEEDED");
+      assert.equal(completed.data.task.modelName, choice.id);
+      assert.equal(completed.data.images.length, 1);
+      assert.equal(completed.data.images[0].generationMetadata.modelName, choice.id);
+    }
+    const after = await get(baseUrl, "/api/users/me/credits", session);
+    assert.equal(before.data.account.balance - after.data.account.balance, 10);
+    assert.equal(gptGateway.requests.length, 1);
+    assert.equal(grokGateway.requests.length, 1);
+    assert.equal(gptGateway.requests[0].authorization, "Bearer fake-gpt-key");
+    assert.equal(grokGateway.requests[0].authorization, "Bearer fake-grok-key");
+    const gptRequest = JSON.parse(gptGateway.requests[0].body);
+    const grokRequest = JSON.parse(grokGateway.requests[0].body);
+    assert.equal(gptRequest.model, "gpt-image-2");
+    assert.equal(gptRequest.quality, "medium");
+    assert.equal(grokRequest.model, "grok-imagine-image");
+    assert.equal(grokRequest.aspect_ratio, "1:1");
+    assert.equal(grokRequest.quality, undefined);
+    assert.equal(grokRequest.size, undefined);
+  } finally {
+    api.kill();
+    worker.kill();
+    await gptGateway.close();
+    await grokGateway.close();
+    const resolvedTarget = resolve(dir);
+    assert.equal(dirname(resolvedTarget), resolve(tmpdir()));
+    assert.match(basename(resolvedTarget), /^imagora-api-model-routing-/);
+    await rm(resolvedTarget, { recursive: true, force: true });
   }
 });
 

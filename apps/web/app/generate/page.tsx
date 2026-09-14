@@ -7,13 +7,12 @@ import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../com
 import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import {
   ApiRequestError,
-  DEFAULT_IMAGE_MODEL_ID,
-  IMAGE_MODEL_OPTIONS,
   apiFetch,
   formatCredits,
   getSafetyAppeals,
   downloadGeneratedImage,
   resolveSelectableImageModel,
+  validateImageModelSelection,
   submitSafetyAppeal,
   type CreditAccount,
   type GeneratedImage,
@@ -40,7 +39,16 @@ import {
   resolveProcessingPlaceholderCount
 } from "./generationState";
 import { useGenerationWorkspace } from "./hooks/useGenerationWorkspace";
-import { defaultPromptPreset, enhancePrompt, promptPresets, resolvePromptPreset } from "./promptPresets";
+import { useImageModelCatalog } from "./hooks/useImageModelCatalog";
+import {
+  defaultPromptPreset,
+  enhancePrompt,
+  maxEnhancedPromptLength,
+  maxNegativePromptLength,
+  promptPresets,
+  resolvePromptPreset,
+  validateGenerationPromptLengths
+} from "./promptPresets";
 
 const DEFAULT_PROMPT = "半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节";
 const DEFAULT_NEGATIVE_PROMPT = defaultPromptPreset.negativePrompt;
@@ -97,7 +105,7 @@ function GenerateExperience() {
     setQuantityInput,
     quality,
     setQuality,
-    model,
+    model: requestedModel,
     setModel,
     quote,
     setQuote,
@@ -145,6 +153,15 @@ function GenerateExperience() {
     activeGenerationTaskId: initialTaskId,
     restoringTaskView: Boolean(initialTaskId)
   });
+  const { catalog: modelCatalog, loading: modelsLoading, error: modelsError } = useImageModelCatalog();
+  const model = requestedModel || modelCatalog.defaultModel || "";
+  const selectedModel = modelCatalog.models.find((option) => option.id === model);
+  const modelSelectionError = modelsLoading
+    ? "正在加载可用模型，请稍候。"
+    : (modelsError ??
+      (modelCatalog.models.length
+        ? validateImageModelSelection(selectedModel, { quality, aspectRatio, quantity })
+        : "暂无可用的生图模型，请联系管理员配置模型及通道。"));
   const browserStorageRestoredRef = useRef(false);
   const quoteRequestSequenceRef = useRef(0);
   const restoringTaskIdRef = useRef<string | null>(null);
@@ -156,6 +173,8 @@ function GenerateExperience() {
   const isGenerationProcessing = generationViewState === "submitting" || generationViewState === "processing";
   const processingAspectRatio = task ? `${task.width} / ${task.height}` : aspectRatio.replace(":", " / ");
   const hasPrompt = prompt.trim().length > 0;
+  const promptValidation = validateGenerationPromptLengths(prompt, negativePrompt);
+  const generationPromptError = promptValidation.prompt ?? promptValidation.negativePrompt;
   const terminalGenerationFailureMessage =
     task && hasTerminalGenerationFailure(task, images) ? generationFailureMessage(task) : "";
   const resultStatus =
@@ -283,7 +302,7 @@ function GenerateExperience() {
   }, [activeGenerationTaskId, task?.id, task?.status]);
 
   useEffect(() => {
-    if (!hasPrompt) {
+    if (!hasPrompt || generationPromptError || modelSelectionError) {
       quoteRequestSequenceRef.current += 1;
       setQuote(0);
       return;
@@ -291,6 +310,7 @@ function GenerateExperience() {
 
     const requestSequence = quoteRequestSequenceRef.current + 1;
     quoteRequestSequenceRef.current = requestSequence;
+    setQuote(0);
     let canceled = false;
 
     const timeoutId = setTimeout(() => {
@@ -322,7 +342,16 @@ function GenerateExperience() {
       canceled = true;
       clearTimeout(timeoutId);
     };
-  }, [aspectRatio, hasPrompt, model, quality, quantity, selectedPreset.style]);
+  }, [
+    aspectRatio,
+    generationPromptError,
+    hasPrompt,
+    model,
+    modelSelectionError,
+    quality,
+    quantity,
+    selectedPreset.style
+  ]);
 
   async function ensureLoggedIn(): Promise<void> {
     if (account) return;
@@ -555,7 +584,7 @@ function GenerateExperience() {
   }
 
   function setClampedQuantity(nextValue: number) {
-    const nextQuantity = Math.max(1, Math.min(4, Math.trunc(nextValue)));
+    const nextQuantity = Math.max(1, Math.min(selectedModel?.maxQuantity ?? 4, Math.trunc(nextValue)));
     setQuantity(nextQuantity);
     setQuantityInput(String(nextQuantity));
   }
@@ -573,7 +602,19 @@ function GenerateExperience() {
     setClampedQuantity(nextValue);
   }
 
+  function selectImageModel(modelId: string) {
+    const nextModel = modelCatalog.models.find((option) => option.id === modelId);
+    if (!nextModel) return;
+    setModel(nextModel.id);
+    if (!nextModel.qualities.includes(quality)) setQuality(nextModel.qualities[0]);
+    if (!nextModel.aspectRatios.includes(aspectRatio)) setAspectRatio(nextModel.aspectRatios[0]);
+    const nextQuantity = Math.min(quantity, nextModel.maxQuantity);
+    setQuantity(nextQuantity);
+    setQuantityInput(String(nextQuantity));
+  }
+
   function validateForm(): string | null {
+    if (modelSelectionError) return modelSelectionError;
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
       return "请输入提示词后再提交生成。";
@@ -581,6 +622,7 @@ function GenerateExperience() {
     if (trimmedPrompt.length < 6) {
       return "提示词至少需要 6 个字符，别拿半句黑话糊弄模型。";
     }
+    if (generationPromptError) return generationPromptError;
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 4) {
       return "生成数量仅支持 1 到 4 张，请调整后重试。";
     }
@@ -705,14 +747,24 @@ function GenerateExperience() {
             <Panel>
               <div className="space-y-5">
                 {/* 提示词 */}
-                <label className="block text-sm text-white/70">
-                  提示词
-                  <textarea
-                    className="focus-ring mt-2 min-h-52 w-full resize-none rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                    value={prompt}
-                    onChange={(event) => setPrompt(event.target.value)}
-                  />
-                </label>
+                <div>
+                  <label className="block text-sm text-white/70">
+                    提示词
+                    <textarea
+                      className="focus-ring mt-2 min-h-52 w-full resize-none rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+                      value={prompt}
+                      onChange={(event) => setPrompt(event.target.value)}
+                      aria-invalid={Boolean(promptValidation.prompt)}
+                      aria-describedby="generation-prompt-length"
+                    />
+                  </label>
+                  <p
+                    id="generation-prompt-length"
+                    className={`mt-2 text-xs ${promptValidation.prompt ? "text-ember" : "text-white/45"}`}
+                  >
+                    {promptValidation.prompt ?? `${prompt.length} / ${maxEnhancedPromptLength} 个字符`}
+                  </p>
+                </div>
 
                 <div className="flex flex-wrap gap-2">
                   <button
@@ -746,6 +798,36 @@ function GenerateExperience() {
                   </div>
                 </fieldset>
 
+                <label className="block text-sm text-white/70">
+                  模型
+                  <select
+                    className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                    value={model}
+                    onChange={(event) => selectImageModel(event.target.value)}
+                    disabled={modelsLoading || !modelCatalog.models.length}
+                    aria-label="模型"
+                    aria-describedby="generation-model-help"
+                  >
+                    {!selectedModel ? (
+                      <option value={model} disabled>
+                        {modelsLoading ? "加载模型中…" : model ? "所选模型不可用" : "暂无可用模型"}
+                      </option>
+                    ) : null}
+                    {modelCatalog.models.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span
+                    id="generation-model-help"
+                    className="mt-2 block text-xs text-white/55"
+                    role={modelSelectionError && !modelsLoading ? "alert" : undefined}
+                  >
+                    {modelSelectionError ?? "系统自动匹配该模型的生图通道，切换模型会重新计算积分。"}
+                  </span>
+                </label>
+
                 <details
                   className="rounded-2xl border border-white/12 bg-black/18 p-4"
                   open={advancedOpen}
@@ -756,29 +838,25 @@ function GenerateExperience() {
                     高级参数
                   </summary>
                   <div className="mt-4 space-y-4">
-                    <label className="block text-sm text-white/70">
-                      负向提示词
-                      <input
-                        className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                        value={negativePrompt}
-                        onChange={(event) => setNegativePrompt(event.target.value)}
-                      />
-                    </label>
-
-                    <label className="block text-sm text-white/70">
-                      模型
-                      <select
-                        className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
-                        value={model}
-                        onChange={(event) => setModel(event.target.value)}
+                    <div>
+                      <label className="block text-sm text-white/70">
+                        负向提示词
+                        <input
+                          className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+                          value={negativePrompt}
+                          onChange={(event) => setNegativePrompt(event.target.value)}
+                          aria-invalid={Boolean(promptValidation.negativePrompt)}
+                          aria-describedby="generation-negative-prompt-length"
+                        />
+                      </label>
+                      <p
+                        id="generation-negative-prompt-length"
+                        className={`mt-2 text-xs ${promptValidation.negativePrompt ? "text-ember" : "text-white/45"}`}
                       >
-                        {IMAGE_MODEL_OPTIONS.map((item) => (
-                          <option key={item.value} value={item.value}>
-                            {item.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                        {promptValidation.negativePrompt ??
+                          `${negativePrompt.length} / ${maxNegativePromptLength} 个字符`}
+                      </p>
+                    </div>
 
                     <div className="grid gap-4 sm:grid-cols-2">
                       <label className="block text-sm text-white/70">
@@ -789,7 +867,11 @@ function GenerateExperience() {
                           onChange={(event) => setAspectRatio(event.target.value)}
                         >
                           {aspectRatioOptions.map((item) => (
-                            <option key={item.value} value={item.value}>
+                            <option
+                              key={item.value}
+                              value={item.value}
+                              disabled={!selectedModel?.aspectRatios.includes(item.value)}
+                            >
                               {item.label}
                             </option>
                           ))}
@@ -802,7 +884,7 @@ function GenerateExperience() {
                           className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
                           type="number"
                           min={1}
-                          max={4}
+                          max={selectedModel?.maxQuantity ?? 4}
                           value={quantityInput}
                           onFocus={(event) => event.target.select()}
                           onChange={(event) => setQuantityFromInput(event.target.value)}
@@ -819,10 +901,13 @@ function GenerateExperience() {
                             key={item.value}
                             type="button"
                             onClick={() => setQuality(item.value)}
+                            disabled={!selectedModel?.qualities.includes(item.value)}
                             className={`focus-ring rounded-2xl border px-3 py-3 text-center transition-colors duration-200 ${
-                              quality === item.value
-                                ? "border-mint/70 bg-mint/10 text-white"
-                                : "border-white/12 bg-black/28 text-white/70 hover:bg-white/8"
+                              !selectedModel?.qualities.includes(item.value)
+                                ? "cursor-not-allowed border-white/5 bg-black/20 text-white/30"
+                                : quality === item.value
+                                  ? "border-mint/70 bg-mint/10 text-white"
+                                  : "border-white/12 bg-black/28 text-white/70 hover:bg-white/8"
                             }`}
                           >
                             <p className="text-base font-bold">{item.label}</p>
@@ -931,10 +1016,18 @@ function GenerateExperience() {
                   </div>
                 ) : null}
 
+                {generationPromptError ? <InlineNotice tone="danger">{generationPromptError}</InlineNotice> : null}
+
                 <button
                   className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
                   type="button"
-                  disabled={loading || isGenerationProcessing || !prompt.trim()}
+                  disabled={
+                    loading ||
+                    isGenerationProcessing ||
+                    !hasPrompt ||
+                    Boolean(generationPromptError) ||
+                    Boolean(modelSelectionError)
+                  }
                   onClick={submit}
                 >
                   <Wand2 className="size-4" aria-hidden="true" />
@@ -1063,7 +1156,7 @@ function resolveInitialQuantity(value: string | null): number {
 }
 
 function resolveInitialModel(value: string | null): string {
-  return value ? resolveSelectableImageModel(value) : DEFAULT_IMAGE_MODEL_ID;
+  return value ? resolveSelectableImageModel(value) : "";
 }
 
 function GenerationProcessingPlaceholder({

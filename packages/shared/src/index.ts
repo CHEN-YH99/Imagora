@@ -413,7 +413,7 @@ export const aspectRatioDimensions: Record<AspectRatio, { width: number; height:
   "16:9": { width: 1600, height: 900 }
 };
 
-export const maxPromptLength = 1200;
+export const maxPromptLength = 7000;
 export const maxQuantity = 4;
 // OpenAI 批量生图会按请求张数放大超时预算，高质量四宫格时 30 分钟以内都属于正常兜底窗口。
 export const DEFAULT_RUNNING_TASK_TIMEOUT_MS = 30 * 60 * 1000;

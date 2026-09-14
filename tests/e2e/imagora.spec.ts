@@ -264,6 +264,132 @@ test("认证流程覆盖注册、双轮图片验证登录、退出、找回和�
   await expect(page.getByText("密码重置成功，请使用新密码登录。")).toBeVisible();
 });
 
+test("模型选择同步报价、能力限制和实际任务模型", async ({ page }) => {
+  await setupApiMocks(page);
+  const quotes: Array<{ model?: string; quality?: string; quantity?: number }> = [];
+  const tasks: Array<{ model?: string; quality?: string; quantity?: number }> = [];
+  page.on("request", (request) => {
+    if (request.method() !== "POST") return;
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/generation/quote") quotes.push(request.postDataJSON());
+    if (path === "/api/generation/tasks") tasks.push(request.postDataJSON());
+  });
+  await page.goto("/generate?quality=high&quantity=4");
+  const selector = page.getByRole("combobox", { name: "模型", exact: true });
+  await expect(selector).toHaveValue("openai:gpt-image-2");
+  await selector.selectOption("xai:grok-imagine-image");
+  await expect.poll(() => quotes.some((quote) => quote.model === "xai:grok-imagine-image")).toBe(true);
+  const quote = quotes.findLast((entry) => entry.model === "xai:grok-imagine-image");
+  expect(quote?.quality).toBe("standard");
+  expect(quote?.quantity).toBe(2);
+  await page.getByRole("button", { name: "提交生成" }).first().click();
+  await expect.poll(() => tasks.length).toBe(1);
+  expect(tasks[0].model).toBe("xai:grok-imagine-image");
+  expect(tasks[0].quality).toBe("standard");
+  await expect(selector).toHaveValue("xai:grok-imagine-image");
+});
+
+test("不可用模型不会被静默切回 GPT 或产生报价请求", async ({ page }) => {
+  await setupApiMocks(page);
+  const generationRequests: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "POST" && ["/api/generation/quote", "/api/generation/tasks"].includes(path))
+      generationRequests.push(path);
+  });
+  await page.goto("/generate?model=xai%3Aremoved-model");
+  await expect(page.getByRole("combobox", { name: "模型", exact: true })).toHaveValue("xai:removed-model");
+  await expect(page.getByRole("alert").filter({ hasText: "所选模型未配置或已停用" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "提交生成" }).first()).toBeDisabled();
+  expect(generationRequests).toHaveLength(0);
+});
+
+test("首页使用同一模型目录并保留所选模型进入工作台", async ({ page }) => {
+  await setupApiMocks(page);
+  await page.goto("/");
+  const selector = page.getByRole("combobox", { name: "选择模型", exact: true });
+  await expect(selector).toHaveValue("openai:gpt-image-2");
+  await selector.selectOption("xai:grok-imagine-image");
+  await page.getByRole("button", { name: "生成预览", exact: true }).click();
+  await expect(page).toHaveURL(/model=xai%3Agrok-imagine-image/);
+  await expect(page.getByRole("combobox", { name: "模型", exact: true })).toHaveValue("xai:grok-imagine-image");
+});
+
+test("生成表单拦截超长提示词并保留完整输入", async ({ page }) => {
+  await setupApiMocks(page);
+  let invalidRequests = 0;
+  let submittedPromptLength = 0;
+  const quotedPromptLengths: number[] = [];
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() !== "POST" || !["/api/generation/quote", "/api/generation/tasks"].includes(pathname)) return;
+    const payload = request.postDataJSON() as { prompt?: string; negativePrompt?: string };
+    if ((payload.prompt?.length ?? 0) > 7000 || (payload.negativePrompt?.length ?? 0) > 800) invalidRequests += 1;
+    if (pathname === "/api/generation/quote") quotedPromptLengths.push(payload.prompt?.length ?? 0);
+    if (pathname === "/api/generation/tasks") submittedPromptLength = payload.prompt?.length ?? 0;
+  });
+
+  await page.goto("/generate");
+  const promptInput = page.getByRole("textbox", { name: "提示词", exact: true });
+  const submitButton = page.getByRole("button", { name: "提交生成" }).first();
+  const oversizedPrompt = "图".repeat(7001);
+  await promptInput.fill(oversizedPrompt);
+  await expect(promptInput).toHaveValue(oversizedPrompt);
+  await expect(promptInput).toHaveAttribute("aria-invalid", "true");
+  await expect(submitButton).toBeDisabled();
+  await expect(page.getByRole("alert").filter({ hasText: "提示词最多支持 7000 个字符" })).toBeVisible();
+  await page.waitForTimeout(650);
+  expect(invalidRequests).toBe(0);
+
+  await promptInput.fill("图".repeat(7000));
+  await expect(submitButton).toBeEnabled();
+  await expect(promptInput).toHaveAttribute("aria-invalid", "false");
+  await expect(page.getByText("7000 / 7000 个字符", { exact: true })).toBeVisible();
+  await expect.poll(() => quotedPromptLengths.includes(7000)).toBe(true);
+  await page.getByText("高级参数", { exact: true }).click();
+  const negativePromptInput = page.getByRole("textbox", { name: "负向提示词", exact: true });
+  const oversizedNegativePrompt = "字".repeat(801);
+  await negativePromptInput.fill(oversizedNegativePrompt);
+  await expect(negativePromptInput).toHaveValue(oversizedNegativePrompt);
+  await expect(negativePromptInput).toHaveAttribute("aria-invalid", "true");
+  await expect(submitButton).toBeDisabled();
+  await expect(page.getByRole("alert").filter({ hasText: "负向提示词最多支持 800 个字符" })).toBeVisible();
+  await page.waitForTimeout(650);
+  expect(invalidRequests).toBe(0);
+
+  await negativePromptInput.fill("字".repeat(800));
+  await expect(submitButton).toBeEnabled();
+  await expect(negativePromptInput).toHaveAttribute("aria-invalid", "false");
+  await submitButton.click();
+  await expect.poll(() => submittedPromptLength).toBe(7000);
+  expect(invalidRequests).toBe(0);
+});
+
+test("生成接口校验失败展示具体长度限制", async ({ page }) => {
+  await setupApiMocks(page);
+  await page.route("**/api/generation/tasks", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 400,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "Invalid request payload",
+          details: { fieldErrors: { prompt: ["String must contain at most 7000 character(s)"] } }
+        }
+      })
+    });
+  });
+  await page.goto("/generate");
+  await page.getByRole("textbox", { name: "提示词", exact: true }).fill("电影感茶杯广告图，薄荷色轮廓光");
+  await page.getByRole("button", { name: "提交生成" }).first().click();
+  await expect(page.getByRole("alert").filter({ hasText: "提示词最多支持 7000 个字符，请精简后重试。" })).toBeVisible();
+});
+
 test("生成任务覆盖创建、轮询、成功和失败状态", async ({ page }) => {
   const successState = await setupApiMocks(page, { generationOutcome: "success" });
 
@@ -555,8 +681,31 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
       });
       return;
     }
+    if (method === "GET" && path === "/api/generation/models") {
+      await fulfillData(route, {
+        defaultModel: "openai:gpt-image-2",
+        models: [
+          {
+            id: "openai:gpt-image-2",
+            label: "GPT Image 2",
+            qualities: ["draft", "standard", "high"],
+            aspectRatios: ["1:1", "3:4", "4:3", "9:16", "16:9"],
+            maxQuantity: 4
+          },
+          {
+            id: "xai:grok-imagine-image",
+            label: "Grok Imagine",
+            qualities: ["standard"],
+            aspectRatios: ["1:1", "16:9"],
+            maxQuantity: 2
+          }
+        ]
+      });
+      return;
+    }
     if (method === "POST" && path === "/api/generation/quote") {
-      await fulfillData(route, { creditCost: 24 });
+      const body = request.postDataJSON() as { model?: string };
+      await fulfillData(route, { creditCost: body.model === "xai:grok-imagine-image" ? 3 : 24 });
       return;
     }
     if (method === "POST" && path === "/api/generation/tasks") {
@@ -564,6 +713,9 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
         generationOutcome === "failed"
           ? createTask("task-failed", "触发失败场景的广告图", "RUNNING")
           : createTask("task-e2e", "电影感茶杯广告图，薄荷色轮廓光", "RUNNING");
+      const body = request.postDataJSON() as { model?: string; quality?: string };
+      task.modelName = body.model ?? task.modelName;
+      task.quality = body.quality ?? task.quality;
       state.tasks = [task, ...state.tasks.filter((item) => item.id !== task.id)];
       await fulfillData(route, { task, balanceAfter: 956 });
       return;

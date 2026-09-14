@@ -1,4 +1,5 @@
-export const maxEnhancedPromptLength = 1200;
+export const maxEnhancedPromptLength = 7000;
+export const maxNegativePromptLength = 800;
 
 export type PromptPresetId = "realistic" | "product_photography" | "poster" | "illustration" | "anime";
 
@@ -78,4 +79,19 @@ export function enhancePrompt(prompt: string, presetId: string): string {
   const basePrompt = normalizedPrompt || "主体明确的视觉创意";
   const enhanced = `${basePrompt}，${preset.enhancement}，构图完整，主体清晰，细节丰富`;
   return enhanced.length > maxEnhancedPromptLength ? enhanced.slice(0, maxEnhancedPromptLength).trim() : enhanced;
+}
+
+export function validateGenerationPromptLengths(
+  prompt: string,
+  negativePrompt: string
+): { prompt: string | null; negativePrompt: string | null } {
+  return {
+    prompt: promptLengthError(prompt, maxEnhancedPromptLength, "提示词"),
+    negativePrompt: promptLengthError(negativePrompt, maxNegativePromptLength, "负向提示词")
+  };
+}
+
+function promptLengthError(value: string, maximum: number, label: string): string | null {
+  if (value.length <= maximum) return null;
+  return `${label}最多支持 ${maximum} 个字符，当前为 ${value.length} 个字符，请精简后再生成。`;
 }

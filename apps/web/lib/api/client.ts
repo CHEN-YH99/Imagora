@@ -32,7 +32,7 @@ export async function apiFetch<T>(
       if (response.status === 401 && payload.error?.code === "UNAUTHORIZED" && !isAuthEndpoint(path)) {
         notifySessionExpired();
       }
-      throw new ApiRequestError(payload.error?.code, payload.error?.message, response.status);
+      throw new ApiRequestError(payload.error?.code, payload.error?.message, response.status, payload.error?.details);
     }
     return payload.data;
   } catch (error) {
@@ -92,13 +92,13 @@ function isLocalHostname(hostname: string): boolean {
 
 async function readApiPayload<T>(
   response: Response
-): Promise<{ data?: T; error?: { code?: string; message: string } }> {
+): Promise<{ data?: T; error?: { code?: string; message: string; details?: unknown } }> {
   const text = await response.text();
   if (!text) {
     return response.ok ? {} : { error: { message: response.statusText || "Request failed" } };
   }
   try {
-    return JSON.parse(text) as { data?: T; error?: { code?: string; message: string } };
+    return JSON.parse(text) as { data?: T; error?: { code?: string; message: string; details?: unknown } };
   } catch {
     return { error: { message: response.ok ? "Invalid JSON response" : response.statusText || "Request failed" } };
   }

@@ -50,14 +50,24 @@ export class ApiRequestError extends Error {
   constructor(
     public readonly code: string | undefined,
     public readonly apiMessage: string | undefined,
-    public readonly status: number
+    public readonly status: number,
+    public readonly details?: unknown
   ) {
-    super(formatApiErrorMessage(code, apiMessage, status));
+    super(formatApiErrorMessage(code, apiMessage, status, details));
     this.name = "ApiRequestError";
   }
 }
 
-export function formatApiErrorMessage(code: string | undefined, message: string | undefined, status?: number): string {
+export function formatApiErrorMessage(
+  code: string | undefined,
+  message: string | undefined,
+  status?: number,
+  details?: unknown
+): string {
+  if (code === "VALIDATION_ERROR") {
+    const validationMessage = formatPromptValidationError(details);
+    if (validationMessage) return validationMessage;
+  }
   if (code && apiErrorCodeMap[code]) {
     return apiErrorCodeMap[code];
   }
@@ -65,4 +75,21 @@ export function formatApiErrorMessage(code: string | undefined, message: string 
     return apiErrorMessageMap[message];
   }
   return status ? `请求失败，请稍后重试。（${status}）` : "请求失败，请稍后重试。";
+}
+
+function formatPromptValidationError(details: unknown): string | null {
+  if (!details || typeof details !== "object" || !("fieldErrors" in details)) return null;
+  const fieldErrors = details.fieldErrors;
+  if (!fieldErrors || typeof fieldErrors !== "object") return null;
+  const fieldLabels = { prompt: "提示词", negativePrompt: "负向提示词" };
+  for (const [field, label] of Object.entries(fieldLabels)) {
+    const errors = (fieldErrors as Record<string, unknown>)[field];
+    if (!Array.isArray(errors)) continue;
+    for (const error of errors) {
+      if (typeof error !== "string") continue;
+      const maximum = /^String must contain at most (\d{1,6}) character\(s\)$/.exec(error);
+      if (maximum) return `${label}最多支持 ${maximum[1]} 个字符，请精简后重试。`;
+    }
+  }
+  return null;
 }

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import cors from "@fastify/cors";
 import pino from "pino";
@@ -1803,6 +1803,7 @@ function createRouteContext(): ApiRouteContext {
     consumeLoginAttempt,
     contentTypeForStorageKey,
     createCaptchaChallenge,
+    createHash,
     createOrderSchema,
     defaultNicknameForEmail,
     deleteAccountSchema,

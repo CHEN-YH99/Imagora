@@ -1,7 +1,3 @@
-// OpenAI 兼容上游的渠道池配置。
-// 这些中转站对外都是同一个模型（gpt-image-2），对用户而言 provider/model/计价口径都不变，
-// 因此渠道只是 openai provider 内部的上游选择，不引入新的 SupportedProviderName。
-
 export interface ImageChannelConfig {
   /** 渠道标识，用于日志、熔断键、成本归因；同一池内唯一 */
   name: string;
@@ -29,7 +25,7 @@ export function resolveImageChannels(
   env: Partial<Record<string, string | undefined>> = process.env
 ): ImageChannelConfig[] {
   const configured = env.IMAGE_CHANNELS?.trim();
-  const channels = configured ? parseImageChannels(configured) : legacySingleChannel(env);
+  const channels = configured ? parseImageChannels(configured, env) : legacySingleChannel(env);
   const enabled = channels.filter((channel) => channel.enabled);
   return sortChannelsByPriority(enabled);
 }
@@ -39,7 +35,7 @@ export function resolveAllImageChannels(
   env: Partial<Record<string, string | undefined>> = process.env
 ): ImageChannelConfig[] {
   const configured = env.IMAGE_CHANNELS?.trim();
-  return sortChannelsByPriority(configured ? parseImageChannels(configured) : legacySingleChannel(env));
+  return sortChannelsByPriority(configured ? parseImageChannels(configured, env) : legacySingleChannel(env));
 }
 
 export function hasConfiguredImageChannel(env: Partial<Record<string, string | undefined>> = process.env): boolean {
@@ -50,7 +46,10 @@ export function hasConfiguredImageChannel(env: Partial<Record<string, string | u
   }
 }
 
-export function parseImageChannels(raw: string): ImageChannelConfig[] {
+export function parseImageChannels(
+  raw: string,
+  env: Partial<Record<string, string | undefined>> = process.env
+): ImageChannelConfig[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -63,7 +62,7 @@ export function parseImageChannels(raw: string): ImageChannelConfig[] {
 
   const names = new Set<string>();
   return parsed.map((entry, index) => {
-    const channel = normalizeChannelEntry(entry, index);
+    const channel = normalizeChannelEntry(entry, index, env);
     const key = channel.name.toLowerCase();
     if (names.has(key)) {
       throw new Error(`IMAGE_CHANNELS[${index}]: duplicate channel name "${channel.name}"`);
@@ -73,7 +72,11 @@ export function parseImageChannels(raw: string): ImageChannelConfig[] {
   });
 }
 
-function normalizeChannelEntry(entry: unknown, index: number): ImageChannelConfig {
+function normalizeChannelEntry(
+  entry: unknown,
+  index: number,
+  env: Partial<Record<string, string | undefined>>
+): ImageChannelConfig {
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
     throw new Error(`IMAGE_CHANNELS[${index}] must be an object`);
   }
@@ -89,7 +92,15 @@ function normalizeChannelEntry(entry: unknown, index: number): ImageChannelConfi
     );
   }
 
-  const apiKey = readString(record.apiKey) ?? readString(record.api_key);
+  const inlineKey = readString(record.apiKey) ?? readString(record.api_key);
+  const apiKeyEnv = readString(record.apiKeyEnv) ?? readString(record.api_key_env);
+  if (apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
+    throw new Error(`IMAGE_CHANNELS[${index}]: apiKeyEnv must be an environment variable name`);
+  }
+  if (apiKeyEnv && inlineKey) {
+    throw new Error(`IMAGE_CHANNELS[${index}]: use either apiKey or apiKeyEnv, not both`);
+  }
+  const apiKey = apiKeyEnv ? readString(env[apiKeyEnv]) : inlineKey;
   if (!apiKey) {
     throw new Error(`IMAGE_CHANNELS[${index}] (${name}): apiKey is required`);
   }

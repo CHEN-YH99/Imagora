@@ -1,4 +1,9 @@
-import { getActiveProviderMetadata, quoteImageGeneration, resolveProviderModel } from "@imagora/ai-providers";
+import {
+  getActiveProviderMetadata,
+  getImageModelCatalog,
+  quoteImageGeneration,
+  resolveProviderModel
+} from "@imagora/ai-providers";
 import { AppError, type AspectRatio, type ModelId, type Quality, type StyleId } from "@imagora/shared";
 
 export interface GenerationRuntime {
@@ -21,6 +26,7 @@ interface GenerationRuntimeOptions {
 }
 
 export function createGenerationRuntime(options: GenerationRuntimeOptions): GenerationRuntime {
+  getImageModelCatalog();
   function enqueueGenerationTask(taskId: string, userId: string, requestedAt: string): Promise<boolean> {
     return options.enqueueTask({ id: taskId, userId, createdAt: requestedAt }).then((attempt) => attempt.enqueued);
   }
@@ -33,13 +39,19 @@ export function createGenerationRuntime(options: GenerationRuntimeOptions): Gene
     model?: ModelId;
   }): number {
     const { model } = resolveGenerationProviderSelection(input.model);
-    return quoteImageGeneration({
-      style: input.style,
-      quality: input.quality,
-      quantity: input.quantity,
-      aspectRatio: input.aspectRatio,
-      model
-    }).creditCost;
+    try {
+      return quoteImageGeneration({
+        style: input.style,
+        quality: input.quality,
+        quantity: input.quantity,
+        aspectRatio: input.aspectRatio,
+        model
+      }).creditCost;
+    } catch (error) {
+      throw new AppError("VALIDATION_ERROR", error instanceof Error ? error.message : "所选模型参数不可用。", 400, {
+        model
+      });
+    }
   }
 
   function resolveGenerationProviderSelection(model?: ModelId): {
@@ -90,6 +102,7 @@ function parseGenerationModel(model?: ModelId): ModelId | undefined {
 }
 
 function isCompatibleOpenAiRequestForMockProvider(model: ModelId): boolean {
+  if (process.env.IMAGE_MODELS?.trim() || !["gpt-image-2", "openai:gpt-image-2"].includes(model)) return false;
   try {
     resolveProviderModel(model, "openai");
     return true;

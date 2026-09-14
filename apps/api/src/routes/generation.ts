@@ -1,3 +1,4 @@
+import { getImageModelCatalog } from "@imagora/ai-providers";
 import type { GenerationTask, ReferenceImage } from "@imagora/shared";
 import type { ApiRouteApp, ApiRouteContext } from "./types.js";
 
@@ -33,6 +34,11 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     uploadBodyLimitBytes,
     withoutImagePublicUrl
   } = context;
+
+  app.get("/api/generation/models", async (request, reply) => {
+    reply.header("Cache-Control", "no-store");
+    return envelope(request, getImageModelCatalog());
+  });
 
   app.post("/api/generation/quote", async (request) => {
     assertFeatureEnabled("generation");
