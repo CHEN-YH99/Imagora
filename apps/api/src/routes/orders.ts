@@ -10,8 +10,8 @@ export function registerOrderRoutes(app: ApiRouteApp, context: ApiRouteContext):
     assertMockPaymentAllowed,
     assertPaymentProviderEnabled,
     createOrderSchema,
-    descCreated,
     envelope,
+    envNumber,
     ensureCheckoutUrl,
     findCheckoutUrl,
     findOrderByClientRequestId,
@@ -23,23 +23,42 @@ export function registerOrderRoutes(app: ApiRouteApp, context: ApiRouteContext):
     paymentProvider,
     paymentWebhookParamSchema,
     randomUUID,
-    requireAuth,
+    requireSession,
     routeLabel,
     runOrderMaintenance,
     store,
     webhookSignature
   } = context;
 
+  async function maintainUserOrders(userId: string) {
+    const now = new Date();
+    const ttlMs = envNumber("ORDER_PENDING_TTL_MINUTES", 30) * 60_000;
+    const closedExpiredOrders =
+      ttlMs > 0
+        ? await store.closeExpiredUserOrders(userId, new Date(now.getTime() - ttlMs).toISOString(), now.toISOString())
+        : 0;
+    // 全库对账、积分过期和任务清理由已有后台维护处理，用户 GET 只关闭自己的过期订单。
+    return {
+      closedExpiredOrders,
+      reconciledPaidOrders: 0,
+      reconciledPaymentEvents: 0,
+      expiredCredits: 0,
+      failedPendingGenerationTasks: 0,
+      failedRunningGenerationTasks: 0,
+      reconciledGenerationRefunds: 0,
+      refundedGenerationCredits: 0
+    };
+  }
+
   app.get("/api/plans", async (request) => {
-    const data = await store.read();
     return envelope(request, {
-      plans: data.plans.filter((plan) => plan.status === "ACTIVE").sort((a, b) => a.sortOrder - b.sortOrder)
+      plans: await store.readActivePlans()
     });
   });
 
   app.post("/api/orders", async (request, reply) => {
     assertFeatureEnabled("payments");
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const input = createOrderSchema.parse(request.body);
     assertPaymentProviderEnabled(input.paymentProvider);
     return store.update(async (data) => {
@@ -114,32 +133,29 @@ export function registerOrderRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.get("/api/orders", async (request) => {
-    const { user } = await requireAuth(request);
-    return store.update((data) => {
-      const maintenance = runOrderMaintenance(data);
-      const query = optionalPaginationSchema.parse(request.query);
-      const orders = data.orders
-        .filter((order) => order.userId === user.id)
-        .sort(descCreated)
-        .slice(0, query.limit ?? Number.POSITIVE_INFINITY);
-      return envelope(request, { orders, maintenance });
-    });
+    const { user } = await requireSession(request);
+    const query = optionalPaginationSchema.parse(request.query);
+    const maintenance = await maintainUserOrders(user.id);
+    const { orders } = await store.readOrders({ userId: user.id, limit: query.limit });
+    return envelope(request, { orders, maintenance });
   });
 
   app.get("/api/orders/:orderId", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { orderId } = orderParamSchema.parse(request.params);
-    return store.update((data) => {
-      const maintenance = runOrderMaintenance(data);
-      const order = mustFindOwnOrder(data, user.id, orderId);
-      const plan = data.plans.find((item) => item.id === order.planId);
-      return envelope(request, { order, plan, maintenance });
-    });
+    // 先检查归属，越权详情请求不能触发维护写入。
+    const existing = await store.readOrders({ userId: user.id, orderId, limit: 1 });
+    if (!existing.orders.length) throw new AppError("NOT_FOUND", "Order was not found", 404);
+    const maintenance = await maintainUserOrders(user.id);
+    const data = maintenance.closedExpiredOrders
+      ? await store.readOrders({ userId: user.id, orderId, limit: 1 })
+      : existing;
+    return envelope(request, { order: data.orders[0], plan: data.plans[0], maintenance });
   });
 
   app.post("/api/orders/:orderId/pay", async (request) => {
     assertFeatureEnabled("payments");
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { orderId } = orderParamSchema.parse(request.params);
     return store.update(async (data) => {
       runOrderMaintenance(data);

@@ -172,6 +172,7 @@ model CreditLedgerEntry {
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([type, expiresAt])
+  @@index([userId, sourceType, sourceId, type])
   @@map("credit_ledger_entries")
 }
 
@@ -207,6 +208,7 @@ model GenerationTask {
 
   @@unique([userId, clientRequestId])
   @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, status, createdAt(sort: Desc), id(sort: Desc)])
   @@index([referenceImageId])
   @@index([status, createdAt])
   @@map("generation_tasks")

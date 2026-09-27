@@ -11,7 +11,7 @@ import test from "node:test";
 import { JsonStore } from "../packages/database/dist/index.js";
 
 const onePixelPngBase64 =
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWP4//8/AAX+Av5Y8msOAAAAAElFTkSuQmCC";
 const defaultWriteOrigin = "http://127.0.0.1:3100";
 
 test("api rejects bearer session auth in production config", async () => {
@@ -315,6 +315,398 @@ test("generation creation remains durable and idempotent when redis enqueue is u
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("generation retries are idempotent across API instances and recover from unavailable enqueue", async (t) => {
+  const redisPort = await reserveUnusedPort();
+  const fixture = await createRetryFixture(t, {
+    QUEUE_PROVIDER: "bullmq",
+    REDIS_URL: `redis://127.0.0.1:${redisPort}`,
+    GENERATION_QUEUE_COMMAND_TIMEOUT_MS: "100",
+    GENERATION_ENQUEUE_RECONCILE_INTERVAL_MS: "60000"
+  });
+  const secondBaseUrl = await fixture.startApi();
+  const source = await fixture.seedFailed({ creditCost: 777 });
+  const before = await readStore(fixture.storePath);
+  const startingBalance = before.creditAccounts.find((account) => account.userId === fixture.userId).balance;
+  const request = { clientRequestId: "concurrent-retry-" + "x".repeat(100) };
+  const results = await Promise.all(
+    Array.from({ length: 6 }, (_, index) =>
+      fixture.retry(source.id, request, index % 2 ? secondBaseUrl : fixture.baseUrl)
+    )
+  );
+  assert.deepEqual(results.map((result) => result.status).sort(), [200, 200, 200, 200, 200, 201]);
+  const task = results[0].payload.data.task;
+  assert.ok(results.every((result) => result.payload.data.task.id === task.id));
+  assert.equal(task.status, "PENDING");
+  assertPublicGenerationTask(task);
+  assert.ok(task.clientRequestId.length <= 120);
+  const quoted = await post(
+    fixture.baseUrl,
+    "/api/generation/quote",
+    {
+      prompt: source.prompt,
+      style: source.style,
+      aspectRatio: source.aspectRatio,
+      quantity: source.quantity,
+      quality: source.quality,
+      model: source.modelName
+    },
+    fixture.session
+  );
+  assert.equal(task.creditCost, quoted.data.creditCost);
+  assert.notEqual(task.creditCost, source.creditCost, "Retries must use the current quote");
+  assert.equal(task.progress.stage, "QUEUED");
+  assert.equal(task.refundedCredits, 0);
+
+  const duplicate = await fixture.retry(source.id, request);
+  assert.equal(duplicate.status, 200);
+  assert.equal(duplicate.payload.data.task.id, task.id);
+  let stored = await readStore(fixture.storePath);
+  assert.equal(stored.generationTasks.length, before.generationTasks.length + 1);
+  assert.equal(
+    stored.creditLedgerEntries.filter((entry) => entry.sourceId === task.id && entry.type === "SPEND").length,
+    1
+  );
+  assert.equal(
+    stored.creditAccounts.find((account) => account.userId === fixture.userId).balance,
+    startingBalance - task.creditCost
+  );
+  assert.equal(stored.generationTasks.find((entry) => entry.id === source.id).creditCost, 777);
+
+  const legacySource = await fixture.seedFailed();
+  const legacy = await fixture.retry(legacySource.id, {});
+  const noBody = await fixture.retry(legacySource.id);
+  assert.equal(legacy.status, 201);
+  assert.equal(noBody.status, 200);
+  assert.equal(noBody.payload.data.task.id, legacy.payload.data.task.id);
+  const otherSource = await fixture.retry(legacySource.id, request);
+  assert.equal(otherSource.status, 201);
+  assert.notEqual(
+    otherSource.payload.data.task.id,
+    task.id,
+    "Same request keys on different source tasks must not collide"
+  );
+
+  await updateStoreJson(fixture.storePath, (data) => {
+    data.generationTasks.find((entry) => entry.id === task.id).status = "FAILED";
+  });
+  const nextAttempt = await fixture.retry(task.id, {});
+  assert.equal(nextAttempt.status, 201);
+  assert.notEqual(nextAttempt.payload.data.task.id, task.id);
+  const replay = await fixture.retry(source.id, request);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.payload.data.task.id, task.id);
+  assert.equal(replay.payload.data.task.status, "FAILED");
+  stored = await readStore(fixture.storePath);
+  assert.equal(
+    stored.creditLedgerEntries.filter((entry) => entry.sourceId === task.id && entry.type === "SPEND").length,
+    1
+  );
+});
+
+test("generation retries enforce creation guards without charging rejected requests", async (t) => {
+  const fixture = await createRetryFixture(t, { REQUIRE_EMAIL_VERIFICATION: "true" });
+  await updateStoreJson(fixture.storePath, (data) => {
+    data.users.find((user) => user.id === fixture.userId).emailVerifiedAt = new Date().toISOString();
+  });
+  const source = await fixture.seedFailed();
+  async function rejectRetry(taskId, status, code, body = {}, baseUrl = fixture.baseUrl, session = fixture.session) {
+    const before = await readStore(fixture.storePath);
+    const result = await fixture.retry(taskId, body, baseUrl, session);
+    assert.equal(result.status, status, JSON.stringify(result.payload));
+    assert.equal(result.payload.error.code, code);
+    const after = await readStore(fixture.storePath);
+    assert.deepEqual(after.generationTasks, before.generationTasks);
+    assert.deepEqual(after.creditAccounts, before.creditAccounts);
+    assert.deepEqual(after.creditLedgerEntries, before.creditLedgerEntries);
+    return { before, after };
+  }
+
+  await t.test("feature switch blocks both first and duplicate retries", async () => {
+    const request = { clientRequestId: randomUUID() };
+    assert.equal((await fixture.retry(source.id, request)).status, 201);
+    const disabledUrl = await fixture.startApi({ FEATURE_GENERATION_ENABLED: "false" });
+    await rejectRetry(source.id, 503, "FEATURE_DISABLED", request, disabledUrl);
+    await rejectRetry(source.id, 503, "FEATURE_DISABLED", {}, disabledUrl);
+  });
+  await t.test("email verification cannot be bypassed", async () => {
+    await updateStoreJson(fixture.storePath, (data) => {
+      data.users.find((user) => user.id === fixture.userId).emailVerifiedAt = null;
+    });
+    await rejectRetry(source.id, 403, "EMAIL_NOT_VERIFIED");
+    await updateStoreJson(fixture.storePath, (data) => {
+      data.users.find((user) => user.id === fixture.userId).emailVerifiedAt = new Date().toISOString();
+    });
+  });
+  await t.test("ownership, state and retry payload are validated", async () => {
+    await rejectRetry(source.id, 401, "UNAUTHORIZED", {}, fixture.baseUrl, "");
+    const foreign = await fixture.seedFailed({ userId: randomUUID() });
+    await rejectRetry(foreign.id, 404, "NOT_FOUND");
+    for (const status of ["PENDING", "RUNNING", "SUCCEEDED", "CANCELED"]) {
+      const task = await fixture.seedFailed({ status });
+      await rejectRetry(task.id, 400, "TASK_NOT_RETRYABLE");
+    }
+    await rejectRetry(source.id, 400, "VALIDATION_ERROR", { clientRequestId: "short" });
+    await rejectRetry(source.id, 400, "VALIDATION_ERROR", { clientRequestId: "x".repeat(121) });
+    await rejectRetry(source.id, 400, "VALIDATION_ERROR", { creditCost: 0, prompt: "replacement" });
+  });
+  await t.test("current prompt rules and parameter constraints apply", async () => {
+    for (const action of ["BLOCK", "REVIEW"]) {
+      const term = "retry-policy-" + action.toLowerCase();
+      const task = await fixture.seedFailed({ prompt: term, status: "BLOCKED" });
+      await updateStoreJson(fixture.storePath, (data) => {
+        data.safetyRules.push({
+          id: randomUUID(),
+          term,
+          action,
+          status: "ACTIVE",
+          createdAt: new Date().toISOString()
+        });
+      });
+      const { before, after } = await rejectRetry(
+        task.id,
+        400,
+        action === "BLOCK" ? "CONTENT_BLOCKED" : "CONTENT_REVIEW_REQUIRED"
+      );
+      assert.equal(after.safetyEvents.length, before.safetyEvents.length + 1, "Safety events must survive rejection");
+    }
+    const invalidQuantity = await fixture.seedFailed({ quantity: 99 });
+    await rejectRetry(invalidQuantity.id, 400, "VALIDATION_ERROR");
+    const unavailableModel = await fixture.seedFailed({ modelName: "openai:removed-model" });
+    await rejectRetry(unavailableModel.id, 400, "VALIDATION_ERROR");
+  });
+  await t.test("expired, deleted and blocked reference images cannot be reused", async () => {
+    const upload = await post(
+      fixture.baseUrl,
+      "/api/uploads/reference-images",
+      {
+        fileName: "reference.png",
+        mimeType: "image/png",
+        contentBase64: onePixelPngBase64
+      },
+      fixture.session
+    );
+    const reference = upload.data.referenceImage;
+    const task = await fixture.seedFailed({ referenceImageId: reference.id });
+    for (const scenario of [
+      { changes: { expiresAt: new Date(0).toISOString() }, status: 400, code: "VALIDATION_ERROR" },
+      { changes: { deletedAt: new Date().toISOString() }, status: 404, code: "NOT_FOUND" },
+      { changes: { safetyStatus: "BLOCKED" }, status: 400, code: "CONTENT_BLOCKED" },
+      { changes: { userId: randomUUID() }, status: 404, code: "NOT_FOUND" }
+    ]) {
+      await updateStoreJson(fixture.storePath, (data) => {
+        Object.assign(
+          data.referenceImages.find((image) => image.id === reference.id),
+          reference,
+          scenario.changes
+        );
+      });
+      await rejectRetry(task.id, scenario.status, scenario.code);
+    }
+  });
+  await t.test("insufficient balance does not create a task or ledger entry", async () => {
+    await updateStoreJson(fixture.storePath, (data) => {
+      data.creditAccounts.find((account) => account.userId === fixture.userId).balance = 0;
+    });
+    await rejectRetry(source.id, 402, "INSUFFICIENT_CREDITS");
+  });
+});
+
+test("generation retries share the creation rate limit without charging rejected requests", async (t) => {
+  const fixture = await createRetryFixture(t, {
+    RATE_LIMIT_GENERATION_MAX: "2",
+    RATE_LIMIT_WINDOW_MS: "60000"
+  });
+  const source = await fixture.seedFailed();
+  const input = {
+    clientRequestId: randomUUID(),
+    prompt: source.prompt,
+    style: source.style,
+    aspectRatio: source.aspectRatio,
+    quantity: source.quantity,
+    quality: source.quality,
+    model: source.modelName
+  };
+  await post(fixture.baseUrl, "/api/generation/tasks", input, fixture.session);
+  const request = { clientRequestId: randomUUID() };
+  assert.equal((await fixture.retry(source.id, request)).status, 201);
+  const before = await readStore(fixture.storePath);
+  for (const body of [request, { clientRequestId: randomUUID() }]) {
+    const result = await fixture.retry(source.id, body);
+    assert.equal(result.status, 429, JSON.stringify(result.payload));
+    assert.equal(result.payload.error.code, "RATE_LIMITED");
+  }
+  const create = await fetch(`${fixture.baseUrl}/api/generation/tasks`, {
+    method: "POST",
+    headers: { ...sessionHeaders(fixture.session), "Content-Type": "application/json" },
+    body: JSON.stringify({ ...input, clientRequestId: randomUUID() })
+  });
+  assert.equal(create.status, 429);
+  assert.equal((await create.json()).error.code, "RATE_LIMITED");
+  const after = await readStore(fixture.storePath);
+  assert.deepEqual(after.generationTasks, before.generationTasks);
+  assert.deepEqual(after.creditAccounts, before.creditAccounts);
+  assert.deepEqual(after.creditLedgerEntries, before.creditLedgerEntries);
+});
+
+test("generation retries preserve the selected channel and use current model availability and pricing", async (t) => {
+  const gatewayPort = await reserveUnusedPort();
+  const channels = ["main", "backup"].map((name) => ({
+    name,
+    baseUrl: `http://127.0.0.1:${gatewayPort}/v1`,
+    apiKey: "fake-retry-key"
+  }));
+  const selectedModel = {
+    id: "openai:retry-image",
+    label: "Retry image",
+    upstreamModel: "gpt-image-2",
+    apiFormat: "gpt-image",
+    channels: ["main", "backup"],
+    creditsPerImage: 7,
+    costCentsPerImage: 4
+  };
+  const fallbackModel = { ...selectedModel, id: "openai:fallback-image", channels: ["main"] };
+  const fixture = await createRetryFixture(t, {
+    IMAGE_PROVIDER_DEFAULT: "openai",
+    IMAGE_MODEL_DEFAULT: fallbackModel.id,
+    IMAGE_MODEL_DISCOVERY_CHANNEL: "main",
+    IMAGE_MODELS: JSON.stringify([selectedModel, fallbackModel]),
+    IMAGE_CHANNELS: JSON.stringify(channels)
+  });
+  const input = {
+    clientRequestId: randomUUID(),
+    prompt: "A calm coastal landscape",
+    aspectRatio: "1:1",
+    quality: "standard",
+    quantity: 1,
+    model: selectedModel.id,
+    channel: "backup"
+  };
+  const created = await post(fixture.baseUrl, "/api/generation/tasks", input, fixture.session);
+  const source = created.data.task;
+  await updateStoreJson(fixture.storePath, (data) => {
+    data.generationTasks.find((task) => task.id === source.id).status = "FAILED";
+  });
+  const currentModel = { ...selectedModel, creditsPerImage: 11 };
+  const updatedUrl = await fixture.startApi({ IMAGE_MODELS: JSON.stringify([currentModel, fallbackModel]) });
+  const quote = await post(updatedUrl, "/api/generation/quote", input, fixture.session);
+  const retried = await fixture.retry(source.id, {}, updatedUrl);
+  assert.equal(retried.status, 201, JSON.stringify(retried.payload));
+  const task = retried.payload.data.task;
+  assert.equal(task.channel, "backup", "Retries must preserve the original channel instead of the current default");
+  assert.equal(task.modelName, selectedModel.id);
+  assert.equal(task.creditCost, quote.data.creditCost);
+  assert.notEqual(task.creditCost, source.creditCost);
+  assertPublicGenerationTask(task);
+  const stored = await readStore(fixture.storePath);
+  const persisted = stored.generationTasks.find((entry) => entry.id === task.id);
+  assert.equal(persisted.modelSnapshot.model.primaryChannel, "backup");
+  assert.equal(persisted.modelSnapshot.model.quantityMultiplier, 11);
+  assert.deepEqual(
+    persisted.modelSnapshot.channels.map((channel) => channel.name),
+    ["backup"]
+  );
+
+  for (const extra of [
+    { IMAGE_CHANNELS: JSON.stringify(channels.map((channel) => ({ ...channel, enabled: channel.name !== "backup" }))) },
+    { IMAGE_MODELS: JSON.stringify([{ ...currentModel, enabled: false }, fallbackModel]) }
+  ]) {
+    const unavailableUrl = await fixture.startApi(extra);
+    const before = await readStore(fixture.storePath);
+    const rejected = await fixture.retry(source.id, { clientRequestId: randomUUID() }, unavailableUrl);
+    assert.equal(rejected.status, 400, JSON.stringify(rejected.payload));
+    assert.equal(rejected.payload.error.code, "VALIDATION_ERROR");
+    const after = await readStore(fixture.storePath);
+    assert.deepEqual(after.generationTasks, before.generationTasks);
+    assert.deepEqual(after.creditAccounts, before.creditAccounts);
+    assert.deepEqual(after.creditLedgerEntries, before.creditLedgerEntries);
+  }
+});
+
+async function createRetryFixture(t, overrides = {}) {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-generation-retry-"));
+  const storePath = join(dir, "store.json");
+  const processes = [];
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    DATA_STORE: "json",
+    IMAGORA_STORE_PATH: storePath,
+    IMAGORA_SEED_DEMO_DATA: "true",
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    RUNTIME_STATE_PROVIDER: "memory",
+    RATE_LIMIT_PROVIDER: "memory",
+    RATE_LIMIT_GENERATION_MAX: "1000",
+    STORAGE_PROVIDER: "inline",
+    QUEUE_PROVIDER: "inline",
+    SAFETY_PROVIDER: "local",
+    MAILER_PROVIDER: "console",
+    IMAGE_PROVIDER_DEFAULT: "mock",
+    IMAGE_MODEL_DEFAULT: "mock:default",
+    IMAGE_MODEL_DISCOVERY: "false",
+    IMAGE_MODELS: "",
+    IMAGE_CHANNELS: "",
+    REQUIRE_EMAIL_VERIFICATION: "false",
+    FEATURE_GENERATION_ENABLED: "true",
+    TRUST_PROXY: "false",
+    WEB_ORIGIN: defaultWriteOrigin,
+    CSRF_ALLOWED_ORIGINS: defaultWriteOrigin,
+    ...overrides
+  };
+  t.after(async () => {
+    await Promise.all(
+      processes.map(
+        (child) =>
+          new Promise((done) => {
+            if (child.exitCode !== null || child.signalCode !== null) return done();
+            child.once("exit", done);
+            child.kill();
+          })
+      )
+    );
+    assert.ok(!relative(tmpdir(), dir).startsWith(".."), "Cleanup must stay inside the test temp directory");
+    await rm(dir, { recursive: true, force: true });
+  });
+  async function startApi(extra = {}) {
+    const port = await reserveUnusedPort();
+    const child = spawn(process.execPath, ["apps/api/dist/main.js"], {
+      env: { ...env, ...extra, API_PORT: String(port) },
+      stdio: "ignore",
+      windowsHide: true
+    });
+    processes.push(child);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl, 12000);
+    return baseUrl;
+  }
+  const baseUrl = await startApi();
+  const demo = await login(baseUrl, "demo@imagora.local", "Demo123!");
+  return {
+    baseUrl,
+    storePath,
+    startApi,
+    session: demo.session,
+    userId: demo.data.user.id,
+    async seedFailed(changes = {}) {
+      const now = new Date().toISOString();
+      const task = { ...createPaginationTask(randomUUID(), demo.data.user.id, now), status: "FAILED", ...changes };
+      await updateStoreJson(storePath, (data) => {
+        data.generationTasks.push(task);
+      });
+      return task;
+    },
+    async retry(taskId, body, url = baseUrl, session = demo.session) {
+      const response = await fetch(`${url}/api/generation/tasks/${taskId}/retry`, {
+        method: "POST",
+        headers: { ...sessionHeaders(session), ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) })
+      });
+      return { status: response.status, payload: await response.json() };
+    }
+  };
+}
 
 test("auth login requires a valid one-time image captcha", async () => {
   const dir = await mkdtemp(join(tmpdir(), "imagora-auth-captcha-"));
@@ -2355,7 +2747,16 @@ for (const failsSecondImage of [false, true]) {
       assert.equal(detailSnapshot.payload.data.task.status, "RUNNING");
       assert.equal(detailSnapshot.payload.data.task.progress.stage, "GENERATING");
       assert.equal(detailSnapshot.payload.data.task.progress.generatedImages, 0);
-      assert.deepEqual(detailSnapshot.payload.data.task.progress.imageSteps, [1, 0]);
+      // 读取路径不再争用写锁；响应可能早于节流进度写入，单独等待首个步骤落库。
+      await waitForCondition(
+        async () => {
+          const snapshot = await get(baseUrl, `/api/generation/tasks/${created.data.task.id}`, demo.session);
+          return snapshot.data.task.progress.imageSteps[0] === 1;
+        },
+        1500,
+        25,
+        "Worker did not persist the first generation step"
+      );
       const eventsUrl = baseUrl + "/api/generation/tasks/" + created.data.task.id + "/events";
       const unauthorized = await fetch(eventsUrl);
       assert.equal(unauthorized.status, 401);

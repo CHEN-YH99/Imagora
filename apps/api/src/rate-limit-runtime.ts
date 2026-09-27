@@ -78,7 +78,7 @@ export const rateLimitRules: RateLimitRule[] = [
   {
     id: "generation-create",
     method: "POST",
-    pattern: /^\/api\/generation\/tasks$/,
+    pattern: /^\/api\/generation\/tasks(?:\/[^/]+\/retry)?$/,
     max: envNumber("RATE_LIMIT_GENERATION_MAX", 30)
   },
   {

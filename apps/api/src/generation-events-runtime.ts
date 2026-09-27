@@ -1,4 +1,4 @@
-import type { GenerationStreamData, Store } from "@imagora/database";
+import { generationTaskVersion, type GenerationStreamData, type Store } from "@imagora/database";
 import { AppError, type GenerationTask } from "@imagora/shared";
 
 export interface GenerationStreamUpdate {
@@ -26,6 +26,8 @@ export function createGenerationEventsRuntime(
   options: { pollIntervalMs?: number; heartbeatMs?: number } = {}
 ) {
   const subscribers = new Set<Subscriber>();
+  const taskSubscriberCounts = new Map<string, number>();
+  const snapshots = new Map<string, GenerationStreamUpdate>();
   const pollIntervalMs = options.pollIntervalMs ?? 1_000;
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -33,7 +35,14 @@ export function createGenerationEventsRuntime(
   let closed = false;
 
   function remove(subscriber: Subscriber) {
-    subscribers.delete(subscriber);
+    if (subscribers.delete(subscriber)) {
+      const remaining = (taskSubscriberCounts.get(subscriber.taskId) ?? 1) - 1;
+      if (remaining) taskSubscriberCounts.set(subscriber.taskId, remaining);
+      else {
+        taskSubscriberCounts.delete(subscriber.taskId);
+        snapshots.delete(subscriber.taskId);
+      }
+    }
     subscriber.closed = true;
     subscriber.wake?.();
     if (!subscribers.size && timer) {
@@ -63,24 +72,51 @@ export function createGenerationEventsRuntime(
   async function poll() {
     const current = [...subscribers];
     try {
+      const taskIds = [...new Set(current.map((subscriber) => subscriber.taskId))];
+      // 保留发起读取时的快照；等待期间断连/重新订阅不能清空本批次省略的图片与退款。
+      const requestedSnapshots = new Map(snapshots);
+      const knownTaskVersions = Object.fromEntries(
+        taskIds.flatMap((id) => {
+          const previous = requestedSnapshots.get(id);
+          return previous ? [[id, generationTaskVersion(previous.task)]] : [];
+        })
+      );
       const data = await store.readGenerationStream({
-        taskIds: [...new Set(current.map((subscriber) => subscriber.taskId))],
-        sessionTokens: [...new Set(current.map((subscriber) => subscriber.token))]
+        taskIds,
+        sessionTokens: [...new Set(current.map((subscriber) => subscriber.token))],
+        ...(Object.keys(knownTaskVersions).length ? { knownTaskVersions } : {})
       });
       const sessions = new Map(data.sessions.map((session) => [session.token, session]));
+      const imagesByTask = new Map<string, GenerationStreamData["generatedImages"]>();
+      for (const image of data.generatedImages) {
+        const images = imagesByTask.get(image.taskId) ?? [];
+        images.push(image);
+        imagesByTask.set(image.taskId, images);
+      }
+      const entriesByTask = new Map<string, GenerationStreamData["creditLedgerEntries"]>();
+      for (const entry of data.creditLedgerEntries) {
+        const entries = entriesByTask.get(entry.sourceId) ?? [];
+        entries.push(entry);
+        entriesByTask.set(entry.sourceId, entries);
+      }
       const updates = new Map(
-        data.generationTasks.map((task) => [
-          task.id,
-          {
-            task,
-            images: data.generatedImages.filter(
-              (image) => image.taskId === task.id && image.userId === task.userId && !image.deletedAt
-            ),
-            creditLedgerEntries: data.creditLedgerEntries.filter(
-              (entry) => entry.sourceId === task.id && entry.userId === task.userId
-            )
-          }
-        ])
+        data.generationTasks.map((task) => {
+          const previous = requestedSnapshots.get(task.id);
+          const update =
+            previous && generationTaskVersion(previous.task) === generationTaskVersion(task)
+              ? previous
+              : {
+                  task,
+                  images: (imagesByTask.get(task.id) ?? []).filter(
+                    (image) => image.userId === task.userId && !image.deletedAt
+                  ),
+                  creditLedgerEntries: (entriesByTask.get(task.id) ?? []).filter(
+                    (entry) => entry.userId === task.userId
+                  )
+                };
+          snapshots.set(task.id, update);
+          return [task.id, update] as const;
+        })
       );
       const now = Date.now();
       for (const subscriber of current) {
@@ -99,7 +135,7 @@ export function createGenerationEventsRuntime(
           fail(subscriber, new AppError("NOT_FOUND", "Generation task was not found", 404));
           continue;
         }
-        const version = [update.task.updatedAt, update.task.progress?.sequence ?? 0, update.task.status].join(":");
+        const version = generationTaskVersion(update.task);
         if (version !== subscriber.version) {
           subscriber.pending = update;
           subscriber.version = version;
@@ -112,6 +148,7 @@ export function createGenerationEventsRuntime(
         subscriber.wake?.();
         if (!["PENDING", "RUNNING"].includes(update.task.status)) remove(subscriber);
       }
+      for (const id of snapshots.keys()) if (!taskSubscriberCounts.has(id)) snapshots.delete(id);
     } catch (error) {
       for (const subscriber of current) {
         if (!subscriber.closed) fail(subscriber, error);
@@ -163,6 +200,7 @@ export function createGenerationEventsRuntime(
       }
     })();
     subscribers.add(subscriber);
+    taskSubscriberCounts.set(taskId, (taskSubscriberCounts.get(taskId) ?? 0) + 1);
     schedule(0);
     return { ready, events, close };
   }
@@ -177,6 +215,7 @@ export function createGenerationEventsRuntime(
         fail(subscriber, new AppError("INTERNAL_ERROR", "Generation streams are closing", 503));
       }
       await inFlight;
+      snapshots.clear();
     }
   };
 }

@@ -38,6 +38,7 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
     registerSchema,
     requestPasswordResetSchema,
     requireAuth,
+    requireSession,
     resetPasswordSchema,
     saveCaptchaChallenge,
     saveCaptchaVerification,
@@ -244,7 +245,7 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
 
   // 修改密码：必须校验旧密码，成功后签发新会话并踢掉其余会话，防止旧凭据继续有效。
   app.post("/api/auth/change-password", async (request, reply) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const input = changePasswordSchema.parse(request.body);
     return store.update(async (data) => {
       const current = mustFindUser(data, user.id);
@@ -266,7 +267,7 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
 
   // 修改邮箱：校验密码 + 查重，换邮箱后重置验证状态并发送新的验证邮件。
   app.post("/api/auth/change-email", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const input = changeEmailSchema.parse(request.body);
     const result = await store.update(async (data) => {
       const current = mustFindUser(data, user.id);
@@ -331,7 +332,7 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
 
   // 登出其他所有设备：只保留当前会话，清掉该用户其余会话。
   app.post("/api/auth/logout-others", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const currentToken = sessionToken(request);
     const removed = await store.update((data) => {
       const before = data.sessions.length;
@@ -345,7 +346,7 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
   // 注销账户：软删（status=DELETED），墓碑化邮箱以释放原邮箱供重新注册，清会话并审计留档。
   // 积分/订单等数据保留不动，仅停用账户；requireAuth 会自动拦截非 ACTIVE 账户。
   app.post("/api/auth/delete-account", async (request, reply) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const input = deleteAccountSchema.parse(request.body);
     await store.update((data) => {
       const current = mustFindUser(data, user.id);
@@ -507,7 +508,7 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
   });
 
   app.post("/api/auth/resend-verification", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     if (user.emailVerifiedAt) {
       return envelope(request, { ok: true, message: "Email is already verified" });
     }
@@ -558,17 +559,17 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
   });
 
   app.get("/api/auth/me", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     return envelope(request, { user: publicUser(user) });
   });
 
   app.get("/api/users/me", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     return envelope(request, { user: publicUser(user) });
   });
 
   app.patch("/api/users/me", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const input = updateProfileSchema.parse(request.body);
     return store.update(async (data) => {
       const current = mustFindUser(data, user.id);

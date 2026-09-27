@@ -1,17 +1,44 @@
 import { AppError, type StoreData, type User } from "@imagora/shared";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { envBool } from "./runtime.js";
+import type { SessionIdentity } from "@imagora/database";
 
 interface AuthStore {
   read(): Promise<StoreData>;
+  readSession(token: string): Promise<SessionIdentity | null>;
 }
 
 type SameSitePolicy = "Strict" | "Lax" | "None";
 
 export function createAuthRuntime(store: AuthStore): {
+  readRequestSession: (request: FastifyRequest) => Promise<SessionIdentity | null>;
+  requireSession: (request: FastifyRequest) => Promise<{ user: User }>;
   requireAuth: (request: FastifyRequest) => Promise<{ data: StoreData; user: User }>;
   requireAdmin: (request: FastifyRequest) => Promise<{ data: StoreData; user: User }>;
 } {
+  // 同一次请求的日志、限流与路由复用查询；不跨请求缓存，撤销/停用下次请求立即生效。
+  const requestSessions = new WeakMap<FastifyRequest, Promise<SessionIdentity | null>>();
+  function readRequestSession(request: FastifyRequest): Promise<SessionIdentity | null> {
+    let pending = requestSessions.get(request);
+    if (!pending) {
+      const token = sessionToken(request, true);
+      pending = token ? store.readSession(token) : Promise.resolve(null);
+      requestSessions.set(request, pending);
+    }
+    return pending;
+  }
+
+  async function requireSession(request: FastifyRequest): Promise<{ user: User }> {
+    const session = await readRequestSession(request);
+    if (!session || Date.parse(session.expiresAt) <= Date.now()) {
+      throw new AppError("UNAUTHORIZED", "Invalid or expired session", 401);
+    }
+    if (session.user.status !== "ACTIVE") {
+      throw new AppError("FORBIDDEN", "User is not active", 403);
+    }
+    return { user: session.user };
+  }
+
   async function requireAuth(request: FastifyRequest): Promise<{ data: StoreData; user: User }> {
     const token = sessionToken(request);
     const data = await store.read();
@@ -36,7 +63,7 @@ export function createAuthRuntime(store: AuthStore): {
     return session;
   }
 
-  return { requireAuth, requireAdmin };
+  return { requireAuth, requireAdmin, requireSession, readRequestSession };
 }
 
 export function sessionToken(request: FastifyRequest, optional = false): string {

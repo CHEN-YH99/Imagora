@@ -153,6 +153,8 @@ export const generationInputSchema = z.object({
     .optional()
 });
 
+export const generationRetrySchema = z.object({ clientRequestId: z.string().min(8).max(120).optional() }).strict();
+
 export const referenceUploadSchema = z.object({
   fileName: z.string().min(1).max(180),
   mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
@@ -220,6 +222,17 @@ const orderStatusSchema = z.enum(["PENDING", "PAID", "CANCELED", "REFUNDED", "CL
 export const taskQuerySchema = offsetPaginationSchema.extend({
   status: taskStatusSchema.optional()
 });
+
+export const taskBatchQuerySchema = z
+  .object({
+    ids: z
+      .string()
+      .max(12_099)
+      .transform((value) => value.split(","))
+      .pipe(z.array(z.string().trim().min(1).max(120)).min(1).max(100))
+      .transform((ids) => [...new Set(ids)])
+  })
+  .strict();
 
 export const adminUserQuerySchema = paginationSchema.extend({
   status: userStatusSchema.optional(),

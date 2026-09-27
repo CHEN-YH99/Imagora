@@ -19,6 +19,7 @@ export interface ApiRouteContext {
   safetyProvider: ReturnType<typeof createSafetyProvider>;
   storage: ReturnType<typeof createObjectStorage>;
   requireAuth: (request: FastifyRequest) => Promise<{ user: User; data: StoreData }>;
+  requireSession: (request: FastifyRequest) => Promise<{ user: User }>;
   requireAdmin: (request: FastifyRequest) => Promise<{ user: User; data: StoreData }>;
   taskWithRefund: (
     data: Pick<StoreData, "creditLedgerEntries">,

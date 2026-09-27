@@ -37,6 +37,110 @@ test.after(async () => {
   await rm(storeDir, { recursive: true, force: true });
 });
 
+test("read endpoints and SSE never load the full Store through logging or authentication", async () => {
+  const { JsonStore } = await import("../packages/database/dist/index.js");
+  const store = new JsonStore(process.env.IMAGORA_STORE_PATH);
+  const source = await store.read();
+  const user = source.users.find((user) => user.status === "ACTIVE");
+  assert.ok(user);
+  const now = new Date().toISOString();
+  const taskId = "scoped-task-" + crypto.randomUUID();
+  const orderId = "scoped-order-" + crypto.randomUUID();
+  const token = "scoped-session-" + crypto.randomUUID();
+  await store.update((data) => {
+    data.sessions.push({
+      token,
+      userId: user.id,
+      createdAt: now,
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    data.generationTasks.push({
+      id: taskId,
+      userId: user.id,
+      clientRequestId: taskId,
+      referenceImageId: null,
+      prompt: "targeted read fixture",
+      negativePrompt: null,
+      style: "none",
+      aspectRatio: "1:1",
+      width: 1024,
+      height: 1024,
+      quantity: 1,
+      quality: "standard",
+      modelProvider: "mock",
+      modelName: "mock:default",
+      status: "SUCCEEDED",
+      creditCost: 1,
+      providerCostCents: 0,
+      failureCode: null,
+      failureMessage: null,
+      startedAt: now,
+      completedAt: now,
+      createdAt: now,
+      updatedAt: now
+    });
+    data.orders.push({
+      id: orderId,
+      userId: user.id,
+      planId: data.plans[0].id,
+      orderNo: orderId,
+      amountCents: 100,
+      currency: "USD",
+      paymentProvider: "mock",
+      paymentIntentId: null,
+      status: "PENDING",
+      paidAt: null,
+      createdAt: now,
+      updatedAt: now
+    });
+  });
+  const originalRead = JsonStore.prototype.read;
+  // SSE 使用真实连接，避免注入测试的模拟 socket 缺少 setTimeout。
+  const baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
+  const originalSession = JsonStore.prototype.readSession;
+  const originalUpdate = JsonStore.prototype.update;
+  let sessionReads = 0,
+    writes = 0;
+  JsonStore.prototype.read = async () => assert.fail("Unexpected full Store read");
+  JsonStore.prototype.readSession = function (...args) {
+    sessionReads++;
+    return originalSession.apply(this, args);
+  };
+  JsonStore.prototype.update = function (...args) {
+    writes++;
+    return originalUpdate.apply(this, args);
+  };
+  try {
+    const paths = [
+      "/api/auth/me",
+      "/api/users/me",
+      "/api/plans",
+      "/api/generation/tasks?status=SUCCEEDED&offset=0&limit=1",
+      "/api/generation/tasks/" + taskId,
+      "/api/generation/tasks/batch?ids=" + taskId,
+      "/api/orders?limit=1",
+      "/api/orders/" + orderId,
+      "/api/generation/tasks/" + taskId + "/events"
+    ];
+    for (const path of paths) {
+      const before = sessionReads;
+      const response = await fetch(baseUrl + path, {
+        headers: { cookie: "imagora_session=" + token },
+        signal: AbortSignal.timeout(5000)
+      });
+      const content = await response.text();
+      assert.equal(response.status, 200, path + ": " + content);
+      assert.equal(sessionReads, before + 1, "Logger and route must share the session query");
+      if (path.endsWith("/events")) assert.match(content, /SUCCEEDED/);
+    }
+    assert.equal(writes, 0, "Read endpoints without expired orders must not open Store write transactions");
+  } finally {
+    JsonStore.prototype.read = originalRead;
+    JsonStore.prototype.readSession = originalSession;
+    JsonStore.prototype.update = originalUpdate;
+  }
+});
+
 // ---- 辅助 ----
 
 // inject 不带 cookie jar，自己维护一个简单的 name=value 映射。

@@ -1,7 +1,10 @@
 import type {
   GenerationTask as TaskRow,
   GeneratedImage as ImageRow,
-  CreditLedgerEntry as LedgerRow
+  CreditLedgerEntry as LedgerRow,
+  User as UserRow,
+  Order as OrderRow,
+  Plan as PlanRow
 } from "../generated/client/index.js";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -24,7 +27,13 @@ const workspaceRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)
 const defaultPath = resolve(workspaceRoot, "data", "imagora-store.json");
 
 export interface Store {
+  initialize(): Promise<void>;
   read(): Promise<StoreData>;
+  readSession(token: string): Promise<SessionIdentity | null>;
+  readGenerationTasks(query: GenerationTasksQuery): Promise<GenerationTasksData>;
+  readOrders(query: OrdersQuery): Promise<{ orders: StoreData["orders"]; plans: Plan[] }>;
+  readActivePlans(): Promise<Plan[]>;
+  closeExpiredUserOrders(userId: string, cutoff: string, now: string): Promise<number>;
   readGenerationStream(query: GenerationStreamQuery): Promise<GenerationStreamData>;
   updateGenerationProgress(write: GenerationProgressWrite): Promise<void>;
   write(data: StoreData): Promise<void>;
@@ -34,6 +43,35 @@ export interface Store {
 export interface GenerationStreamQuery {
   taskIds: string[];
   sessionTokens: string[];
+  knownTaskVersions?: Record<string, string>;
+}
+
+export interface SessionIdentity {
+  user: User;
+  expiresAt: string;
+}
+
+export interface GenerationTasksQuery {
+  userId: string;
+  taskId?: string;
+  taskIds?: string[];
+  status?: StoreData["generationTasks"][number]["status"];
+  offset: number;
+  limit: number;
+  includeImages?: boolean;
+}
+
+export interface GenerationTasksData {
+  generationTasks: StoreData["generationTasks"];
+  generatedImages: StoreData["generatedImages"];
+  creditLedgerEntries: CreditLedgerEntry[];
+  total: number;
+}
+
+export interface OrdersQuery {
+  userId: string;
+  orderId?: string;
+  limit?: number;
 }
 
 export interface GenerationStreamData {
@@ -66,17 +104,95 @@ export class JsonStore implements Store {
   readonly filePath: string;
   private updateChain: Promise<void> = Promise.resolve();
   private streamCache?: { version: string; data: StoreData };
+  private snapshotRead?: { version: string; promise: Promise<StoreData> };
 
   constructor(filePath = resolveStorePath(process.env.IMAGORA_STORE_PATH)) {
     this.filePath = filePath;
   }
 
-  async read(): Promise<StoreData> {
+  async initialize(): Promise<void> {
     await this.ensureInitialized();
-    return this.readUnlocked();
+  }
+
+  async read(): Promise<StoreData> {
+    return structuredClone(await this.readSnapshot());
+  }
+
+  async readSession(token: string): Promise<SessionIdentity | null> {
+    const data = await this.readSnapshot();
+    const session = data.sessions.find((item) => item.token === token && Date.parse(item.expiresAt) > Date.now());
+    const user = session && data.users.find((item) => item.id === session.userId);
+    return user && session ? structuredClone({ user, expiresAt: session.expiresAt }) : null;
+  }
+
+  async readGenerationTasks(query: GenerationTasksQuery): Promise<GenerationTasksData> {
+    const data = await this.readSnapshot();
+    const matching = data.generationTasks
+      .filter(
+        (task) =>
+          task.userId === query.userId &&
+          (!query.taskId || task.id === query.taskId) &&
+          (!query.taskIds || query.taskIds.includes(task.id)) &&
+          (!query.status || task.status === query.status)
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+    const generationTasks = matching.slice(query.offset, query.offset + query.limit);
+    const ids = new Set(generationTasks.map((task) => task.id));
+    return structuredClone({
+      generationTasks,
+      generatedImages: query.includeImages
+        ? data.generatedImages.filter(
+            (image) => ids.has(image.taskId) && image.userId === query.userId && !image.deletedAt
+          )
+        : [],
+      creditLedgerEntries: data.creditLedgerEntries.filter(
+        (entry) =>
+          entry.userId === query.userId &&
+          entry.sourceType === "TASK" &&
+          entry.type === "REFUND" &&
+          ids.has(entry.sourceId)
+      ),
+      total: matching.length
+    });
+  }
+
+  async readOrders(query: OrdersQuery): Promise<{ orders: StoreData["orders"]; plans: Plan[] }> {
+    const data = await this.readSnapshot();
+    const orders = data.orders
+      .filter((order) => order.userId === query.userId && (!query.orderId || order.id === query.orderId))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+      .slice(0, query.limit ?? Number.POSITIVE_INFINITY);
+    const planIds = new Set(query.orderId ? orders.map((order) => order.planId) : []);
+    return structuredClone({ orders, plans: data.plans.filter((plan) => planIds.has(plan.id)) });
+  }
+
+  async readActivePlans(): Promise<Plan[]> {
+    return structuredClone(
+      (await this.readSnapshot()).plans
+        .filter((plan) => plan.status === "ACTIVE")
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id))
+    );
+  }
+
+  async closeExpiredUserOrders(userId: string, cutoff: string, now: string): Promise<number> {
+    const matches = (order: StoreData["orders"][number]) =>
+      order.userId === userId && order.status === "PENDING" && order.createdAt <= cutoff;
+    if (!(await this.readSnapshot()).orders.some(matches)) return 0;
+    return this.update((data) => {
+      const expired = data.orders.filter(matches);
+      for (const order of expired) {
+        order.status = "CLOSED";
+        order.updatedAt = now;
+      }
+      return expired.length;
+    });
   }
 
   async readGenerationStream(query: GenerationStreamQuery): Promise<GenerationStreamData> {
+    return projectGenerationStream(await this.readSnapshot(), query);
+  }
+
+  private async readSnapshot(): Promise<StoreData> {
     // 原子替换的文件句柄对应同一份快照；仅在其他进程写入后重新解析。
     const file = await open(this.filePath, "r").catch(async (error: unknown) => {
       if (!isNodeError(error, "ENOENT")) throw error;
@@ -86,13 +202,19 @@ export class JsonStore implements Store {
     try {
       const stat = await file.stat({ bigint: true });
       const version = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
-      if (this.streamCache?.version !== version) {
-        this.streamCache = {
-          version,
-          data: normalizeStoreData(JSON.parse(await file.readFile("utf8")) as Partial<StoreData>)
-        };
+      if (this.streamCache?.version === version) return this.streamCache.data;
+      if (this.snapshotRead?.version === version) return await this.snapshotRead.promise;
+      const promise = file
+        .readFile("utf8")
+        .then((content) => normalizeStoreData(JSON.parse(content) as Partial<StoreData>));
+      this.snapshotRead = { version, promise };
+      try {
+        const data = await promise;
+        if (this.snapshotRead?.promise === promise) this.streamCache = { version, data };
+        return data;
+      } finally {
+        if (this.snapshotRead?.promise === promise) this.snapshotRead = undefined;
       }
-      return projectGenerationStream(this.streamCache.data, query);
     } finally {
       await file.close();
     }
@@ -180,6 +302,30 @@ class DevelopmentFallbackStore implements Store {
     private readonly fallback: Store
   ) {}
 
+  async initialize(): Promise<void> {
+    return this.run((store) => store.initialize());
+  }
+
+  async readSession(token: string): Promise<SessionIdentity | null> {
+    return this.run((store) => store.readSession(token));
+  }
+
+  async readGenerationTasks(query: GenerationTasksQuery): Promise<GenerationTasksData> {
+    return this.run((store) => store.readGenerationTasks(query));
+  }
+
+  async readOrders(query: OrdersQuery): Promise<{ orders: StoreData["orders"]; plans: Plan[] }> {
+    return this.run((store) => store.readOrders(query));
+  }
+
+  async readActivePlans(): Promise<Plan[]> {
+    return this.run((store) => store.readActivePlans());
+  }
+
+  async closeExpiredUserOrders(userId: string, cutoff: string, now: string): Promise<number> {
+    return this.run((store) => store.closeExpiredUserOrders(userId, cutoff, now));
+  }
+
   async read(): Promise<StoreData> {
     return this.run((store) => store.read());
   }
@@ -220,9 +366,89 @@ class DevelopmentFallbackStore implements Store {
 export class PrismaStore implements Store {
   private readonly prisma: PrismaClient;
   private updateChain: Promise<void> = Promise.resolve();
+  private initialization?: Promise<void>;
 
   constructor(prisma = new PrismaClient()) {
     this.prisma = prisma;
+  }
+
+  async initialize(): Promise<void> {
+    await this.ensureSeeded();
+  }
+
+  async readSession(token: string): Promise<SessionIdentity | null> {
+    const session = await this.prisma.session.findUnique({ where: { token }, include: { user: true } });
+    if (!session || session.expiresAt.getTime() <= Date.now()) return null;
+    return { user: userFromRow(session.user), expiresAt: session.expiresAt.toISOString() };
+  }
+
+  async readGenerationTasks(query: GenerationTasksQuery): Promise<GenerationTasksData> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const where = {
+          userId: query.userId,
+          ...(query.taskId ? { id: query.taskId } : query.taskIds ? { id: { in: query.taskIds } } : {}),
+          ...(query.status ? { status: query.status } : {})
+        };
+        const [rows, total] = await Promise.all([
+          tx.generationTask.findMany({
+            where,
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            skip: query.offset,
+            take: query.limit
+          }),
+          tx.generationTask.count({ where })
+        ]);
+        const ids = rows.map((task) => task.id);
+        const [images, entries] = ids.length
+          ? await Promise.all([
+              query.includeImages
+                ? tx.generatedImage.findMany({ where: { userId: query.userId, taskId: { in: ids }, deletedAt: null } })
+                : [],
+              tx.creditLedgerEntry.findMany({
+                where: { userId: query.userId, sourceType: "TASK", sourceId: { in: ids }, type: "REFUND" }
+              })
+            ])
+          : [[], []];
+        const generationTasks = rows.map(generationTaskFromRow);
+        return {
+          generationTasks,
+          generatedImages: images.map((image) => generatedImageFromRow(image, generationTasks)),
+          creditLedgerEntries: entries.map(creditLedgerEntryFromRow),
+          total
+        };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 5_000 }
+    );
+  }
+
+  async readOrders(query: OrdersQuery): Promise<{ orders: StoreData["orders"]; plans: Plan[] }> {
+    const rows = await this.prisma.order.findMany({
+      where: { userId: query.userId, ...(query.orderId ? { id: query.orderId } : {}) },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      ...(query.limit === undefined ? {} : { take: query.limit }),
+      include: { plan: !!query.orderId }
+    });
+    return { orders: rows.map(orderFromRow), plans: query.orderId ? rows.map((order) => planFromRow(order.plan)) : [] };
+  }
+
+  async readActivePlans(): Promise<Plan[]> {
+    return (
+      await this.prisma.plan.findMany({ where: { status: "ACTIVE" }, orderBy: [{ sortOrder: "asc" }, { id: "asc" }] })
+    ).map(planFromRow);
+  }
+
+  async closeExpiredUserOrders(userId: string, cutoff: string, now: string): Promise<number> {
+    const where = { userId, status: "PENDING" as const, createdAt: { lte: new Date(cutoff) } };
+    if (!(await this.prisma.order.findFirst({ where, select: { id: true } }))) return 0;
+    // 仅实际过期关闭需要与旧 Store 写事务协调；普通订单读取不占用全局写锁。
+    return this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(73341001)");
+        return (await tx.order.updateMany({ where, data: { status: "CLOSED", updatedAt: new Date(now) } })).count;
+      },
+      { timeout: 5_000 }
+    );
   }
 
   async read(): Promise<StoreData> {
@@ -246,7 +472,9 @@ export class PrismaStore implements Store {
               where: { id: { in: query.taskIds }, userId: { in: userIds } }
             })
           : [];
-        const taskIds = tasks.map((task) => task.id);
+        const taskIds = tasks
+          .filter((task) => query.knownTaskVersions?.[task.id] !== generationTaskVersion(generationTaskFromRow(task)))
+          .map((task) => task.id);
         const [images, entries] = taskIds.length
           ? await Promise.all([
               tx.generatedImage.findMany({
@@ -567,13 +795,20 @@ export class PrismaStore implements Store {
   }
 
   private async ensureSeeded(): Promise<void> {
-    await this.prisma.$transaction(
-      async (tx) => {
-        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(73341001)");
-        await this.seedIfEmpty(tx);
-      },
-      { timeout: 30_000 }
-    );
+    // 每个 Store 实例只初始化一次；失败后允许重试，日常只读不再反复获取全局锁。
+    this.initialization ??= this.prisma
+      .$transaction(
+        async (tx) => {
+          await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(73341001)");
+          await this.seedIfEmpty(tx);
+        },
+        { timeout: 30_000 }
+      )
+      .catch((error) => {
+        this.initialization = undefined;
+        throw error;
+      });
+    await this.initialization;
   }
 
   private async seedIfEmpty(tx: Prisma.TransactionClient): Promise<void> {
@@ -583,6 +818,41 @@ export class PrismaStore implements Store {
     const before = await this.readFromClient(tx);
     await persistStoreDiff(tx, before, createInitialData());
   }
+}
+
+function userFromRow(user: UserRow): User {
+  return {
+    ...user,
+    emailVerifiedAt: user.emailVerifiedAt?.toISOString() ?? null,
+    createdAt: user.createdAt.toISOString(),
+    updatedAt: user.updatedAt.toISOString(),
+    lastLoginAt: user.lastLoginAt?.toISOString() ?? null
+  };
+}
+
+function orderFromRow(order: OrderRow): StoreData["orders"][number] {
+  return {
+    id: order.id,
+    userId: order.userId,
+    planId: order.planId,
+    orderNo: order.orderNo,
+    amountCents: order.amountCents,
+    currency: order.currency,
+    paymentProvider: order.paymentProvider,
+    paymentIntentId: order.paymentIntentId,
+    status: order.status,
+    paidAt: order.paidAt?.toISOString() ?? null,
+    createdAt: order.createdAt.toISOString(),
+    updatedAt: order.updatedAt.toISOString()
+  };
+}
+
+function planFromRow(plan: PlanRow): Plan {
+  return { ...plan, createdAt: plan.createdAt.toISOString(), updatedAt: plan.updatedAt.toISOString() };
+}
+
+export function generationTaskVersion(task: StoreData["generationTasks"][number]): string {
+  return [task.updatedAt, task.progress?.sequence ?? 0, task.status].join(":");
 }
 
 function generationTaskFromRow(task: TaskRow): StoreData["generationTasks"][number] {
@@ -677,7 +947,11 @@ function projectGenerationStream(data: StoreData, query: GenerationStreamQuery):
   );
   const requested = new Set(query.taskIds);
   const generationTasks = data.generationTasks.filter((task) => requested.has(task.id) && userIds.has(task.userId));
-  const taskIds = new Set(generationTasks.map((task) => task.id));
+  const taskIds = new Set(
+    generationTasks
+      .filter((task) => query.knownTaskVersions?.[task.id] !== generationTaskVersion(task))
+      .map((task) => task.id)
+  );
   return structuredClone({
     sessions,
     generationTasks,

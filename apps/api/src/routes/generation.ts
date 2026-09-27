@@ -2,9 +2,18 @@ import { createImageGenerationSnapshot, quoteImageGeneration } from "@imagora/ai
 import { imageModelDiscovery } from "../image-model-discovery.js";
 import { z } from "zod";
 import { Readable } from "node:stream";
+import { createHash } from "node:crypto";
+import type { FastifyReply, FastifyRequest } from "fastify";
+import { generationInputSchema, generationRetrySchema, taskBatchQuerySchema } from "../schemas.js";
 import { sessionToken } from "../auth-runtime.js";
 import { createGenerationEventsRuntime } from "../generation-events-runtime.js";
-import { createGenerationProgress, type GenerationTask, type ReferenceImage } from "@imagora/shared";
+import {
+  createGenerationProgress,
+  generationMetadataFromTask,
+  type GenerationTask,
+  type ReferenceImage,
+  type StoreData
+} from "@imagora/shared";
 import type { ApiRouteApp, ApiRouteContext } from "./types.js";
 
 export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteContext): void {
@@ -15,12 +24,10 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     addDays,
     assertEmailVerified,
     assertFeatureEnabled,
-    descCreated,
     enqueueGenerationTask,
     envelope,
     envNumber,
     extensionForMime,
-    generationInputSchema,
     idParamSchema,
     inspectReferenceUpload,
     mustFindCreditAccount,
@@ -29,7 +36,7 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     quote,
     randomUUID,
     referenceUploadSchema,
-    requireAuth,
+    requireSession,
     resolveGenerationProviderSelection,
     safetyProvider,
     spendCredits,
@@ -71,22 +78,47 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
 
   app.post("/api/generation/quote", async (request) => {
     assertFeatureEnabled("generation");
-    await requireAuth(request);
+    await requireSession(request);
     const input = generationInputSchema.parse(request.body);
     const estimatedCost = input.channel ? resolveRequestedGeneration(input).estimated.creditCost : quote(input);
     return envelope(request, { creditCost: estimatedCost, balanceRequired: estimatedCost });
   });
 
-  app.post("/api/generation/tasks", async (request, reply) => {
+  function retryGenerationInput(data: StoreData, userId: string, taskId: string, requestId?: string) {
+    const previous = mustFindOwnTask(data, userId, taskId);
+    if (!["FAILED", "BLOCKED"].includes(previous.status)) {
+      throw new AppError("TASK_NOT_RETRYABLE", "Only failed or blocked tasks can be retried", 400);
+    }
+    // 原任务参与命名空间；旧客户端不传标识时，同一失败任务也只能创建一次重试。
+    const key = createHash("sha256")
+      .update(JSON.stringify([taskId, requestId ?? null]))
+      .digest("hex");
+    return generationInputSchema.parse({
+      ...generationMetadataFromTask(previous),
+      clientRequestId: `retry:${key}`,
+      referenceImageId: previous.referenceImageId ?? undefined,
+      negativePrompt: previous.negativePrompt ?? undefined,
+      model: previous.modelName
+    });
+  }
+
+  async function submitGeneration(request: FastifyRequest, reply: FastifyReply, retry = false) {
     assertFeatureEnabled("generation");
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     assertEmailVerified(user);
-    const input = generationInputSchema.parse(request.body);
-    const { modelSnapshot, estimated } = resolveRequestedGeneration(input);
-    const resolvedModel = modelSnapshot.model.modelId;
-    const resolvedProviderMetadata = { name: modelSnapshot.model.provider };
-    const cost = estimated.creditCost;
+    // 重试与新建共用开关、登录、邮箱验证与限流；原任务 ID 在鉴权之后才解析。
+    const submission = retry
+      ? {
+          kind: "retry" as const,
+          ...idParamSchema.parse(request.params),
+          ...generationRetrySchema.parse(request.body ?? {})
+        }
+      : { kind: "create" as const, input: generationInputSchema.parse(request.body) };
     const result = await store.update(async (data) => {
+      const input =
+        submission.kind === "retry"
+          ? retryGenerationInput(data, user.id, submission.taskId, submission.clientRequestId)
+          : submission.input;
       const duplicate = data.generationTasks.find(
         (task) => task.userId === user.id && task.clientRequestId === input.clientRequestId
       );
@@ -100,6 +132,11 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
           requestedAt: duplicate.createdAt
         };
       }
+      // 去重、当前模型报价、校验与扣费都在同一事务内，跨 API 实例也不会重复扣费。
+      const { modelSnapshot, estimated } = resolveRequestedGeneration(input);
+      const resolvedModel = modelSnapshot.model.modelId;
+      const resolvedProviderMetadata = { name: modelSnapshot.model.provider };
+      const cost = estimated.creditCost;
       const referenceImage = input.referenceImageId
         ? mustFindOwnReferenceImage(data, user.id, input.referenceImageId)
         : null;
@@ -193,11 +230,13 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
       reply.status(201);
     }
     return envelope(request, { task: result.task, balanceAfter: result.balanceAfter });
-  });
+  }
+
+  app.post("/api/generation/tasks", (request, reply) => submitGeneration(request, reply));
 
   app.post("/api/uploads/reference-images", { bodyLimit: uploadBodyLimitBytes() }, async (request, reply) => {
     assertFeatureEnabled("uploads");
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const input = referenceUploadSchema.parse(request.body);
     const upload = inspectReferenceUpload(input);
     const safety = await safetyProvider.checkImage({ mimeType: upload.mimeType, bytes: upload.contentBase64 });
@@ -270,16 +309,11 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
   });
 
   app.get("/api/generation/tasks", async (request) => {
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const query = taskQuerySchema.parse(request.query);
-    const matchingTasks = data.generationTasks
-      .filter((task) => task.userId === user.id)
-      .filter((task) => (query.status ? task.status === query.status : true))
-      .sort(descCreated);
-    const total = matchingTasks.length;
-    const tasks = matchingTasks
-      .slice(query.offset, query.offset + query.limit)
-      .map((task) => taskWithRefund(data, task));
+    const data = await store.readGenerationTasks({ userId: user.id, ...query });
+    const total = data.total;
+    const tasks = data.generationTasks.map((task) => taskWithRefund(data, task));
     return envelope(request, {
       tasks,
       pageInfo: {
@@ -291,13 +325,30 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     });
   });
 
+  app.get("/api/generation/tasks/batch", async (request, reply) => {
+    const { user } = await requireSession(request);
+    const { ids } = taskBatchQuerySchema.parse(request.query);
+    const data = await store.readGenerationTasks({
+      userId: user.id,
+      taskIds: ids,
+      offset: 0,
+      limit: ids.length,
+      includeImages: true
+    });
+    reply.header("Cache-Control", "no-store");
+    return envelope(request, {
+      tasks: data.generationTasks.map((task) => taskWithRefund(data, task)),
+      images: data.generatedImages.map(withoutImagePublicUrl)
+    });
+  });
+
   app.get("/api/generation/tasks/:taskId", async (request) => {
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { taskId } = idParamSchema.parse(request.params);
-    const task = mustFindOwnTask(data, user.id, taskId);
-    const images = data.generatedImages
-      .filter((image) => image.taskId === task.id && !image.deletedAt)
-      .map(withoutImagePublicUrl);
+    const data = await store.readGenerationTasks({ userId: user.id, taskId, offset: 0, limit: 1, includeImages: true });
+    const task = data.generationTasks[0];
+    if (!task) throw new AppError("NOT_FOUND", "Task was not found", 404);
+    const images = data.generatedImages.map(withoutImagePublicUrl);
     return envelope(request, { task: taskWithRefund(data, task), images });
   });
 
@@ -345,47 +396,5 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     return reply.send(stream);
   });
 
-  app.post("/api/generation/tasks/:taskId/retry", async (request, reply) => {
-    const { user } = await requireAuth(request);
-    const { taskId } = idParamSchema.parse(request.params);
-    const result = await store.update(async (data) => {
-      const previous = mustFindOwnTask(data, user.id, taskId);
-      if (!["FAILED", "BLOCKED"].includes(previous.status)) {
-        throw new AppError("TASK_NOT_RETRYABLE", "Only failed or blocked tasks can be retried", 400);
-      }
-      const now = new Date().toISOString();
-      const task: GenerationTask = {
-        ...previous,
-        id: randomUUID(),
-        clientRequestId: `retry:${previous.id}:${now}`,
-        status: "PENDING",
-        progress: createGenerationProgress("QUEUED", now),
-        providerCostCents: 0,
-        failureCode: null,
-        failureMessage: null,
-        startedAt: null,
-        completedAt: null,
-        createdAt: now,
-        updatedAt: now
-      };
-      const account = mustFindCreditAccount(data, user.id);
-      if (account.balance < task.creditCost) {
-        throw new AppError("INSUFFICIENT_CREDITS", "Credit balance is not enough", 402);
-      }
-      data.generationTasks.push(task);
-      spendCredits(
-        data,
-        user.id,
-        task.creditCost,
-        "TASK",
-        task.id,
-        `task-spend:${task.id}`,
-        "Retry image generation task"
-      );
-      return { task: taskWithRefund(data, task), balanceAfter: mustFindCreditAccount(data, user.id).balance };
-    });
-    await enqueueGenerationTask(result.task.id, user.id, result.task.createdAt);
-    reply.status(201);
-    return envelope(request, { task: result.task, balanceAfter: result.balanceAfter });
-  });
+  app.post("/api/generation/tasks/:taskId/retry", (request, reply) => submitGeneration(request, reply, true));
 }

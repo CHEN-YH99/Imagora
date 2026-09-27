@@ -17,6 +17,7 @@ export function registerImageProjectRoutes(app: ApiRouteApp, context: ApiRouteCo
     mustFindOwnImage,
     randomUUID,
     requireAuth,
+    requireSession,
     store
   } = context;
 
@@ -30,7 +31,7 @@ export function registerImageProjectRoutes(app: ApiRouteApp, context: ApiRouteCo
   });
 
   app.post("/api/image-projects", async (request, reply) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const input = imageProjectCreateSchema.parse(request.body);
     const project = await store.update((data) => {
       const now = new Date().toISOString();
@@ -52,7 +53,7 @@ export function registerImageProjectRoutes(app: ApiRouteApp, context: ApiRouteCo
   });
 
   app.patch("/api/image-projects/:projectId", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { projectId } = imageProjectParamSchema.parse(request.params);
     const input = imageProjectPatchSchema.parse(request.body);
     const project = await store.update((data) => {
@@ -79,7 +80,7 @@ export function registerImageProjectRoutes(app: ApiRouteApp, context: ApiRouteCo
   });
 
   app.delete("/api/image-projects/:projectId", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { projectId } = imageProjectParamSchema.parse(request.params);
     const result = await store.update((data) => {
       const target = mustFindOwnProject(data, user.id, projectId, AppError);

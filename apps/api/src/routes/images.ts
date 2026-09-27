@@ -14,6 +14,7 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
     AppError,
     mustFindOwnImage,
     requireAuth,
+    requireSession,
     resolveInlineDataUrl,
     storage,
     store,
@@ -81,7 +82,7 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.post("/api/images/:imageId/favorite", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { imageId } = imageParamSchema.parse(request.params);
     return store.update(async (data) => {
       mustFindOwnImage(data, user.id, imageId);
@@ -93,7 +94,7 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.post("/api/images/:imageId/project", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { imageId } = imageParamSchema.parse(request.params);
     const input = imageProjectAssignmentSchema.parse(request.body);
     const image = await store.update((data) => {
@@ -127,7 +128,7 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.delete("/api/images/:imageId/favorite", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { imageId } = imageParamSchema.parse(request.params);
     return store.update((data) => {
       mustFindOwnImage(data, user.id, imageId);

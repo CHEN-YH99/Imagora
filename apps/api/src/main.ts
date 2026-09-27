@@ -149,7 +149,8 @@ const isProduction = process.env.NODE_ENV === "production";
 validateProductionConfig({ allowBearerSessionAuth, isProduction, requireEmailVerification });
 
 const store = createStore();
-const { requireAuth, requireAdmin } = createAuthRuntime(store);
+await store.initialize();
+const { requireAuth, requireAdmin, requireSession, readRequestSession } = createAuthRuntime(store);
 const { enforceRateLimit } = createRateLimitRuntime(store);
 const mailer = createMailer();
 const alertNotifier = createAlertNotifier({ mailer });
@@ -201,7 +202,7 @@ const app = Fastify({
   bodyLimit: envNumber("API_BODY_LIMIT_BYTES", 1024 * 100),
   // 反代/负载均衡后面必须信任 X-Forwarded-For，否则 request.ip 全是代理 IP，
   // 限流按 IP 分桶会退化成"全局共享一个桶"，登录爆破防护形同虚设。
-  // 默认关闭（本地直连更安全），生产由 TRUST_PROXY 显式开启；也可传入代理跳数或 CIDR。
+  // 默认关闭，反向代理部署通过 TRUST_PROXY 显式配置可信 IP/CIDR。
   trustProxy: resolveTrustProxy()
 });
 app.addHook("onClose", async () => {
@@ -236,15 +237,8 @@ app.addHook("onRequest", async (request, reply) => {
   request.startedAt = Date.now();
 
   // Extract user ID from session if available
-  const token = sessionToken(request, true);
-  let userId: string | undefined;
-  if (token) {
-    const data = await store.read();
-    const session = data.sessions.find((s) => s.token === token);
-    if (session) {
-      userId = session.userId;
-    }
-  }
+  const session = await readRequestSession(request);
+  const userId = session?.user.status === "ACTIVE" ? session.user.id : undefined;
 
   // Add child logger with context
   const childLogger = request.log.child({
@@ -391,19 +385,21 @@ function envelope<T>(request: FastifyRequest, data: T): ApiEnvelope<T> {
 }
 
 // trustProxy 决定 request.ip 取值：反代/网关后面必须开启，否则限流按代理 IP 计数直接失效。
-// 支持三种配置：true/false 布尔；数字（信任的代理跳数）；逗号分隔的可信 IP/CIDR 列表。
-function resolveTrustProxy(): boolean | number | string[] {
+// Fastify 5.12 禁用了仅按跳数信任代理，避免直连客户端伪造转发头绕过限流。
+function resolveTrustProxy(): boolean | string[] {
   const raw = process.env.TRUST_PROXY?.trim();
   if (!raw) {
-    // 生产默认信任一层代理（常见于 Nginx/网关），本地开发关闭。
-    return isProduction ? 1 : false;
+    return false;
   }
   if (raw === "true" || raw === "false") {
     return raw === "true";
   }
   const asNumber = Number(raw);
-  if (Number.isInteger(asNumber) && asNumber >= 0) {
-    return asNumber;
+  if (Number.isFinite(asNumber)) {
+    if (asNumber === 0) return false;
+    throw new Error(
+      "TRUST_PROXY hop counts are no longer supported; configure trusted proxy IP/CIDR addresses or false"
+    );
   }
   return raw
     .split(",")
@@ -1880,6 +1876,7 @@ function createRouteContext(): ApiRouteContext {
     requestPasswordResetSchema,
     requireAdmin,
     requireAuth,
+    requireSession,
     resetPasswordSchema,
     resolveGenerationProviderSelection,
     resolveInlineDataUrl,

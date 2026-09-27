@@ -158,6 +158,19 @@ test("Prisma stream reads only subscribed sessions and tasks in a consistent sna
   assert.equal(result.generatedImages[0].id, image.id);
   assert.equal(result.creditLedgerEntries[0].amount, 5);
   assert.equal(result.generationTasks[0].startedAt, task.startedAt);
+  calls.length = 0;
+  const unchanged = await new PrismaStore(prisma).readGenerationStream({
+    taskIds: [task.id],
+    sessionTokens: ["session-1"],
+    knownTaskVersions: { [task.id]: [task.updatedAt, task.progress.sequence ?? 0, task.status].join(":") }
+  });
+  assert.deepEqual(
+    calls.map(([name]) => name),
+    ["session", "task"]
+  );
+  assert.equal(unchanged.generationTasks.length, 1);
+  assert.equal(unchanged.generatedImages.length, 0);
+  assert.equal(unchanged.creditLedgerEntries.length, 0);
   tx.session.findMany = async () => [];
   calls.length = 0;
   assert.deepEqual(
@@ -166,6 +179,338 @@ test("Prisma stream reads only subscribed sessions and tasks in a consistent sna
     []
   );
   assert.equal(calls.length, 0, "invalid sessions must not query task data");
+});
+
+test("Prisma targeted reads scope sessions, task pages and orders without initializing or scanning other tables", async () => {
+  const calls = [];
+  const user = {
+    id: task.userId,
+    email: "test@example.test",
+    passwordHash: "unused",
+    nickname: "test",
+    avatarUrl: null,
+    role: "USER",
+    status: "ACTIVE",
+    emailVerifiedAt: null,
+    lastLoginAt: null,
+    createdAt: now,
+    updatedAt: now
+  };
+  const plan = {
+    id: "plan-1",
+    name: "test",
+    description: "",
+    priceCents: 100,
+    currency: "USD",
+    credits: 10,
+    validDays: null,
+    status: "ACTIVE",
+    sortOrder: 0,
+    createdAt: now,
+    updatedAt: now
+  };
+  const order = {
+    id: "order-1",
+    userId: task.userId,
+    planId: plan.id,
+    orderNo: "test-order",
+    amountCents: 100,
+    currency: "USD",
+    paymentProvider: "mock",
+    paymentIntentId: null,
+    status: "PENDING",
+    paidAt: null,
+    createdAt: now,
+    updatedAt: now
+  };
+  const tx = {
+    session: {
+      async findUnique(args) {
+        calls.push(["session", args]);
+        return { user: row(user, ["createdAt", "updatedAt"]), expiresAt: new Date(expiresAt) };
+      }
+    },
+    generationTask: {
+      async findMany(args) {
+        calls.push(["task", args]);
+        return [row(task, ["startedAt", "createdAt", "updatedAt"])];
+      },
+      async count(args) {
+        calls.push(["count", args]);
+        return 42;
+      }
+    },
+    generatedImage: {
+      async findMany(args) {
+        calls.push(["image", args]);
+        return [row(image, ["createdAt"])];
+      }
+    },
+    creditLedgerEntry: {
+      async findMany(args) {
+        calls.push(["ledger", args]);
+        return [row(entry, ["createdAt"])];
+      }
+    },
+    order: {
+      async findMany(args) {
+        calls.push(["order", args]);
+        return [{ ...row(order, ["createdAt", "updatedAt"]), plan: row(plan, ["createdAt", "updatedAt"]) }];
+      }
+    },
+    plan: {
+      async findMany(args) {
+        calls.push(["plan", args]);
+        return [row(plan, ["createdAt", "updatedAt"])];
+      }
+    },
+    async $executeRawUnsafe() {
+      assert.fail("Reads must not acquire the Store advisory lock");
+    }
+  };
+  const store = new PrismaStore({
+    ...tx,
+    async $transaction(run, options) {
+      assert.equal(options.isolationLevel, "RepeatableRead");
+      return run(tx);
+    }
+  });
+  assert.deepEqual((await store.readSession("session-1")).user, user);
+  assert.deepEqual(calls.pop()[1], { where: { token: "session-1" }, include: { user: true } });
+  const page = await store.readGenerationTasks({ userId: task.userId, offset: 10, limit: 5, status: "RUNNING" });
+  assert.equal(page.total, 42);
+  assert.equal(page.generatedImages.length, 0);
+  assert.deepEqual(
+    calls.map(([name]) => name),
+    ["task", "count", "ledger"]
+  );
+  assert.deepEqual(calls[0][1], {
+    where: { userId: task.userId, status: "RUNNING" },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    skip: 10,
+    take: 5
+  });
+  assert.deepEqual(calls[1][1].where, calls[0][1].where);
+  assert.deepEqual(calls[2][1].where, {
+    userId: task.userId,
+    sourceType: "TASK",
+    sourceId: { in: [task.id] },
+    type: "REFUND"
+  });
+  calls.length = 0;
+  const detail = await store.readGenerationTasks({
+    userId: task.userId,
+    taskId: task.id,
+    offset: 0,
+    limit: 1,
+    includeImages: true
+  });
+  assert.equal(detail.generatedImages[0].id, image.id);
+  assert.equal(calls[0][1].where.id, task.id);
+  assert.deepEqual(calls.find(([name]) => name === "image")[1].where, {
+    userId: task.userId,
+    taskId: { in: [task.id] },
+    deletedAt: null
+  });
+  calls.length = 0;
+  const batch = await store.readGenerationTasks({
+    userId: task.userId,
+    taskIds: [task.id, "second-task"],
+    offset: 0,
+    limit: 2,
+    includeImages: true
+  });
+  assert.deepEqual(calls[0][1].where, { userId: task.userId, id: { in: [task.id, "second-task"] } });
+  assert.equal(calls[0][1].take, 2);
+  assert.equal(batch.generatedImages[0].id, image.id);
+  assert.deepEqual(
+    calls.map(([name]) => name),
+    ["task", "count", "image", "ledger"]
+  );
+  calls.length = 0;
+  assert.equal((await store.readOrders({ userId: task.userId, limit: 7 })).orders[0].id, order.id);
+  assert.equal(calls[0][1].take, 7);
+  assert.deepEqual(calls[0][1].where, { userId: task.userId });
+  assert.deepEqual(calls[0][1].include, { plan: false });
+  const orderDetail = await store.readOrders({ userId: task.userId, orderId: order.id, limit: 1 });
+  assert.deepEqual(orderDetail.plans, [plan]);
+  assert.equal("plan" in orderDetail.orders[0], false);
+  assert.deepEqual(await store.readActivePlans(), [plan]);
+
+  tx.generationTask.findMany = async () => [];
+  tx.generationTask.count = async () => 0;
+  tx.generatedImage.findMany = tx.creditLedgerEntry.findMany = () =>
+    assert.fail("Empty pages must not query related tables");
+  assert.deepEqual(
+    await store.readGenerationTasks({
+      userId: "foreign-user",
+      taskId: task.id,
+      offset: 0,
+      limit: 1,
+      includeImages: true
+    }),
+    { generationTasks: [], generatedImages: [], creditLedgerEntries: [], total: 0 }
+  );
+});
+
+test("Prisma initialization is shared and successful reads never reacquire the initialization lock", async () => {
+  let transactions = 0,
+    locks = 0,
+    seedChecks = 0;
+  const client = new Proxy(
+    {
+      async $transaction(run) {
+        transactions++;
+        return run(client);
+      },
+      async $executeRawUnsafe() {
+        locks++;
+      },
+      user: {
+        async count() {
+          seedChecks++;
+          return 1;
+        },
+        async findMany() {
+          return [];
+        }
+      }
+    },
+    {
+      get(target, key) {
+        return (
+          target[key] ?? {
+            async findMany() {
+              return [];
+            }
+          }
+        );
+      }
+    }
+  );
+  const store = new PrismaStore(client);
+  await Promise.all([store.initialize(), store.initialize(), store.initialize()]);
+  await store.read();
+  await store.read();
+  assert.equal(transactions, 1);
+  assert.equal(locks, 1);
+  assert.equal(seedChecks, 1);
+  let attempts = 0;
+  const retry = new PrismaStore({
+    async $transaction(run) {
+      if (++attempts === 1) throw new Error("temporary connection failure");
+      return run(client);
+    }
+  });
+  await assert.rejects(retry.initialize(), /temporary connection failure/);
+  await retry.initialize();
+  assert.equal(attempts, 2);
+});
+
+test("Prisma order expiry only locks when the current user has expired pending orders", async () => {
+  let candidate = false,
+    transactions = 0;
+  const cutoff = new Date(Date.now() - 60_000).toISOString();
+  const where = { userId: task.userId, status: "PENDING", createdAt: { lte: new Date(cutoff) } };
+  const store = new PrismaStore({
+    order: {
+      async findFirst(args) {
+        assert.deepEqual(args, { where, select: { id: true } });
+        return candidate ? { id: "order-1" } : null;
+      }
+    },
+    async $transaction(run) {
+      transactions++;
+      return run({
+        async $executeRawUnsafe(sql) {
+          assert.match(sql, /pg_advisory_xact_lock/);
+        },
+        order: {
+          async updateMany(args) {
+            assert.deepEqual(args, { where, data: { status: "CLOSED", updatedAt: new Date(now) } });
+            return { count: 1 };
+          }
+        }
+      });
+    }
+  });
+  assert.equal(await store.closeExpiredUserOrders(task.userId, cutoff, now), 0);
+  assert.equal(transactions, 0);
+  candidate = true;
+  assert.equal(await store.closeExpiredUserOrders(task.userId, cutoff, now), 1);
+  assert.equal(transactions, 1);
+});
+
+test("request authentication shares one scoped query and observes revoked sessions on the next request", async () => {
+  const { createAuthRuntime } = await import("../apps/api/dist/auth-runtime.js");
+  let calls = 0;
+  let session = { user: { id: task.userId, status: "ACTIVE" }, expiresAt };
+  const auth = createAuthRuntime({
+    async read() {
+      assert.fail("Identity-only authentication must not read the Store");
+    },
+    async readSession(token) {
+      assert.equal(token, "session-1");
+      calls++;
+      return session;
+    }
+  });
+  const request = { headers: { cookie: "imagora_session=session-1" } };
+  await auth.readRequestSession(request);
+  await auth.requireSession(request);
+  await auth.requireSession(request);
+  assert.equal(calls, 1);
+  session = null;
+  await assert.rejects(auth.requireSession({ ...request }), (error) => error.statusCode === 401);
+  session = { user: { id: task.userId, status: "SUSPENDED" }, expiresAt };
+  await assert.rejects(auth.requireSession({ ...request }), (error) => error.statusCode === 403);
+  session = { user: { id: task.userId, status: "ACTIVE" }, expiresAt: "2000-01-01T00:00:00.000Z" };
+  await assert.rejects(auth.requireSession({ ...request }), (error) => error.statusCode === 401);
+  assert.equal(calls, 4);
+});
+
+test("JSON scoped reads isolate users, page tasks and keep cached snapshots immutable", async () => {
+  const dir = await fs.mkdtemp(join(tmpdir(), "imagora-scoped-read-"));
+  const store = new JsonStore(join(dir, "store.json"));
+  const data = storeData();
+  data.generationTasks = [
+    { ...task, id: "a" },
+    { ...task, id: "b" },
+    { ...task, id: "c", status: "FAILED" },
+    { ...task, id: "foreign", userId: "another-user" }
+  ];
+  data.orders = [
+    { id: "own", userId: task.userId, status: "PENDING", createdAt: "2000-01-01T00:00:00.000Z" },
+    { id: "foreign", userId: "another-user", status: "PENDING", createdAt: "2000-01-01T00:00:00.000Z" }
+  ];
+  await store.write(data);
+  const identity = await store.readSession("session-1");
+  identity.user.status = "DELETED";
+  assert.equal((await store.readSession("session-1")).user.status, "ACTIVE");
+  const page = await store.readGenerationTasks({ userId: task.userId, status: "RUNNING", offset: 1, limit: 1 });
+  assert.equal(page.total, 2);
+  assert.equal(page.generationTasks[0].id, "a");
+  assert.deepEqual(
+    (
+      await store.readGenerationTasks({
+        userId: task.userId,
+        taskIds: ["a", "c", "foreign", "missing", "a"],
+        offset: 0,
+        limit: 100
+      })
+    ).generationTasks.map((task) => task.id),
+    ["c", "a"]
+  );
+  assert.equal(
+    (await store.readGenerationTasks({ userId: task.userId, taskId: "foreign", offset: 0, limit: 1 })).total,
+    0
+  );
+  assert.equal((await store.readOrders({ userId: task.userId, limit: 1 })).orders[0].id, "own");
+  assert.equal(await store.closeExpiredUserOrders(task.userId, now, now), 1);
+  const snapshot = await store.read();
+  assert.equal(snapshot.orders.find((order) => order.id === "foreign").status, "PENDING");
+  snapshot.users[0].status = "SUSPENDED";
+  assert.equal((await store.read()).users[0].status, "ACTIVE");
 });
 
 test("Prisma progress writes one guarded row without reading the store", async () => {
@@ -232,6 +577,11 @@ test("JSON stream reuses unchanged file content and sees other writers, logout a
     await writer.write(data);
     assert.equal((await reader.readGenerationStream(query)).generationTasks[0].prompt, data.generationTasks[0].prompt);
     assert.equal(reads, 2);
+    data.generationTasks[0].prompt = "one parse for concurrent readers";
+    await writer.write(data);
+    const parallelReads = await Promise.all(Array.from({ length: 30 }, () => reader.readSession("session-1")));
+    assert.ok(parallelReads.every((identity) => identity.user.id === task.userId));
+    assert.equal(reads, 3, "Concurrent readers of one file version must share a single parse");
     const write = { taskId: task.id, startedAt: task.startedAt, progress: { ...task.progress, sequence: 3 } };
     await writer.updateGenerationProgress(write);
     await writer.updateGenerationProgress({ ...write, progress: { ...task.progress, sequence: 2 } });
@@ -280,6 +630,48 @@ test("100 SSE subscribers share one batch and release the polling loop after dis
     await delay(70);
     assert.equal(calls.length, count);
   } finally {
+    await runtime.close();
+  }
+});
+
+test("SSE reconnect during an unchanged poll retains cached images and refunds", async () => {
+  const data = streamData();
+  data.generatedImages = [image];
+  data.creditLedgerEntries = [entry];
+  let calls = 0,
+    release;
+  const runtime = createGenerationEventsRuntime(
+    {
+      async readGenerationStream(query) {
+        calls++;
+        if (calls === 2)
+          await new Promise((resolve) => {
+            release = resolve;
+          });
+        return globalThis.structuredClone({
+          ...data,
+          generatedImages: query.knownTaskVersions ? [] : data.generatedImages,
+          creditLedgerEntries: query.knownTaskVersions ? [] : data.creditLedgerEntries
+        });
+      }
+    },
+    { pollIntervalMs: 10 }
+  );
+  try {
+    const first = runtime.subscribe("session-1", task.id);
+    await first.ready;
+    assert.equal((await first.events.next()).value.images.length, 1);
+    await until(() => !!release);
+    first.close();
+    const reconnected = runtime.subscribe("session-1", task.id);
+    release();
+    await reconnected.ready;
+    const snapshot = (await reconnected.events.next()).value;
+    assert.equal(snapshot.images[0].id, image.id);
+    assert.equal(snapshot.creditLedgerEntries[0].amount, entry.amount);
+    reconnected.close();
+  } finally {
+    release?.();
     await runtime.close();
   }
 });

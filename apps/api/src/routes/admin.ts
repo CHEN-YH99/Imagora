@@ -44,7 +44,7 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
     refundOrderWithProvider,
     routeLabel,
     requireAdmin,
-    requireAuth,
+    requireSession,
     runGenerationMaintenance,
     runOrderMaintenance,
     safetyAppealAdminQuerySchema,
@@ -621,7 +621,7 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
   // ---- 用户申诉接口 ----
 
   app.post("/api/safety-appeals", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const input = safetyAppealCreateSchema.parse(request.body);
     return store.update((data) => {
       const event = data.safetyEvents.find((item) => item.id === input.safetyEventId && item.userId === user.id);
@@ -651,7 +651,7 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.get("/api/safety-appeals", async (request) => {
-    const { user } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const data = await store.read();
     const appeals = data.safetyAppeals.filter((appeal) => appeal.userId === user.id).sort(descCreated);
     return envelope(request, { appeals });
