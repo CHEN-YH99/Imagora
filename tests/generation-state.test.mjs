@@ -11,6 +11,8 @@ test("generation view state helper resolves visible states and placeholder count
       hasTerminalGenerationFailure,
       isTerminalTaskStatus,
       resolveGenerationViewState,
+      resolveGenerationProgress,
+      resolveImageProgressLabel,
       resolveProcessingPlaceholderCount
     } from "./apps/web/app/generate/generationState.ts";
     import {
@@ -72,11 +74,8 @@ test("generation view state helper resolves visible states and placeholder count
 
     const workspaceInitial = {
       prompt: "测试提示词",
-      negativePrompt: "",
-      selectedPresetId: "realistic",
       aspectRatio: "1:1",
       quantity: 2,
-      quality: "standard",
       model: "openai:gpt-image-2",
       activeGenerationTaskId: "task_previous",
       restoringTaskView: true
@@ -124,6 +123,47 @@ test("generation view state helper resolves visible states and placeholder count
     });
     assert.equal(appliedTaskState.task?.id, "task_1");
     assert.equal(appliedTaskState.images[0]?.id, "image_1");
+
+    const progressAt = (status, progress, resultImages = [], index = 0) =>
+      resolveGenerationProgress({ ...baseTask, quantity: 4, status, progress }, resultImages, 4, index);
+    assert.equal(resolveGenerationProgress(null, [], 4).percentage, null);
+    assert.equal(progressAt("PENDING", undefined).percentage, 0);
+    assert.equal(progressAt("RUNNING", undefined).percentage, null);
+    const liveProgress = { stage: "GENERATING", imageSteps: [2, 1, 0, 0], sequence: 3, generatedImages: 1, reviewedImages: 0, savedImages: 0, updatedAt: baseTask.updatedAt };
+    assert.equal(progressAt("RUNNING", liveProgress).percentage, 40);
+    assert.equal(progressAt("RUNNING", liveProgress, [], 1).percentage, 20);
+    assert.equal(progressAt("RUNNING", liveProgress, [], 2).percentage, 0);
+    assert.equal(progressAt("RUNNING", liveProgress).generatedImages, 1);
+    assert.equal(resolveImageProgressLabel({ ...baseTask, status: "RUNNING", progress: liveProgress }, 0), "已返回，待审核");
+    assert.equal(resolveImageProgressLabel({ ...baseTask, status: "RUNNING", progress: liveProgress }, 1), "请求模型中");
+    assert.equal(resolveImageProgressLabel({ ...baseTask, status: "RUNNING", progress: liveProgress }, 2), "等待生成");
+    const originalNow = Date.now;
+    Date.now = () => originalNow() + 600_000;
+    assert.equal(progressAt("RUNNING", liveProgress).percentage, 40);
+    Date.now = originalNow;
+    for (const [step, percentage] of [[0, 0], [1, 20], [2, 40], [3, 60], [4, 80]]) {
+      assert.equal(progressAt("RUNNING", { ...liveProgress, imageSteps: [step] }).percentage, percentage);
+    }
+    assert.equal(progressAt("RUNNING", { ...liveProgress, imageSteps: [5] }).percentage, 80);
+    assert.equal(progressAt("RUNNING", { ...liveProgress, imageSteps: [3], stage: "REVIEWING" }).label, "图片审核中");
+    assert.equal(progressAt("FAILED", { ...liveProgress, savedImages: 1 }).percentage, 40);
+    assert.equal(progressAt("FAILED", { ...liveProgress, savedImages: 1 }).savedImages, 0);
+    assert.equal(progressAt("SUCCEEDED", undefined, [image]).percentage, 100);
+    assert.equal(progressAt("SUCCEEDED", undefined, [image], 1).percentage, 0);
+    assert.equal(progressAt("SUCCEEDED", undefined, [image]).label, "部分完成");
+    const newerTask = { ...baseTask, progress: { ...liveProgress, generatedImages: 2 }, updatedAt: "2026-09-24T12:00:02.000Z" };
+    const newerState = { ...workspaceState, task: newerTask };
+    const staleUpdate = generationWorkspaceReducer(newerState, {
+      type: "apply-task-result",
+      result: { task: { ...baseTask, progress: liveProgress, updatedAt: "2026-09-24T12:00:01.000Z" }, images: [] }
+    });
+    assert.equal(staleUpdate, newerState);
+    const sameTimestampUpdate = generationWorkspaceReducer(newerState, {
+      type: "apply-task-result",
+      result: { task: { ...newerTask, progress: { ...liveProgress, sequence: 2 } }, images: [] }
+    });
+    assert.equal(sameTimestampUpdate, newerState);
+
   `;
 
   execFileSync("node", ["node_modules/tsx/dist/cli.mjs", "-e", script], {

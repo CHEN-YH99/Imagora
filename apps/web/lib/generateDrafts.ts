@@ -12,6 +12,7 @@ export type GenerationDraft = {
   quality?: string;
   quantity?: number;
   model?: string;
+  channel?: string;
   mode?: "reuse" | "variation";
 };
 
@@ -27,6 +28,7 @@ export type GeneratePathParams = {
   quality: string;
   quantity: number | string;
   model: string;
+  channel?: string;
 };
 
 export function buildGeneratePath(params: GeneratePathParams): string {
@@ -36,6 +38,7 @@ export function buildGeneratePath(params: GeneratePathParams): string {
     quantity: String(params.quantity),
     model: params.model
   });
+  if (params.channel) searchParams.set("channel", params.channel);
   if (params.style) {
     searchParams.set("style", params.style);
   }

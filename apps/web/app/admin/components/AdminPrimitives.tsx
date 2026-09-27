@@ -2,7 +2,15 @@ import type { ReactNode } from "react";
 import { Panel } from "../../../components/AppFrame";
 import { resolveImageSrc, type GeneratedImage } from "../../../lib/api";
 
-export function AdminImagePreview({ image, alt, className }: { image: GeneratedImage; alt: string; className: string }) {
+export function AdminImagePreview({
+  image,
+  alt,
+  className
+}: {
+  image: GeneratedImage;
+  alt: string;
+  className: string;
+}) {
   const imageSrc = resolveImageSrc(image.thumbnailUrl, image.publicUrl);
 
   if (!imageSrc) {

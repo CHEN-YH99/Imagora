@@ -53,6 +53,7 @@ import { AdminDetailDrawer } from "./components/AdminDetailDrawer";
 import { AdminFiltersPanel } from "./components/AdminFiltersPanel";
 import { AdminGenerationPanels } from "./components/AdminGenerationPanels";
 import { AdminModerationPanel } from "./components/AdminModerationPanel";
+import { AdminImageModelsPanel } from "./components/AdminImageModelsPanel";
 import { AdminObservability } from "./components/AdminObservability";
 import { AdminOrdersPanel } from "./components/AdminOrdersPanel";
 import { AdminPlansPanel } from "./components/AdminPlansPanel";
@@ -1067,11 +1068,9 @@ export default function AdminPage() {
         </div>
       ) : null}
 
-      <AdminObservability
-        metrics={metrics}
-        operationalMetrics={operationalMetrics}
-        onRefresh={() => void load()}
-      />
+      <AdminImageModelsPanel />
+
+      <AdminObservability metrics={metrics} operationalMetrics={operationalMetrics} onRefresh={() => void load()} />
 
       <AdminFiltersPanel
         users={users}

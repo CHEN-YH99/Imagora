@@ -355,6 +355,7 @@ export default function HistoryPage() {
       quality: task.quality,
       quantity: task.quantity,
       model: resolveSelectableImageModel(task.modelName),
+      channel: task.channel,
       mode: "reuse"
     });
     router.push(
@@ -363,7 +364,8 @@ export default function HistoryPage() {
         aspectRatio: task.aspectRatio,
         quality: task.quality,
         quantity: task.quantity,
-        model: resolveSelectableImageModel(task.modelName)
+        model: resolveSelectableImageModel(task.modelName),
+        channel: task.channel
       })
     );
   }

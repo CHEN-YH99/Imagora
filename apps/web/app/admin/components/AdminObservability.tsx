@@ -40,7 +40,10 @@ export function AdminObservability({ metrics, operationalMetrics, onRefresh }: A
         <Metric label="接口失败" value={operationalMetrics?.http.failuresTotal ?? 0} />
         <Metric label="生成成功率" value={percentage(operationalMetrics?.domain.generationSuccessRate)} />
         <Metric label="生成失败率" value={percentage(operationalMetrics?.domain.generationFailureRate)} />
-        <Metric label="平均生成耗时" value={formatMilliseconds(operationalMetrics?.domain.averageGenerationDurationMs)} />
+        <Metric
+          label="平均生成耗时"
+          value={formatMilliseconds(operationalMetrics?.domain.averageGenerationDurationMs)}
+        />
         <Metric label="平均排队等待" value={formatMilliseconds(operationalMetrics?.domain.averageQueueWaitMs)} />
         <Metric label="支付失败" value={operationalMetrics?.domain.paymentFailuresTotal ?? 0} />
         <Metric label="退回异常" value={operationalMetrics?.domain.refundFailuresTotal ?? 0} />

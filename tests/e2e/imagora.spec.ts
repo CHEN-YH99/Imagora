@@ -1,4 +1,5 @@
 import { expect, type Page, type Route, test } from "@playwright/test";
+import { aspectRatios } from "@imagora/shared/image-models";
 
 const now = "2026-07-01T08:00:00.000Z";
 const thumbnailUrl = `data:image/svg+xml,${encodeURIComponent(
@@ -58,6 +59,7 @@ type Task = {
   quality: string;
   modelProvider: string;
   modelName: string;
+  channel?: string;
   status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "BLOCKED";
   creditCost: number;
   failureCode: string | null;
@@ -94,6 +96,7 @@ type GenerationMetadata = {
   quantity: number;
   modelProvider: string;
   modelName: string;
+  channel?: string;
   width: number;
   height: number;
   creditCost: number;
@@ -289,6 +292,231 @@ test("模型选择同步报价、能力限制和实际任务模型", async ({ pa
   await expect(selector).toHaveValue("xai:grok-imagine-image");
 });
 
+test("每个模型版本与 API 线路只激活自身可用比例，切换后清除无效选择", async ({ page }) => {
+  await setupApiMocks(page);
+  const definitions = [
+    { id: "openai:gpt-image-2", label: "GPT Image 2", aspectRatios: [...aspectRatios] },
+    {
+      id: "image:nano-banana-2",
+      label: "Nano Banana 2",
+      aspectRatios: aspectRatios.filter((ratio) => !["1:2", "2:1"].includes(ratio))
+    },
+    {
+      id: "image:nano-banana-2-lite",
+      label: "Nano Banana 2 Lite",
+      aspectRatios: aspectRatios.filter((ratio) => !["1:2", "2:1"].includes(ratio))
+    },
+    {
+      id: "image:nano-banana-pro",
+      label: "Nano Banana Pro",
+      aspectRatios: aspectRatios.filter((ratio) => !["1:2", "2:1"].includes(ratio))
+    },
+    {
+      id: "xai:grok-imagine-image-2.0",
+      label: "Grok 2.0",
+      aspectRatios: aspectRatios.filter((ratio) => !["4:5", "5:4"].includes(ratio))
+    },
+    {
+      id: "xai:grok-imagine-image-pro",
+      label: "Grok Pro",
+      aspectRatios: aspectRatios.filter((ratio) => !["4:5", "5:4"].includes(ratio))
+    },
+    { id: "openai:gpt-image-2-4k", label: "GPT Image 2 4K", aspectRatios: ["1:1", "2:3"] },
+    { id: "image:unknown", label: "尚未确认型号", aspectRatios: [] }
+  ];
+  await page.route("**/api/generation/models*", async (route) => {
+    const channel = new URL(route.request().url()).searchParams.get("channel") || "main";
+    const models = channel === "backup" ? [{ ...definitions[0], aspectRatios: ["1:1", "16:9"] }] : definitions;
+    await fulfillData(route, {
+      channel,
+      defaultChannel: "main",
+      defaultModel: models[0].id,
+      channels: [
+        { id: "main", label: "主线路 API" },
+        { id: "backup", label: "备用 API" }
+      ],
+      models: models.map((model) => ({ ...model, qualities: ["standard"], maxQuantity: 4 }))
+    });
+  });
+  const invalidRequests: unknown[] = [];
+  page.on("request", (request) => {
+    if (request.method() !== "POST" || !/\/api\/generation\/(quote|tasks)$/.test(new URL(request.url()).pathname))
+      return;
+    const body = request.postDataJSON();
+    const allowed =
+      body.channel === "backup"
+        ? ["1:1", "16:9"]
+        : (definitions.find((model) => model.id === body.model)?.aspectRatios ?? []);
+    if (!allowed.includes(body.aspectRatio)) invalidRequests.push(body);
+  });
+  for (const pathname of ["/", "/generate"]) {
+    await page.goto(pathname);
+    const selector = page.getByRole("combobox", { name: pathname === "/" ? "选择模型" : "模型", exact: true });
+    const ratio = page.getByRole("combobox", { name: pathname === "/" ? "选择比例" : "画面比例", exact: true });
+    for (const model of definitions) {
+      const previousRatio = await ratio.inputValue();
+      await selector.selectOption(model.id);
+      await expect
+        .poll(() =>
+          ratio
+            .locator("option:enabled")
+            .evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))
+        )
+        .toEqual(model.aspectRatios);
+      if (model.aspectRatios.length) {
+        await expect(ratio).toBeEnabled();
+        await expect
+          .poll(() => ratio.inputValue())
+          .toBe(model.aspectRatios.includes(previousRatio) ? previousRatio : model.aspectRatios[0]);
+        await ratio.selectOption(model.aspectRatios.at(-1)!);
+      } else {
+        await expect(ratio).toBeDisabled();
+        if (pathname === "/generate")
+          await expect(page.getByRole("button", { name: "提交生成" }).first()).toBeDisabled();
+      }
+    }
+    await selector.selectOption("openai:gpt-image-2");
+    await ratio.selectOption("4:5");
+    await selector.selectOption("xai:grok-imagine-image-2.0");
+    await expect(ratio).toHaveValue("1:1");
+  }
+  const selector = page.getByRole("combobox", { name: "模型", exact: true });
+  const ratio = page.getByRole("combobox", { name: "画面比例", exact: true });
+  await selector.selectOption("openai:gpt-image-2");
+  await ratio.selectOption("4:5");
+  await page
+    .getByRole("group", { name: "API 线路", exact: true })
+    .getByRole("button", { name: "备用线路1", exact: true })
+    .click();
+  await expect(selector).toHaveValue("openai:gpt-image-2");
+  await expect(ratio).toHaveValue("1:1");
+  await expect
+    .poll(() =>
+      ratio
+        .locator("option:enabled")
+        .evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))
+    )
+    .toEqual(["1:1", "16:9"]);
+  expect(invalidRequests).toEqual([]);
+});
+
+function selectedChannelCatalog(channel: string, unavailable = false) {
+  const baseModel = {
+    qualities: ["standard"],
+    aspectRatios: ["1:1", "16:9"],
+    maxQuantity: 2
+  };
+  const models = unavailable
+    ? []
+    : channel === "backup"
+      ? [{ ...baseModel, id: "xai:grok-imagine-image", label: "Grok Imagine" }]
+      : [
+          { ...baseModel, id: "openai:gpt-image-2", label: "GPT Image 2" },
+          { ...baseModel, id: "openai:gpt-image-2-4k", label: "gpt-image-2-4k", creditMultiplier: 2 }
+        ];
+  return {
+    channel,
+    defaultChannel: "main",
+    channels: [
+      { id: "main", label: "主线路 API" },
+      { id: "backup", label: "备用 API" }
+    ],
+    models,
+    defaultModel: models[0]?.id ?? null,
+    error: unavailable ? "备用目录正在维护，请稍后重试。" : null
+  };
+}
+
+test("API 切换保留首页跳转、刷新、报价与任务线路", async ({ page }) => {
+  const state = await setupApiMocks(page);
+  await page.route("**/api/generation/models*", async (route) => {
+    const channel = new URL(route.request().url()).searchParams.get("channel") || "main";
+    await fulfillData(route, selectedChannelCatalog(channel));
+  });
+  const quotes: Array<{ model?: string; channel?: string }> = [];
+  const tasks: Array<{ model?: string; channel?: string }> = [];
+  page.on("request", (request) => {
+    if (request.method() !== "POST") return;
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/generation/quote") quotes.push(request.postDataJSON());
+    if (path === "/api/generation/tasks") tasks.push(request.postDataJSON());
+  });
+  await page.goto("/");
+  const api = page.getByRole("group", { name: "API 线路", exact: true });
+  const models = page.getByRole("combobox", { name: "选择模型", exact: true });
+  await expect(models.locator("option")).toHaveText(["GPT Image 2", "gpt-image-2-4k"]);
+  await expect(models.locator("optgroup")).toHaveCount(0);
+  await api.getByRole("button", { name: "备用线路1", exact: true }).click();
+  await expect(models).toHaveValue("xai:grok-imagine-image");
+  await expect(models.locator("option")).toHaveText(["Grok Imagine"]);
+  await page.getByRole("button", { name: "生成预览", exact: true }).click();
+  await expect(page).toHaveURL(/channel=backup/);
+  const workspaceModel = page.getByRole("combobox", { name: "模型", exact: true });
+  await expect(workspaceModel).toHaveValue("xai:grok-imagine-image");
+  await expect.poll(() => quotes.at(-1)?.channel).toBe("backup");
+  await page.reload();
+  await expect(api.getByRole("button", { name: "备用线路1", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(workspaceModel).toHaveValue("xai:grok-imagine-image");
+  await page.getByRole("button", { name: "提交生成" }).first().click();
+  await expect.poll(() => tasks.length).toBe(1);
+  expect(tasks[0]).toMatchObject({ channel: "backup", model: "xai:grok-imagine-image" });
+  await expect.poll(() => state.generationTaskPolls).toBeGreaterThan(1);
+  await expect(api.getByRole("button", { name: "备用线路1", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(workspaceModel).toHaveValue("xai:grok-imagine-image");
+  await expect(workspaceModel).toBeEnabled();
+});
+
+test("API 快速切换隔离迟到目录，维护与失效线路可恢复", async ({ page }) => {
+  await setupApiMocks(page);
+  let releaseBackup = () => {};
+  const delayedBackup = new Promise<void>((resolve) => {
+    releaseBackup = resolve;
+  });
+  let backupCalls = 0;
+  let backupFinished = false;
+  await page.route("**/api/generation/models*", async (route) => {
+    const channel = new URL(route.request().url()).searchParams.get("channel") || "main";
+    if (channel === "removed") {
+      await fulfillError(route, "所选 API 线路已停用", 400);
+      return;
+    }
+    if (channel === "backup") {
+      backupCalls++;
+      if (backupCalls === 1) {
+        await delayedBackup;
+        await fulfillData(route, selectedChannelCatalog(channel));
+        backupFinished = true;
+        return;
+      }
+      await fulfillData(route, selectedChannelCatalog(channel, true));
+      return;
+    }
+    await fulfillData(route, selectedChannelCatalog(channel));
+  });
+  await page.goto("/generate");
+  const api = page.getByRole("group", { name: "API 线路", exact: true });
+  const model = page.getByRole("combobox", { name: "模型", exact: true });
+  await expect(model).toHaveValue("openai:gpt-image-2");
+  await api.getByRole("button", { name: "备用线路1", exact: true }).click();
+  await expect.poll(() => backupCalls).toBe(1);
+  await expect(model).toBeDisabled();
+  await expect(page.getByRole("button", { name: "提交生成" }).first()).toBeDisabled();
+  await api.getByRole("button", { name: "主线路", exact: true }).click();
+  await expect(model).toHaveValue("openai:gpt-image-2");
+  releaseBackup();
+  await expect.poll(() => backupFinished).toBe(true);
+  await expect(api.getByRole("button", { name: "主线路", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(model.locator("option")).toHaveText(["GPT Image 2", "gpt-image-2-4k"]);
+  await api.getByRole("button", { name: "备用线路1", exact: true }).click();
+  await expect(page.getByText("备用目录正在维护，请稍后重试。", { exact: true }).first()).toBeVisible();
+  await expect(model).toBeDisabled();
+  await expect(model.locator("option")).toHaveText(["该线路暂无可用模型"]);
+  await page.goto("/generate?channel=removed");
+  await page.getByRole("button", { name: "主线路", exact: true }).click();
+  await expect(api.getByRole("button", { name: "主线路", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(model).toHaveValue("openai:gpt-image-2");
+});
+
 test("不可用模型不会被静默切回 GPT 或产生报价请求", async ({ page }) => {
   await setupApiMocks(page);
   const generationRequests: string[] = [];
@@ -333,6 +561,7 @@ test("生成表单拦截超长提示词并保留完整输入", async ({ page }) 
   const promptInput = page.getByRole("textbox", { name: "提示词", exact: true });
   const submitButton = page.getByRole("button", { name: "提交生成" }).first();
   const oversizedPrompt = "图".repeat(7001);
+  await expect(page.getByRole("combobox", { name: "模型", exact: true })).toHaveValue("openai:gpt-image-2");
   await promptInput.fill(oversizedPrompt);
   await expect(promptInput).toHaveValue(oversizedPrompt);
   await expect(promptInput).toHaveAttribute("aria-invalid", "true");
@@ -346,23 +575,51 @@ test("生成表单拦截超长提示词并保留完整输入", async ({ page }) 
   await expect(promptInput).toHaveAttribute("aria-invalid", "false");
   await expect(page.getByText("7000 / 7000 个字符", { exact: true })).toBeVisible();
   await expect.poll(() => quotedPromptLengths.includes(7000)).toBe(true);
-  await page.getByText("高级参数", { exact: true }).click();
-  const negativePromptInput = page.getByRole("textbox", { name: "负向提示词", exact: true });
-  const oversizedNegativePrompt = "字".repeat(801);
-  await negativePromptInput.fill(oversizedNegativePrompt);
-  await expect(negativePromptInput).toHaveValue(oversizedNegativePrompt);
-  await expect(negativePromptInput).toHaveAttribute("aria-invalid", "true");
-  await expect(submitButton).toBeDisabled();
-  await expect(page.getByRole("alert").filter({ hasText: "负向提示词最多支持 800 个字符" })).toBeVisible();
-  await page.waitForTimeout(650);
-  expect(invalidRequests).toBe(0);
-
-  await negativePromptInput.fill("字".repeat(800));
-  await expect(submitButton).toBeEnabled();
-  await expect(negativePromptInput).toHaveAttribute("aria-invalid", "false");
   await submitButton.click();
   await expect.poll(() => submittedPromptLength).toBe(7000);
   expect(invalidRequests).toBe(0);
+});
+
+test("精简表单只保留比例高级选项，新比例报价与任务一致且旧草稿不注入隐藏预设", async ({ page }) => {
+  await setupApiMocks(page);
+  const quotes: Array<Record<string, unknown>> = [];
+  const tasks: Array<Record<string, unknown>> = [];
+  page.on("request", (request) => {
+    if (request.method() !== "POST") return;
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/generation/quote") quotes.push(request.postDataJSON());
+    if (path === "/api/generation/tasks") tasks.push(request.postDataJSON());
+  });
+  await page.addInitScript(() =>
+    sessionStorage.setItem(
+      "imagora:generation-draft",
+      JSON.stringify({
+        prompt: "清晨的海岸公寓，自然光，简洁构图",
+        style: "anime",
+        negativePrompt: "旧负向预设",
+        quality: "high",
+        aspectRatio: "4:5",
+        quantity: 1
+      })
+    )
+  );
+  await page.goto("/generate?style=poster&quality=high");
+  await expect(page.getByText("风格预设", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "增强提示词" })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "负向提示词", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "精细", exact: true })).toHaveCount(0);
+  const ratio = page.getByRole("combobox", { name: "画面比例", exact: true });
+  await expect(ratio.locator("option")).toHaveCount(12);
+  await expect(ratio).toHaveValue("4:5");
+  await ratio.selectOption("21:9");
+  await expect.poll(() => quotes.at(-1)?.aspectRatio).toBe("21:9");
+  expect(quotes.at(-1)).toMatchObject({ style: "none", quality: "standard", quantity: 1 });
+  expect(quotes.at(-1)?.negativePrompt).toBeUndefined();
+  await expect(page.getByRole("spinbutton", { name: "生成数量" })).toBeVisible();
+  await page.getByRole("button", { name: "提交生成" }).first().click();
+  await expect.poll(() => tasks.length).toBe(1);
+  expect(tasks[0]).toMatchObject({ style: "none", quality: "standard", aspectRatio: "21:9", quantity: 1 });
+  expect(tasks[0].negativePrompt).toBeUndefined();
 });
 
 test("生成接口校验失败展示具体长度限制", async ({ page }) => {
@@ -388,6 +645,171 @@ test("生成接口校验失败展示具体长度限制", async ({ page }) => {
   await page.getByRole("textbox", { name: "提示词", exact: true }).fill("电影感茶杯广告图，薄荷色轮廓光");
   await page.getByRole("button", { name: "提交生成" }).first().click();
   await expect(page.getByRole("alert").filter({ hasText: "提示词最多支持 7000 个字符，请精简后重试。" })).toBeVisible();
+});
+
+test("生成进度按真实步骤推送，每张独立推进，等待不虚增，断线与刷新可恢复", async ({ page }) => {
+  await setupApiMocks(page);
+  // 冻结轮询时钟后主动派发服务端事件，验证界面确实消费推送。
+  await page.addInitScript(() => {
+    class ProgressSource extends EventTarget {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      private listener = (event: Event) => {
+        this.onmessage?.(new MessageEvent("message", { data: JSON.stringify((event as CustomEvent).detail) }));
+      };
+      constructor() {
+        super();
+        window.addEventListener("test:generation-progress", this.listener);
+      }
+      close() {
+        window.removeEventListener("test:generation-progress", this.listener);
+      }
+    }
+    Object.defineProperty(window, "EventSource", { value: ProgressSource });
+  });
+  let snapshot = {
+    ...createTask("task-real-progress", "真实步骤进度验证", "RUNNING"),
+    quantity: 4,
+    progress: {
+      stage: "GENERATING",
+      imageSteps: [1, 0, 0, 0],
+      sequence: 1,
+      generatedImages: 0,
+      reviewedImages: 0,
+      savedImages: 0,
+      updatedAt: "2026-09-24T12:00:00.000Z"
+    },
+    updatedAt: "2026-09-24T12:00:00.000Z"
+  };
+  let reads = 0;
+  await page.route("**/api/generation/tasks/task-real-progress", (route) => {
+    reads += 1;
+    return fulfillData(route, { task: snapshot, images: [] });
+  });
+  const push = () =>
+    page.evaluate((task) => {
+      window.dispatchEvent(new CustomEvent("test:generation-progress", { detail: { task, images: [] } }));
+    }, snapshot);
+  await page.clock.install({ time: new Date("2026-09-25T12:00:00Z") });
+  await page.clock.pauseAt(new Date("2026-09-25T12:00:01Z"));
+  await page.goto("/generate?taskId=task-real-progress");
+  const card = page.getByRole("status", { name: "第 1 张图片正在生成" });
+  const bar = card.getByRole("progressbar", { name: "图片生成进度" });
+  const percentage = card.getByText(/^\d+%$/);
+  const readPercentage = async () => Number.parseInt(await percentage.innerText());
+  const second = page.getByRole("status", { name: "第 2 张图片正在生成" });
+  await expect(page.getByRole("progressbar")).toHaveCount(4);
+  await expect(bar).toHaveAttribute("aria-valuenow", "20");
+  await expect(second.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "0");
+  await page.clock.runFor(300);
+  await expect(percentage).toHaveText("20%");
+  await expect(card.getByText(/步骤进度/)).toHaveCount(0);
+  await page.clock.fastForward(30_000);
+  await expect(bar).toHaveAttribute("aria-valuenow", "20");
+  snapshot = {
+    ...snapshot,
+    progress: { ...snapshot.progress, imageSteps: [2, 1, 0, 0], sequence: 2, generatedImages: 1 },
+    updatedAt: "2026-09-24T12:00:01.000Z"
+  };
+  const readsBeforePush = reads;
+  await push();
+  await expect(bar).toHaveAttribute("aria-valuenow", "40");
+  expect(reads).toBe(readsBeforePush);
+  await expect(percentage).toHaveText("20%");
+  await page.clock.runFor(100);
+  const intermediate = await readPercentage();
+  expect(intermediate).toBeGreaterThan(20);
+  expect(intermediate).toBeLessThan(40);
+  const filledPercentage = await bar.evaluate((element) => {
+    const track = element.getBoundingClientRect();
+    const fill = element.firstElementChild!.getBoundingClientRect();
+    return ((fill.right - track.left) / track.width) * 100;
+  });
+  expect(filledPercentage).toBeGreaterThanOrEqual(intermediate - 0.1);
+  expect(filledPercentage).toBeLessThan(intermediate + 1.1);
+  await page.clock.runFor(200);
+  await expect(percentage).toHaveText("40%");
+  await expect(card.getByText(/步骤进度/)).toHaveCount(0);
+  await expect(card.getByText("已返回，待审核", { exact: true })).toBeVisible();
+  await expect(second).toContainText("请求模型中");
+  await expect(second.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "20");
+  await page.reload();
+  await expect(bar).toHaveAttribute("aria-valuenow", "40");
+  await page.clock.runFor(300);
+  await expect(percentage).toHaveText("40%");
+  snapshot = {
+    ...snapshot,
+    progress: { ...snapshot.progress, imageSteps: [3, 2, 2, 2], sequence: 3, stage: "REVIEWING", generatedImages: 4 },
+    updatedAt: "2026-09-24T12:00:02.000Z"
+  };
+  await push();
+  await expect(card.getByText("图片审核中", { exact: true })).toBeVisible();
+  await expect(bar).toHaveAttribute("aria-valuetext", "60%");
+  await expect(bar).toHaveAttribute("aria-valuenow", "60");
+  await page.clock.runFor(100);
+  const beforeInterruption = await readPercentage();
+  expect(beforeInterruption).toBeGreaterThan(40);
+  expect(beforeInterruption).toBeLessThan(60);
+  snapshot = {
+    ...snapshot,
+    progress: {
+      ...snapshot.progress,
+      imageSteps: [4, 3, 3, 3],
+      sequence: 4,
+      stage: "SAVING",
+      reviewedImages: 4,
+      savedImages: 1
+    },
+    updatedAt: "2026-09-24T12:00:03.000Z"
+  };
+  await push();
+  await expect(card.getByText("已保存，确认结果中", { exact: true })).toBeVisible();
+  await expect(bar).toHaveAttribute("aria-valuenow", "80");
+  expect(await readPercentage()).toBe(beforeInterruption);
+  await page.clock.runFor(100);
+  expect(await readPercentage()).toBeGreaterThan(beforeInterruption);
+  expect(await readPercentage()).toBeLessThan(80);
+  // 切换系统偏好时立即结束运动，数字仍与服务端进度一致。
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.clock.runFor(32);
+  await expect(percentage).toHaveText("80%");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await expect(page.getByAltText("生成图片结果")).toHaveCount(0);
+  // 不再推送，超出心跳期限后只读轮询接回失败结果。
+  snapshot = { ...snapshot, status: "FAILED", failureMessage: "测试保存失败", updatedAt: "2026-09-24T12:00:04.000Z" };
+  await page.clock.runFor(22_100);
+  await expect(page.getByRole("alert").filter({ hasText: "测试保存失败" })).toBeVisible();
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  await expect(page.getByAltText("生成图片结果")).toHaveCount(0);
+
+  // 重新进入进行中的任务，验证成功交接和刷新已完成结果。
+  snapshot = { ...snapshot, status: "RUNNING", failureMessage: null, updatedAt: "2026-09-24T12:00:05.000Z" };
+  await page.reload();
+  await expect(bar).toHaveAttribute("aria-valuenow", "80");
+  await page.clock.runFor(300);
+  await expect(percentage).toHaveText("80%");
+  const completedTask = { ...snapshot, status: "SUCCEEDED", updatedAt: "2026-09-24T12:00:06.000Z" };
+  const completedImages = [createGeneratedImage("image-progress-completed", completedTask.id)];
+  await page.route("**/api/generation/tasks/task-real-progress", (route) =>
+    fulfillData(route, { task: completedTask, images: completedImages })
+  );
+  await page.evaluate(
+    ({ task, images }) => {
+      window.dispatchEvent(new CustomEvent("test:generation-progress", { detail: { task, images } }));
+    },
+    { task: completedTask, images: completedImages }
+  );
+  await expect(bar).toHaveAttribute("aria-valuenow", "100");
+  await page.clock.runFor(100);
+  expect(await readPercentage()).toBeGreaterThan(80);
+  expect(await readPercentage()).toBeLessThan(100);
+  await page.clock.runFor(170);
+  await expect(percentage).toHaveText("100%");
+  await page.clock.runFor(100);
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  await expect(page.getByAltText("生成图片结果")).toHaveCount(1);
+  await page.reload();
+  await expect(page.getByAltText("生成图片结果")).toHaveCount(1);
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
 });
 
 test("生成任务覆盖创建、轮询、成功和失败状态", async ({ page }) => {
@@ -689,7 +1111,7 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
             id: "openai:gpt-image-2",
             label: "GPT Image 2",
             qualities: ["draft", "standard", "high"],
-            aspectRatios: ["1:1", "3:4", "4:3", "9:16", "16:9"],
+            aspectRatios: [...aspectRatios],
             maxQuantity: 4
           },
           {
@@ -713,9 +1135,10 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
         generationOutcome === "failed"
           ? createTask("task-failed", "触发失败场景的广告图", "RUNNING")
           : createTask("task-e2e", "电影感茶杯广告图，薄荷色轮廓光", "RUNNING");
-      const body = request.postDataJSON() as { model?: string; quality?: string };
+      const body = request.postDataJSON() as { model?: string; quality?: string; channel?: string };
       task.modelName = body.model ?? task.modelName;
       task.quality = body.quality ?? task.quality;
+      task.channel = body.channel;
       state.tasks = [task, ...state.tasks.filter((item) => item.id !== task.id)];
       await fulfillData(route, { task, balanceAfter: 956 });
       return;
@@ -784,6 +1207,9 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
         "电影感茶杯广告图，薄荷色轮廓光",
         state.generationTaskPolls > 1 ? "SUCCEEDED" : "RUNNING"
       );
+      task.modelName = existing?.modelName ?? task.modelName;
+      task.channel = existing?.channel;
+      task.quality = existing?.quality ?? task.quality;
       if (task.status === "SUCCEEDED" && !state.images.some((image) => image.taskId === taskId)) {
         state.images = [createGeneratedImage("image-e2e", taskId), ...state.images];
       }

@@ -267,7 +267,10 @@ test("web core pages expose recoverable empty states and confirm destructive act
   assert.match(generatePage, /taskSyncSequenceRef/);
   assert.match(generatePage, /pollActiveGenerationTask/);
   assert.match(generatePage, /generationTaskSyncErrorMessage/);
-  assert.match(generatePage, /Math\.max\(1, Math\.min\(4, Math\.trunc\(nextValue\)\)\)/);
+  assert.match(
+    generatePage,
+    /Math\.max\(1, Math\.min\(selectedModel\?\.maxQuantity \?\? 4, Math\.trunc\(nextValue\)\)\)/
+  );
   assert.match(generatePage, /min-h-52/);
   assert.doesNotMatch(generatePage, /参考图/);
   assert.doesNotMatch(generatePage, /referenceImageId/);
@@ -304,23 +307,14 @@ test("generate entry flows keep prompt drafts out of URLs", async () => {
   assert.match(generatePage, /consumeGenerationDraft/);
 });
 
-test("generate workspace exposes prompt presets, enhancement, and image parameter reuse", async () => {
+test("generate workspace preserves image parameter reuse without preset controls", async () => {
   const detailPage = await readFile(join(root, "apps/web/app/images/[imageId]/page.tsx"), "utf8");
   const generateDrafts = await readFile(join(root, "apps/web/lib/generateDrafts.ts"), "utf8");
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
-  const promptPresets = await readFile(join(root, "apps/web/app/generate/promptPresets.ts"), "utf8");
   const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
 
-  assert.match(promptPresets, /export const promptPresets/);
-  assert.match(promptPresets, /export function enhancePrompt/);
-  assert.match(generatePage, /selectedPresetId/);
-  assert.match(generatePage, /promptPresets/);
-  assert.match(generatePage, /enhancePrompt/);
-  assert.match(generatePage, /风格预设/);
-  assert.match(generatePage, /增强提示词/);
-  assert.match(generatePage, /高级参数/);
-  assert.match(generatePage, /selectedPreset\.style/);
-  assert.doesNotMatch(generatePage, /style:\s*"realistic"/);
+  assert.match(generatePage, /aria-label="画面比例"/);
+  assert.match(generatePage, /disabled=\{!selectedModel\?\.aspectRatios\.includes\(item\.value\)\}/);
   assert.match(generatePage, /saveGenerationDraft\(currentGenerationDraft\(\)\)/);
   assert.match(generatePage, /function currentGenerationDraft\(\)/);
   assert.match(generatePage, /else if \(draft\.mode === "reuse"\)/);
@@ -529,10 +523,7 @@ test("generate page does not restore the previous successful task while submitti
   assert.match(generatePage, /const submittingGenerationRef = useRef\(false\);/);
   assert.match(generatePage, /if \(submittingGenerationRef\.current && taskId\) \{/);
   assert.match(generatePage, /setRestoringTaskView\(false\);[\s\S]*return;/);
-  assert.match(
-    workspace,
-    /case "begin-submission":[\s\S]*loading: true,[\s\S]*task: null,[\s\S]*images: \[\]/
-  );
+  assert.match(workspace, /case "begin-submission":[\s\S]*loading: true,[\s\S]*task: null,[\s\S]*images: \[\]/);
   const submittedTaskBranchIndex = generatePage.indexOf("if (taskId && submittedTaskIdRef.current === taskId) {");
   const submittingTaskIdGuardIndex = generatePage.indexOf("if (submittingGenerationRef.current && taskId) {");
   assert.ok(submittedTaskBranchIndex >= 0, "submitted taskId branch must release submitting state");
@@ -555,7 +546,7 @@ test("generate page does not restore the previous successful task while submitti
   assert.doesNotMatch(submittingWithoutTaskIdGuard.groups.body, /clearActiveGenerationTaskId\(\);/);
   assert.match(
     generatePage,
-    /submittingGenerationRef\.current = true;[\s\S]*taskSyncSequenceRef\.current \+= 1;[\s\S]*beginSubmission\(\);[\s\S]*clearActiveGenerationTaskId\(\);[\s\S]*router\.replace\(buildGeneratePath/
+    /submittingGenerationRef\.current = true;[\s\S]*taskSyncSequenceRef\.current \+= 1;[\s\S]*beginSubmission\(\);[\s\S]*clearActiveGenerationTaskId\(\);[\s\S]*router\.replace\(\s*buildGeneratePath/
   );
   assert.doesNotMatch(
     generatePage,
@@ -612,24 +603,6 @@ test("favorites and history use server-side offset pagination without polling aw
   );
   assert.doesNotMatch(pollingSection, /loadHistory\(/);
   assert.match(pollingSection, /activeTaskIds\.map/);
-});
-
-test("p2 homepage style cards enter generate with supported preset ids", async () => {
-  const homePage = await readFile(join(root, "apps/web/app/page.tsx"), "utf8");
-
-  assert.match(homePage, /import type \{ PromptPresetId \} from "\.\/generate\/promptPresets";/);
-  for (const presetId of ["realistic", "product_photography", "poster", "illustration", "anime"]) {
-    assert.match(homePage, new RegExp(`id: "${presetId}"`));
-  }
-  for (const unsupportedId of ["cinematic", "product", "architecture", "isometric"]) {
-    assert.doesNotMatch(homePage, new RegExp(`id: "${unsupportedId}"`));
-  }
-
-  assert.match(homePage, /async function handleStyleOption\(option: StyleOption\)/);
-  assert.match(homePage, /buildGeneratePath\(\{[\s\S]*style: option\.id/);
-  assert.match(homePage, /saveGenerationDraft\(draft\)/);
-  assert.match(homePage, /enterGenerateWorkspace\(path, \{[\s\S]*prompt: option\.prompt,[\s\S]*style: option\.id/);
-  assert.match(homePage, /onClick=\{\(\) => void handleStyleOption\(item\)\}/);
 });
 
 test("p2 order and history polish avoids false promises and handles browser/API failures", async () => {

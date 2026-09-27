@@ -182,9 +182,7 @@ export function AdminModerationPanel({
                     提交于 {new Date(appeal.createdAt).toLocaleString("zh-CN")}
                     {appeal.resolvedAt ? ` · 处理于 ${new Date(appeal.resolvedAt).toLocaleString("zh-CN")}` : ""}
                   </p>
-                  {appeal.adminNote ? (
-                    <p className="mt-2 text-xs text-white/52">处理备注：{appeal.adminNote}</p>
-                  ) : null}
+                  {appeal.adminNote ? <p className="mt-2 text-xs text-white/52">处理备注：{appeal.adminNote}</p> : null}
                 </div>
                 {appeal.status === "PENDING" ? (
                   <div className="flex shrink-0 flex-wrap gap-2">

@@ -74,7 +74,9 @@ export type Task = {
   quality: string;
   modelProvider: string;
   modelName: string;
+  channel?: string;
   status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "BLOCKED";
+  progress?: import("@imagora/shared").GenerationProgress | null;
   creditCost: number;
   refundedCredits?: number;
   failureCode: string | null;
@@ -95,6 +97,7 @@ export type GenerationMetadata = {
   quantity: number;
   modelProvider: string;
   modelName: string;
+  channel?: string;
   width: number;
   height: number;
   creditCost: number;

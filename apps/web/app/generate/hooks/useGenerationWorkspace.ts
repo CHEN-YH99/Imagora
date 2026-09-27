@@ -7,12 +7,9 @@ export type GenerationMessageTone = "info" | "success" | "danger";
 
 export type GenerationWorkspaceState = {
   prompt: string;
-  negativePrompt: string;
-  selectedPresetId: string;
   aspectRatio: string;
   quantity: number;
   quantityInput: string;
-  quality: string;
   model: string;
   quote: number;
   account: CreditAccount | null;
@@ -29,20 +26,11 @@ export type GenerationWorkspaceState = {
   appealStatus: SafetyAppeal | null;
   appealLoading: boolean;
   restoringTaskView: boolean;
-  advancedOpen: boolean;
 };
 
 export type GenerationWorkspaceInitialState = Pick<
   GenerationWorkspaceState,
-  | "prompt"
-  | "negativePrompt"
-  | "selectedPresetId"
-  | "aspectRatio"
-  | "quantity"
-  | "quality"
-  | "model"
-  | "activeGenerationTaskId"
-  | "restoringTaskView"
+  "prompt" | "aspectRatio" | "quantity" | "model" | "activeGenerationTaskId" | "restoringTaskView"
 >;
 
 type FieldAction = {
@@ -60,9 +48,7 @@ export type GenerationWorkspaceAction =
   | { type: "begin-submission" }
   | { type: "reset-appeal" };
 
-export function createGenerationWorkspaceState(
-  initial: GenerationWorkspaceInitialState
-): GenerationWorkspaceState {
+export function createGenerationWorkspaceState(initial: GenerationWorkspaceInitialState): GenerationWorkspaceState {
   return {
     ...initial,
     quantityInput: String(initial.quantity),
@@ -78,8 +64,7 @@ export function createGenerationWorkspaceState(
     showAppealForm: false,
     appealReason: "",
     appealStatus: null,
-    appealLoading: false,
-    advancedOpen: false
+    appealLoading: false
   };
 }
 
@@ -97,6 +82,13 @@ export function generationWorkspaceReducer(
       return { ...state, [action.field]: nextValue };
     }
     case "apply-task-result":
+      if (
+        state.task?.id === action.result.task.id &&
+        (Date.parse(action.result.task.updatedAt) < Date.parse(state.task.updatedAt) ||
+          (action.result.task.progress?.sequence ?? 0) < (state.task.progress?.sequence ?? 0))
+      ) {
+        return state;
+      }
       return { ...state, task: action.result.task, images: action.result.images };
     case "begin-restore":
       return {
@@ -161,18 +153,17 @@ export type GenerationWorkspace = GenerationWorkspaceState &
   };
 
 function createSetters(dispatch: Dispatch<GenerationWorkspaceAction>): GenerationWorkspaceSetters {
-  const setField = <Key extends keyof GenerationWorkspaceState>(field: Key): FieldSetter<Key> => (value) => {
-    dispatch({ type: "set-field", field, value } as FieldAction);
-  };
+  const setField =
+    <Key extends keyof GenerationWorkspaceState>(field: Key): FieldSetter<Key> =>
+    (value) => {
+      dispatch({ type: "set-field", field, value } as FieldAction);
+    };
 
   return {
     setPrompt: setField("prompt"),
-    setNegativePrompt: setField("negativePrompt"),
-    setSelectedPresetId: setField("selectedPresetId"),
     setAspectRatio: setField("aspectRatio"),
     setQuantity: setField("quantity"),
     setQuantityInput: setField("quantityInput"),
-    setQuality: setField("quality"),
     setModel: setField("model"),
     setQuote: setField("quote"),
     setAccount: setField("account"),
@@ -188,8 +179,7 @@ function createSetters(dispatch: Dispatch<GenerationWorkspaceAction>): Generatio
     setAppealReason: setField("appealReason"),
     setAppealStatus: setField("appealStatus"),
     setAppealLoading: setField("appealLoading"),
-    setRestoringTaskView: setField("restoringTaskView"),
-    setAdvancedOpen: setField("advancedOpen")
+    setRestoringTaskView: setField("restoringTaskView")
   };
 }
 

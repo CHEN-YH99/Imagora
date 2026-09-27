@@ -1,8 +1,10 @@
 "use client";
 
-import { Suspense, useEffect, useRef } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { aspectRatioOptions } from "@imagora/shared/image-models";
+import { ImageModelSelect } from "../../components/ImageModelSelect";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Coins, Copy, Download, RefreshCw, SlidersHorizontal, Sparkles, Wand2 } from "lucide-react";
+import { ChevronDown, Coins, Copy, Download, RefreshCw, Sparkles, Wand2 } from "lucide-react";
 import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
 import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
 import {
@@ -14,10 +16,10 @@ import {
   resolveSelectableImageModel,
   validateImageModelSelection,
   submitSafetyAppeal,
+  subscribeGenerationTask,
   type CreditAccount,
   type GeneratedImage,
   type GenerationMetadata,
-  type SafetyAppeal,
   type SafetyEvent,
   type Task
 } from "../../lib/api";
@@ -36,40 +38,19 @@ import {
   hasTerminalGenerationFailure,
   isTerminalTaskStatus,
   resolveGenerationViewState,
+  resolveGenerationProgress,
+  resolveImageProgressLabel,
   resolveProcessingPlaceholderCount
 } from "./generationState";
 import { useGenerationWorkspace } from "./hooks/useGenerationWorkspace";
 import { useImageModelCatalog } from "./hooks/useImageModelCatalog";
-import {
-  defaultPromptPreset,
-  enhancePrompt,
-  maxEnhancedPromptLength,
-  maxNegativePromptLength,
-  promptPresets,
-  resolvePromptPreset,
-  validateGenerationPromptLengths
-} from "./promptPresets";
+import { maxEnhancedPromptLength, validateGenerationPromptLengths } from "./promptPresets";
 
 const DEFAULT_PROMPT = "半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节";
-const DEFAULT_NEGATIVE_PROMPT = defaultPromptPreset.negativePrompt;
-const DEFAULT_ASPECT_RATIO = defaultPromptPreset.aspectRatio;
+const DEFAULT_ASPECT_RATIO = "1:1";
 const DEFAULT_QUANTITY = 2;
-const DEFAULT_QUALITY = defaultPromptPreset.quality;
 const taskSyncPollIntervalMs = 2_000;
-
-const qualityOptions = [
-  { value: "draft", label: "1K", desc: "512–768px，速度最快" },
-  { value: "standard", label: "2K", desc: "1024px，均衡首选" },
-  { value: "high", label: "4K", desc: "最高画质，耗时较长" }
-];
-
-const aspectRatioOptions = [
-  { value: "1:1", label: "1:1 — 方形" },
-  { value: "3:4", label: "3:4 — 竖版" },
-  { value: "4:3", label: "4:3 — 横版" },
-  { value: "9:16", label: "9:16 — 手机竖屏" },
-  { value: "16:9", label: "16:9 — 宽屏" }
-];
+const progressTransitionMs = 250;
 
 export default function GeneratePage() {
   return (
@@ -93,18 +74,12 @@ function GenerateExperience() {
   const {
     prompt,
     setPrompt,
-    negativePrompt,
-    setNegativePrompt,
-    selectedPresetId,
-    setSelectedPresetId,
     aspectRatio,
     setAspectRatio,
     quantity,
     setQuantity,
     quantityInput,
     setQuantityInput,
-    quality,
-    setQuality,
     model: requestedModel,
     setModel,
     quote,
@@ -114,7 +89,6 @@ function GenerateExperience() {
     task,
     setTask,
     images,
-    setImages,
     selectedPreviewImage,
     setSelectedPreviewImage,
     message,
@@ -137,31 +111,48 @@ function GenerateExperience() {
     setAppealLoading,
     restoringTaskView,
     setRestoringTaskView,
-    advancedOpen,
-    setAdvancedOpen,
     applyTaskResult: applyWorkspaceTaskResult,
     beginRestore,
     beginSubmission
   } = useGenerationWorkspace({
     prompt: DEFAULT_PROMPT,
-    negativePrompt: DEFAULT_NEGATIVE_PROMPT,
-    selectedPresetId: resolveInitialPreset(searchParams.get("style")),
     aspectRatio: resolveInitialAspectRatio(searchParams.get("aspectRatio")),
     quantity: initialQuantity,
-    quality: resolveInitialQuality(searchParams.get("quality")),
     model: resolveInitialModel(searchParams.get("model")),
     activeGenerationTaskId: initialTaskId,
     restoringTaskView: Boolean(initialTaskId)
   });
-  const { catalog: modelCatalog, loading: modelsLoading, error: modelsError } = useImageModelCatalog();
-  const model = requestedModel || modelCatalog.defaultModel || "";
+  const {
+    catalog: modelCatalog,
+    loading: modelsLoading,
+    error: modelsError,
+    selectedChannel,
+    selectChannel,
+    preferredModel,
+    rememberModel,
+    refresh: refreshModels
+  } = useImageModelCatalog(searchParams.get("channel"));
+  const model = requestedModel || preferredModel || modelCatalog.defaultModel || modelCatalog.models[0]?.id || "";
   const selectedModel = modelCatalog.models.find((option) => option.id === model);
+  const quality = selectedModel?.qualities.includes("standard")
+    ? "standard"
+    : (selectedModel?.qualities[0] ?? "standard");
   const modelSelectionError = modelsLoading
     ? "正在加载可用模型，请稍候。"
-    : (modelsError ??
+    : ((!modelCatalog.models.length ? modelsError : null) ??
       (modelCatalog.models.length
         ? validateImageModelSelection(selectedModel, { quality, aspectRatio, quantity })
         : "暂无可用的生图模型，请联系管理员配置模型及通道。"));
+  useEffect(() => {
+    if (!selectedModel || modelsLoading) return;
+    if (selectedModel.aspectRatios.length && !selectedModel.aspectRatios.includes(aspectRatio)) {
+      setAspectRatio(selectedModel.aspectRatios[0]);
+    }
+    if (quantity > selectedModel.maxQuantity) {
+      setQuantity(selectedModel.maxQuantity);
+      setQuantityInput(String(selectedModel.maxQuantity));
+    }
+  }, [selectedModel, modelsLoading, aspectRatio, quantity]);
   const browserStorageRestoredRef = useRef(false);
   const quoteRequestSequenceRef = useRef(0);
   const restoringTaskIdRef = useRef<string | null>(null);
@@ -169,12 +160,30 @@ function GenerateExperience() {
   const submittingGenerationRef = useRef(false);
   const taskSyncSequenceRef = useRef(0);
   const generationViewState = resolveGenerationViewState({ loading, restoringTaskView, task, images });
-  const selectedPreset = resolvePromptPreset(selectedPresetId);
   const isGenerationProcessing = generationViewState === "submitting" || generationViewState === "processing";
+  const [finishingTaskId, setFinishingTaskId] = useState<string | null>(null);
+  const showProcessingPlaceholders =
+    isGenerationProcessing || (task?.status === "SUCCEEDED" && finishingTaskId === task.id);
+
+  useEffect(() => {
+    if (isGenerationProcessing) {
+      setFinishingTaskId(task?.id ?? null);
+      return;
+    }
+    if (task?.status !== "SUCCEEDED") {
+      setFinishingTaskId(null);
+      return;
+    }
+    // 已在本页显示的进度先走到 100%，再交接给结果；恢复已完成任务时直接显示图片。
+    const timeout = window.setTimeout(() => setFinishingTaskId(null), progressTransitionMs + 50);
+    return () => window.clearTimeout(timeout);
+  }, [isGenerationProcessing, task?.id, task?.status]);
+
   const processingAspectRatio = task ? `${task.width} / ${task.height}` : aspectRatio.replace(":", " / ");
+  const selectedAspectRatioValue = parseAspectRatioValue(aspectRatio.replace(":", "/")) ?? 1;
   const hasPrompt = prompt.trim().length > 0;
-  const promptValidation = validateGenerationPromptLengths(prompt, negativePrompt);
-  const generationPromptError = promptValidation.prompt ?? promptValidation.negativePrompt;
+  const promptValidation = validateGenerationPromptLengths(prompt, "");
+  const generationPromptError = promptValidation.prompt;
   const terminalGenerationFailureMessage =
     task && hasTerminalGenerationFailure(task, images) ? generationFailureMessage(task) : "";
   const resultStatus =
@@ -201,10 +210,8 @@ function GenerateExperience() {
   useEffect(() => {
     const taskId = searchParams.get("taskId");
     const ar = searchParams.get("aspectRatio");
-    const q = searchParams.get("quality");
     const qty = searchParams.get("quantity");
     const m = searchParams.get("model");
-    const style = searchParams.get("style");
     if (taskId && submittedTaskIdRef.current === taskId) {
       submittingGenerationRef.current = false;
       setActiveGenerationTaskId(taskId);
@@ -264,16 +271,12 @@ function GenerateExperience() {
       setRestoringTaskView(false);
     }
     if (ar && aspectRatioOptions.some((o) => o.value === ar)) setAspectRatio(ar);
-    if (q && qualityOptions.some((o) => o.value === q)) setQuality(q);
     if (qty) {
       const n = Number(qty);
       if (Number.isInteger(n) && n >= 1 && n <= 4) setClampedQuantity(n);
     }
     if (m) {
       setModel(resolveSelectableImageModel(m));
-    }
-    if (style) {
-      setSelectedPresetId(resolveInitialPreset(style));
     }
   }, [searchParams, task?.id, task?.status]);
 
@@ -294,11 +297,9 @@ function GenerateExperience() {
     const taskId = activeGenerationTaskId;
     const syncSequence = taskSyncSequenceRef.current + 1;
     taskSyncSequenceRef.current = syncSequence;
-    let canceled = false;
-    void pollActiveGenerationTask(taskId, syncSequence, () => canceled);
-    return () => {
-      canceled = true;
-    };
+    const controller = new AbortController();
+    void pollActiveGenerationTask(taskId, syncSequence, controller.signal);
+    return () => controller.abort();
   }, [activeGenerationTaskId, task?.id, task?.status]);
 
   useEffect(() => {
@@ -318,12 +319,12 @@ function GenerateExperience() {
         method: "POST",
         body: {
           prompt,
-          negativePrompt,
-          style: selectedPreset.style,
+          style: "none",
           aspectRatio,
           quantity,
           quality,
-          model
+          model,
+          channel: selectedChannel || undefined
         }
       })
         .then((result) => {
@@ -342,26 +343,18 @@ function GenerateExperience() {
       canceled = true;
       clearTimeout(timeoutId);
     };
-  }, [
-    aspectRatio,
-    generationPromptError,
-    hasPrompt,
-    model,
-    modelSelectionError,
-    quality,
-    quantity,
-    selectedPreset.style
-  ]);
+  }, [aspectRatio, generationPromptError, hasPrompt, model, modelSelectionError, selectedChannel, quality, quantity]);
 
   async function ensureLoggedIn(): Promise<void> {
     if (account) return;
     saveGenerationDraft(currentGenerationDraft());
     const generatePath = buildGeneratePath({
-      style: selectedPreset.style,
+      style: "none",
       aspectRatio,
       quality,
       quantity,
-      model
+      model,
+      channel: selectedChannel || undefined
     });
     router.push(`/login?next=${encodeURIComponent(generatePath)}`);
     throw new Error("请先登录后再提交生成。");
@@ -370,12 +363,12 @@ function GenerateExperience() {
   function currentGenerationDraft() {
     return {
       prompt,
-      negativePrompt,
-      style: selectedPreset.style,
+      style: "none",
       aspectRatio,
       quality,
       quantity,
-      model
+      model,
+      channel: selectedChannel || undefined
     };
   }
 
@@ -442,11 +435,9 @@ function GenerateExperience() {
 
   function applyTaskParameters(nextTask: Task) {
     setPrompt(nextTask.prompt);
-    setNegativePrompt(nextTask.negativePrompt ?? "");
-    setSelectedPresetId(resolveInitialPreset(nextTask.style));
     setAspectRatio(nextTask.aspectRatio);
     setClampedQuantity(nextTask.quantity);
-    setQuality(nextTask.quality);
+    if (nextTask.channel) selectChannel(nextTask.channel);
     setModel(resolveSelectableImageModel(nextTask.modelName));
   }
 
@@ -458,24 +449,17 @@ function GenerateExperience() {
     quality?: string;
     quantity?: number;
     model?: string;
+    channel?: string;
     mode?: "reuse" | "variation";
   }) {
     setPrompt(draft.prompt);
-    if (draft.negativePrompt !== undefined) {
-      setNegativePrompt(draft.negativePrompt);
-    }
-    if (draft.style) {
-      setSelectedPresetId(resolveInitialPreset(draft.style));
-    }
     if (draft.aspectRatio && aspectRatioOptions.some((item) => item.value === draft.aspectRatio)) {
       setAspectRatio(draft.aspectRatio);
-    }
-    if (draft.quality && qualityOptions.some((item) => item.value === draft.quality)) {
-      setQuality(draft.quality);
     }
     if (draft.quantity) {
       setClampedQuantity(draft.quantity);
     }
+    if (draft.channel) selectChannel(draft.channel);
     if (draft.model) {
       setModel(resolveSelectableImageModel(draft.model));
     }
@@ -492,31 +476,11 @@ function GenerateExperience() {
     const nextPrompt =
       mode === "variation" ? `${metadata.prompt}，保持主体一致，生成新的构图与细节变化` : metadata.prompt;
     setPrompt(nextPrompt);
-    setNegativePrompt(metadata.negativePrompt ?? "");
-    setSelectedPresetId(resolveInitialPreset(metadata.style));
     setAspectRatio(metadata.aspectRatio);
     setClampedQuantity(mode === "variation" ? 1 : metadata.quantity);
-    setQuality(metadata.quality);
+    if (metadata.channel) selectChannel(metadata.channel);
     setModel(resolveSelectableImageModel(metadata.modelName));
-    setAdvancedOpen(true);
     setMessage(mode === "variation" ? "已套用图片参数并准备生成变体。" : "已复用该图片的生成参数。");
-    setMessageTone("info");
-  }
-
-  function handlePresetSelect(presetId: string) {
-    const preset = resolvePromptPreset(presetId);
-    setSelectedPresetId(preset.id);
-    setNegativePrompt(preset.negativePrompt);
-    setAspectRatio(preset.aspectRatio);
-    setQuality(preset.quality);
-  }
-
-  function enhanceCurrentPrompt() {
-    setPrompt(enhancePrompt(prompt, selectedPreset.id));
-    if (!negativePrompt.trim()) {
-      setNegativePrompt(selectedPreset.negativePrompt);
-    }
-    setMessage("提示词已按当前风格增强。");
     setMessageTone("info");
   }
 
@@ -529,42 +493,61 @@ function GenerateExperience() {
     }
   }
 
-  async function pollActiveGenerationTask(
-    taskId: string,
-    syncSequence: number,
-    isCanceled: () => boolean
-  ): Promise<void> {
-    while (!isCanceled() && taskSyncSequenceRef.current === syncSequence) {
-      try {
-        const result = await apiFetch<{ task: Task; images: GeneratedImage[] }>(`/api/generation/tasks/${taskId}`);
-        if (isCanceled() || taskSyncSequenceRef.current !== syncSequence) {
-          return;
-        }
-        applyTaskResult(result);
-        applyTaskParameters(result.task);
-        setRestoringTaskView(false);
-        setLoading(false);
-        if (isTerminalTaskStatus(result.task.status)) {
-          await handleTerminalTaskResult(result);
-          if (submittedTaskIdRef.current === result.task.id) {
-            submittedTaskIdRef.current = null;
-          }
-          if (activeGenerationTaskId === result.task.id) {
-            setActiveGenerationTaskId(null);
-          }
-          return;
-        }
-      } catch (error) {
-        if (isCanceled() || taskSyncSequenceRef.current !== syncSequence) {
-          return;
-        }
-        if (task?.id === taskId) {
-          setLoading(false);
-        }
-        setMessage(generationTaskSyncErrorMessage(error));
-        setMessageTone("info");
+  async function pollActiveGenerationTask(taskId: string, syncSequence: number, signal: AbortSignal): Promise<void> {
+    let lastHeartbeat = 0;
+    let terminalHandled = false;
+    let latestTask: Task | null = null;
+    const isCanceled = () => signal.aborted || taskSyncSequenceRef.current !== syncSequence;
+    const receive = async (result: { task: Task; images: GeneratedImage[] }) => {
+      if (isCanceled() || terminalHandled) return;
+      if (
+        latestTask &&
+        (Date.parse(result.task.updatedAt) < Date.parse(latestTask.updatedAt) ||
+          (result.task.progress?.sequence ?? 0) < (latestTask.progress?.sequence ?? 0))
+      )
+        return;
+      latestTask = result.task;
+      applyTaskResult(result);
+      applyTaskParameters(result.task);
+      setRestoringTaskView(false);
+      setLoading(false);
+      if (isTerminalTaskStatus(result.task.status)) {
+        terminalHandled = true;
+        await handleTerminalTaskResult(result);
+        if (isCanceled()) return;
+        if (submittedTaskIdRef.current === result.task.id) submittedTaskIdRef.current = null;
+        if (activeGenerationTaskId === result.task.id) setActiveGenerationTaskId(null);
       }
-      await sleep(taskSyncPollIntervalMs);
+    };
+    const unsubscribe = subscribeGenerationTask(
+      taskId,
+      (result) => {
+        void receive(result);
+      },
+      () => {
+        lastHeartbeat = Date.now();
+      }
+    );
+    signal.addEventListener("abort", unsubscribe, { once: true });
+    try {
+      while (!isCanceled() && !terminalHandled) {
+        // 推送正常时不重复查询；不支持 SSE、断线或心跳中断时保留轮询恢复。
+        if (Date.now() - lastHeartbeat > 20_000) {
+          try {
+            const result = await apiFetch<{ task: Task; images: GeneratedImage[] }>(`/api/generation/tasks/${taskId}`);
+            await receive(result);
+          } catch (error) {
+            if (isCanceled() || terminalHandled) return;
+            if (task?.id === taskId) setLoading(false);
+            setMessage(generationTaskSyncErrorMessage(error));
+            setMessageTone("info");
+          }
+        }
+        if (!terminalHandled) await sleep(taskSyncPollIntervalMs);
+      }
+    } finally {
+      unsubscribe();
+      signal.removeEventListener("abort", unsubscribe);
     }
   }
 
@@ -606,8 +589,10 @@ function GenerateExperience() {
     const nextModel = modelCatalog.models.find((option) => option.id === modelId);
     if (!nextModel) return;
     setModel(nextModel.id);
-    if (!nextModel.qualities.includes(quality)) setQuality(nextModel.qualities[0]);
-    if (!nextModel.aspectRatios.includes(aspectRatio)) setAspectRatio(nextModel.aspectRatios[0]);
+    rememberModel(nextModel.id);
+    if (nextModel.aspectRatios.length && !nextModel.aspectRatios.includes(aspectRatio)) {
+      setAspectRatio(nextModel.aspectRatios[0]);
+    }
     const nextQuantity = Math.min(quantity, nextModel.maxQuantity);
     setQuantity(nextQuantity);
     setQuantityInput(String(nextQuantity));
@@ -656,9 +641,19 @@ function GenerateExperience() {
     taskSyncSequenceRef.current += 1;
     beginSubmission();
     clearActiveGenerationTaskId();
-    router.replace(buildGeneratePath({ style: selectedPreset.style, aspectRatio, quality, quantity, model }), {
-      scroll: false
-    });
+    router.replace(
+      buildGeneratePath({
+        style: "none",
+        aspectRatio,
+        quality,
+        quantity,
+        model,
+        channel: selectedChannel || undefined
+      }),
+      {
+        scroll: false
+      }
+    );
     restoringTaskIdRef.current = null;
     try {
       await ensureLoggedIn();
@@ -667,12 +662,12 @@ function GenerateExperience() {
         body: {
           clientRequestId: crypto.randomUUID(),
           prompt,
-          negativePrompt,
-          style: selectedPreset.style,
+          style: "none",
           aspectRatio,
           quantity,
           quality,
-          model
+          model,
+          channel: selectedChannel || undefined
         }
       });
       restoringTaskIdRef.current = created.task.id;
@@ -701,7 +696,7 @@ function GenerateExperience() {
   }
 
   return (
-    <AppFrame title="图片生成" subtitle="输入提示词，选择模型、比例和画质，提交前确认积分消耗。">
+    <AppFrame title="图片生成" subtitle="输入提示词，选择 API、模型和画面比例，提交前确认积分消耗。">
       <div className="grid gap-5 lg:grid-cols-[0.95fr_1.05fr]">
         {restoringTaskView ? (
           <>
@@ -748,176 +743,98 @@ function GenerateExperience() {
               <div className="space-y-5">
                 {/* 提示词 */}
                 <div>
-                  <label className="block text-sm text-white/70">
-                    提示词
+                  <div className="text-sm text-white/70">
+                    <label htmlFor="generation-prompt">提示词</label>
                     <textarea
+                      id="generation-prompt"
                       className="focus-ring mt-2 min-h-52 w-full resize-none rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
                       value={prompt}
                       onChange={(event) => setPrompt(event.target.value)}
+                      aria-label="提示词"
                       aria-invalid={Boolean(promptValidation.prompt)}
                       aria-describedby="generation-prompt-length"
                     />
-                  </label>
-                  <p
-                    id="generation-prompt-length"
-                    className={`mt-2 text-xs ${promptValidation.prompt ? "text-ember" : "text-white/45"}`}
-                  >
-                    {promptValidation.prompt ?? `${prompt.length} / ${maxEnhancedPromptLength} 个字符`}
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    className="focus-ring inline-flex items-center gap-2 rounded-full border border-mint/40 px-3 py-2 text-sm text-mint transition-colors duration-200 hover:bg-mint/10"
-                    type="button"
-                    onClick={enhanceCurrentPrompt}
-                  >
-                    <Sparkles className="size-4" aria-hidden="true" />
-                    增强提示词
-                  </button>
-                </div>
-
-                <fieldset>
-                  <legend className="mb-2 text-sm text-white/70">风格预设</legend>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {promptPresets.map((preset) => (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        onClick={() => handlePresetSelect(preset.id)}
-                        className={`focus-ring cursor-pointer rounded-2xl border px-3 py-3 text-left transition-colors duration-200 ${
-                          selectedPreset.id === preset.id
-                            ? "border-mint/70 bg-mint/10 text-white"
-                            : "border-white/12 bg-black/24 text-white/70 hover:bg-white/8"
-                        }`}
-                      >
-                        <span className="block text-sm font-semibold">{preset.name}</span>
-                        <span className="mt-1 block text-xs leading-5 text-white/50">{preset.description}</span>
-                      </button>
-                    ))}
                   </div>
-                </fieldset>
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                    <p
+                      id="generation-prompt-length"
+                      className={`text-xs ${promptValidation.prompt ? "text-ember" : "text-white/45"}`}
+                    >
+                      {promptValidation.prompt ?? `${prompt.length} / ${maxEnhancedPromptLength} 个字符`}
+                    </p>
+                    <span
+                      className="generation-ratio-control"
+                      data-disabled={modelsLoading || !selectedModel?.aspectRatios.length}
+                    >
+                      <span className="generation-ratio-icon" aria-hidden="true">
+                        <span
+                          className="generation-ratio-frame"
+                          style={{
+                            transform: `scale(${Math.min(1, selectedAspectRatioValue)}, ${Math.min(1, 1 / selectedAspectRatioValue)})`
+                          }}
+                        />
+                      </span>
+                      <select
+                        className="focus-ring generation-ratio-select"
+                        value={aspectRatio}
+                        onChange={(event) => setAspectRatio(event.target.value)}
+                        aria-label="画面比例"
+                        disabled={modelsLoading || !selectedModel?.aspectRatios.length}
+                      >
+                        {aspectRatioOptions.map((item) => (
+                          <option
+                            key={item.value}
+                            value={item.value}
+                            disabled={!selectedModel?.aspectRatios.includes(item.value)}
+                          >
+                            {item.label}
+                            {selectedModel && !selectedModel.aspectRatios.includes(item.value) ? "（不可用）" : ""}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown className="generation-ratio-chevron" aria-hidden="true" />
+                    </span>
+                  </div>
+                </div>
 
-                <label className="block text-sm text-white/70">
-                  模型
-                  <select
-                    className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                <div>
+                  <ImageModelSelect
+                    models={modelCatalog.models}
+                    channels={modelCatalog.channels ?? []}
+                    channel={selectedChannel}
+                    onChannelChange={(channel) => {
+                      setModel("");
+                      selectChannel(channel);
+                    }}
                     value={model}
-                    onChange={(event) => selectImageModel(event.target.value)}
-                    disabled={modelsLoading || !modelCatalog.models.length}
-                    aria-label="模型"
-                    aria-describedby="generation-model-help"
-                  >
-                    {!selectedModel ? (
-                      <option value={model} disabled>
-                        {modelsLoading ? "加载模型中…" : model ? "所选模型不可用" : "暂无可用模型"}
-                      </option>
-                    ) : null}
-                    {modelCatalog.models.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.label}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={selectImageModel}
+                    loading={modelsLoading}
+                    error={modelsError}
+                    onRefresh={refreshModels}
+                    className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
+                  />
                   <span
                     id="generation-model-help"
                     className="mt-2 block text-xs text-white/55"
                     role={modelSelectionError && !modelsLoading ? "alert" : undefined}
                   >
-                    {modelSelectionError ?? "系统自动匹配该模型的生图通道，切换模型会重新计算积分。"}
+                    {modelSelectionError ?? "切换 API 后会更新可选模型，切换线路或模型会重新计算积分。"}
                   </span>
+                </div>
+
+                <label className="block text-sm text-white/70">
+                  生成数量
+                  <input
+                    className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
+                    type="number"
+                    min={1}
+                    max={selectedModel?.maxQuantity ?? 4}
+                    value={quantityInput}
+                    onFocus={(event) => event.target.select()}
+                    onChange={(event) => setQuantityFromInput(event.target.value)}
+                    onBlur={() => setQuantityInput(String(quantity))}
+                  />
                 </label>
-
-                <details
-                  className="rounded-2xl border border-white/12 bg-black/18 p-4"
-                  open={advancedOpen}
-                  onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
-                >
-                  <summary className="focus-ring flex cursor-pointer list-none items-center gap-2 text-sm font-semibold text-white/78">
-                    <SlidersHorizontal className="size-4 text-cyanx" aria-hidden="true" />
-                    高级参数
-                  </summary>
-                  <div className="mt-4 space-y-4">
-                    <div>
-                      <label className="block text-sm text-white/70">
-                        负向提示词
-                        <input
-                          className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                          value={negativePrompt}
-                          onChange={(event) => setNegativePrompt(event.target.value)}
-                          aria-invalid={Boolean(promptValidation.negativePrompt)}
-                          aria-describedby="generation-negative-prompt-length"
-                        />
-                      </label>
-                      <p
-                        id="generation-negative-prompt-length"
-                        className={`mt-2 text-xs ${promptValidation.negativePrompt ? "text-ember" : "text-white/45"}`}
-                      >
-                        {promptValidation.negativePrompt ??
-                          `${negativePrompt.length} / ${maxNegativePromptLength} 个字符`}
-                      </p>
-                    </div>
-
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      <label className="block text-sm text-white/70">
-                        画面比例
-                        <select
-                          className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
-                          value={aspectRatio}
-                          onChange={(event) => setAspectRatio(event.target.value)}
-                        >
-                          {aspectRatioOptions.map((item) => (
-                            <option
-                              key={item.value}
-                              value={item.value}
-                              disabled={!selectedModel?.aspectRatios.includes(item.value)}
-                            >
-                              {item.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label className="block text-sm text-white/70">
-                        生成数量
-                        <input
-                          className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                          type="number"
-                          min={1}
-                          max={selectedModel?.maxQuantity ?? 4}
-                          value={quantityInput}
-                          onFocus={(event) => event.target.select()}
-                          onChange={(event) => setQuantityFromInput(event.target.value)}
-                          onBlur={() => setQuantityInput(String(quantity))}
-                        />
-                      </label>
-                    </div>
-
-                    <fieldset>
-                      <legend className="mb-2 text-sm text-white/70">画质</legend>
-                      <div className="grid grid-cols-3 gap-2">
-                        {qualityOptions.map((item) => (
-                          <button
-                            key={item.value}
-                            type="button"
-                            onClick={() => setQuality(item.value)}
-                            disabled={!selectedModel?.qualities.includes(item.value)}
-                            className={`focus-ring rounded-2xl border px-3 py-3 text-center transition-colors duration-200 ${
-                              !selectedModel?.qualities.includes(item.value)
-                                ? "cursor-not-allowed border-white/5 bg-black/20 text-white/30"
-                                : quality === item.value
-                                  ? "border-mint/70 bg-mint/10 text-white"
-                                  : "border-white/12 bg-black/28 text-white/70 hover:bg-white/8"
-                            }`}
-                          >
-                            <p className="text-base font-bold">{item.label}</p>
-                            <p className="mt-0.5 text-xs opacity-60">{item.desc}</p>
-                          </button>
-                        ))}
-                      </div>
-                    </fieldset>
-                  </div>
-                </details>
 
                 {/* 积分预估 */}
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/12 bg-black/24 p-4">
@@ -1048,16 +965,18 @@ function GenerateExperience() {
                 </div>
               ) : null}
               <div className="grid gap-3 sm:grid-cols-2">
-                {isGenerationProcessing
+                {showProcessingPlaceholders
                   ? Array.from({ length: processingPlaceholderCount }).map((_, index) => (
                       <GenerationProcessingPlaceholder
-                        key={`生成占位-${index}`}
+                        key={`生成占位-${task?.id ?? "submitting"}-${index}`}
                         index={index}
                         processingAspectRatio={processingAspectRatio}
+                        task={task}
+                        progress={resolveGenerationProgress(task, images, quantity, index)}
                       />
                     ))
                   : null}
-                {images.map((image, index) => (
+                {(showProcessingPlaceholders ? [] : images).map((image, index) => (
                   <article
                     key={image.id}
                     className="relative overflow-hidden rounded-2xl border border-white/12 bg-black/18"
@@ -1084,10 +1003,8 @@ function GenerateExperience() {
                     <div className="space-y-3 p-3">
                       <dl className="grid gap-2 text-xs text-white/52 sm:grid-cols-2">
                         <div>
-                          <dt>风格</dt>
-                          <dd className="mt-0.5 text-white/78">
-                            {resolvePromptPreset(image.generationMetadata.style).name}
-                          </dd>
+                          <dt>比例</dt>
+                          <dd className="mt-0.5 text-white/78">{image.generationMetadata.aspectRatio}</dd>
                         </div>
                         <div>
                           <dt>模型</dt>
@@ -1135,16 +1052,8 @@ function GenerateExperience() {
   );
 }
 
-function resolveInitialPreset(value: string | null): string {
-  return resolvePromptPreset(value).id;
-}
-
 function resolveInitialAspectRatio(value: string | null): string {
   return value && aspectRatioOptions.some((item) => item.value === value) ? value : DEFAULT_ASPECT_RATIO;
-}
-
-function resolveInitialQuality(value: string | null): string {
-  return value && qualityOptions.some((item) => item.value === value) ? value : DEFAULT_QUALITY;
 }
 
 function resolveInitialQuantity(value: string | null): number {
@@ -1159,12 +1068,73 @@ function resolveInitialModel(value: string | null): string {
   return value ? resolveSelectableImageModel(value) : "";
 }
 
+function GenerationTaskProgress({ progress }: { progress: ReturnType<typeof resolveGenerationProgress> }) {
+  const [displayedPercentage, setDisplayedPercentage] = useState(0);
+  const displayedPercentageRef = useRef(0);
+  const targetPercentage = progress.percentage ?? 0;
+
+  useEffect(() => {
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const from = displayedPercentageRef.current;
+    const startedAt = performance.now();
+    let frame = 0;
+    const update = (value: number) => {
+      displayedPercentageRef.current = value;
+      setDisplayedPercentage(value);
+    };
+    const animate = (now: number) => {
+      const elapsed = reducedMotion.matches ? 1 : Math.min(1, (now - startedAt) / progressTransitionMs);
+      update(from + (targetPercentage - from) * elapsed);
+      if (elapsed < 1) frame = window.requestAnimationFrame(animate);
+    };
+    const handleMotionChange = () => {
+      if (!reducedMotion.matches) return;
+      window.cancelAnimationFrame(frame);
+      update(targetPercentage);
+    };
+    frame = window.requestAnimationFrame(animate);
+    reducedMotion.addEventListener("change", handleMotionChange);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      reducedMotion.removeEventListener("change", handleMotionChange);
+    };
+  }, [targetPercentage]);
+
+  return (
+    <div className="mt-2 w-full text-left">
+      <div className="flex items-center justify-end text-[10px] leading-4 text-white/64">
+        <span className="shrink-0 tabular-nums text-mint">
+          {progress.percentage === null ? "—" : `${Math.floor(displayedPercentage)}%`}
+        </span>
+      </div>
+      <div
+        role="progressbar"
+        aria-label="图片生成进度"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress.percentage ?? undefined}
+        aria-valuetext={progress.percentage === null ? "等待进度同步" : `${progress.percentage}%`}
+        className="mt-1 h-1 overflow-hidden rounded-full bg-white/10"
+      >
+        <span
+          className="block h-full w-full rounded-full bg-mint"
+          style={{ transform: `translateX(${displayedPercentage - 100}%)` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function GenerationProcessingPlaceholder({
   index,
-  processingAspectRatio
+  processingAspectRatio,
+  task,
+  progress
 }: {
   index: number;
   processingAspectRatio: string;
+  task: Task | null;
+  progress: ReturnType<typeof resolveGenerationProgress>;
 }) {
   const aspectRatioValue = parseAspectRatioValue(processingAspectRatio);
   const isWideFrame = (aspectRatioValue ?? 1) >= 1.5;
@@ -1179,33 +1149,23 @@ function GenerationProcessingPlaceholder({
       <span className="pointer-events-none absolute -inset-16 bg-[conic-gradient(from_130deg,transparent,rgba(88,240,182,0.42),rgba(37,216,255,0.28),transparent)] opacity-70 blur-2xl motion-safe:animate-spin motion-reduce:animate-none" />
       <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_30%_24%,rgba(217,248,91,0.18),transparent_32%),radial-gradient(circle_at_72%_68%,rgba(37,216,255,0.16),transparent_38%)] motion-safe:animate-pulse motion-reduce:opacity-70" />
       <span className="pointer-events-none absolute inset-3 rounded-[1.25rem] border border-white/10 bg-ink/72 backdrop-blur-md" />
-      <span className="pointer-events-none absolute inset-x-5 top-5 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent motion-safe:animate-pulse motion-reduce:opacity-60" />
-      <div
-        className={`relative flex h-full justify-center ${isWideFrame ? "items-center px-4 py-4" : "items-center px-5 text-center"}`}
-      >
+      <span className="pointer-events-none absolute inset-x-5 top-3 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent motion-safe:animate-pulse motion-reduce:opacity-60" />
+      <div className={`relative flex h-full items-center justify-center px-5 ${isWideFrame ? "py-3" : "text-center"}`}>
         <div
-          className={`flex ${isWideFrame ? "w-full max-w-[17rem] items-center gap-3 rounded-[1.15rem] border border-white/10 bg-black/14 px-3 py-3 text-left" : "flex-col items-center"}`}
+          className={`flex w-full ${isWideFrame ? "max-w-[17rem] items-center gap-3 text-left" : "max-w-48 flex-col items-center"}`}
         >
           <span
-            className={`relative inline-flex items-center justify-center rounded-full border border-mint/36 bg-mint/10 text-mint shadow-glow ${isWideFrame ? "size-11 shrink-0" : "size-14"}`}
+            className={`relative inline-flex items-center justify-center rounded-full border border-mint/36 bg-mint/10 text-mint shadow-glow ${isWideFrame ? "size-9 shrink-0" : "size-14"}`}
           >
             <span className="absolute inset-0 rounded-full border border-mint/40 motion-safe:animate-ping motion-reduce:hidden" />
             <Sparkles className={isWideFrame ? "size-5" : "size-6"} aria-hidden="true" />
           </span>
-          <div className={`min-w-0 ${isWideFrame ? "flex-1" : "mt-4"}`}>
-            <p className="text-sm font-semibold text-white">正在生成</p>
-            <p className={`mt-1 text-xs leading-5 text-white/56 ${isWideFrame ? "max-w-none" : "max-w-48"}`}>
-              AI 正在构图、上色并输出图片
+          <div className={`min-w-0 ${isWideFrame ? "flex-1" : "mt-4 w-full"}`}>
+            <p className={`font-semibold text-white ${isWideFrame ? "text-xs leading-4" : "text-sm"}`}>
+              {resolveImageProgressLabel(task, index)}
             </p>
-            <div
-              className={
-                isWideFrame
-                  ? "mt-3 h-1.5 w-full overflow-hidden rounded-full bg-white/10"
-                  : "mt-5 h-1.5 w-28 overflow-hidden rounded-full bg-white/10"
-              }
-            >
-              <span className="block h-full w-1/2 rounded-full bg-gradient-to-r from-mint via-cyanx to-volt motion-safe:animate-pulse" />
-            </div>
+            <p className="mt-1 text-[11px] leading-4 text-white/56">第 {index + 1} 张</p>
+            <GenerationTaskProgress progress={progress} />
           </div>
         </div>
       </div>

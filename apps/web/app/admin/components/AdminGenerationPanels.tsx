@@ -1,12 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { EmptyState, Panel, StatusPill } from "../../../components/AppFrame";
-import {
-  formatCredits,
-  formatStyleLabel,
-  type GeneratedImage,
-  type Task
-} from "../../../lib/api";
+import { formatCredits, formatStyleLabel, type GeneratedImage, type Task } from "../../../lib/api";
 import { AdminImagePreview, Field } from "./AdminPrimitives";
 
 type AdminGenerationPanelsProps = {
@@ -100,9 +95,7 @@ export function AdminGenerationPanels({
             <select
               className="focus-ring w-full rounded-full border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
               value={imageVisibilityFilter}
-              onChange={(event) =>
-                setImageVisibilityFilter(event.target.value as "ALL" | GeneratedImage["visibility"])
-              }
+              onChange={(event) => setImageVisibilityFilter(event.target.value as "ALL" | GeneratedImage["visibility"])}
             >
               <option value="ALL">全部可见性</option>
               <option value="PRIVATE">私有</option>

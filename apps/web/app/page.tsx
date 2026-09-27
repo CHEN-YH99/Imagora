@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { ImageModelSelect } from "../components/ImageModelSelect";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
@@ -28,89 +29,10 @@ import {
 } from "lucide-react";
 import { getCurrentUser, peekCurrentUser, validateImageModelSelection } from "../lib/api";
 import { buildGeneratePath, saveGenerationDraft, type GenerationDraft } from "../lib/generateDrafts";
-import type { PromptPresetId } from "./generate/promptPresets";
+import { aspectRatioOptions } from "@imagora/shared/image-models";
 import { useImageModelCatalog } from "./generate/hooks/useImageModelCatalog";
 
-type StyleOption = {
-  id: PromptPresetId;
-  name: string;
-  label: string;
-  description: string;
-  prompt: string;
-  aspectRatio: "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
-  cost: number;
-  artClass: string;
-  accentClass: string;
-};
-
-type Quality = "1k" | "2k" | "4k";
 type PromptLoopPhase = "typing" | "holding" | "deleting";
-
-const aspectRatioOptions = [
-  { value: "1:1", label: "1:1  方形" },
-  { value: "3:4", label: "3:4  竖版" },
-  { value: "4:3", label: "4:3  横版" },
-  { value: "9:16", label: "9:16  手机竖屏" },
-  { value: "16:9", label: "16:9  宽屏" }
-];
-
-const styleOptions: StyleOption[] = [
-  {
-    id: "realistic",
-    name: "写实质感",
-    label: "写实质感",
-    description: "强调镜头语言、景深层次和叙事氛围",
-    prompt: "雨夜城市街角，霓虹反射在湿润路面，35mm 电影镜头，自然景深，高级写实影像质感",
-    aspectRatio: "16:9",
-    cost: 8,
-    artClass: "art-cinematic",
-    accentClass: "from-ember to-cyanx"
-  },
-  {
-    id: "product_photography",
-    name: "产品摄影",
-    label: "产品摄影",
-    description: "适合电商主图、材质表现和棚拍质感",
-    prompt: "白瓷质感无线耳机置于干净亚克力台面，柔和棚拍布光，真实反射，商业级产品摄影",
-    aspectRatio: "1:1",
-    cost: 7,
-    artClass: "art-product",
-    accentClass: "from-mint to-cyanx"
-  },
-  {
-    id: "anime",
-    name: "动漫插画",
-    label: "动漫插画",
-    description: "适合角色视觉、封面图和社媒头像",
-    prompt: "未来城市信使角色设定，明亮发光披风，清晰轮廓，精致五官，动漫封面构图",
-    aspectRatio: "3:4",
-    cost: 6,
-    artClass: "art-anime",
-    accentClass: "from-plasma to-cyanx"
-  },
-  {
-    id: "poster",
-    name: "海报设计",
-    label: "海报设计",
-    description: "适合活动主视觉、标题空间和高对比排版",
-    prompt: "地下电子音乐节活动海报主视觉，撞色几何图形，高对比排版，预留醒目标题空间",
-    aspectRatio: "3:4",
-    cost: 9,
-    artClass: "art-poster",
-    accentClass: "from-volt to-ember"
-  },
-  {
-    id: "illustration",
-    name: "品牌插画",
-    label: "品牌插画",
-    description: "适合应用插图、流程说明和品牌素材",
-    prompt: "智能创作流程品牌插画，等距视角工作台，图片网格、积分账本和队列节点清晰，现代配色",
-    aspectRatio: "4:3",
-    cost: 5,
-    artClass: "art-isometric",
-    accentClass: "from-plasma to-volt"
-  }
-];
 
 const galleryItems = [
   {
@@ -192,12 +114,6 @@ const pricingPlans = [
   }
 ];
 
-const qualityToGenerateValue: Record<Quality, "draft" | "standard" | "high"> = {
-  "1k": "draft",
-  "2k": "standard",
-  "4k": "high"
-};
-
 const stageClasses = [
   "stage-cinematic",
   "stage-product",
@@ -213,7 +129,6 @@ export default function HomePage() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [requestedModel, setSelectedModel] = useState("");
   const [aspectRatio, setAspectRatio] = useState("1:1");
-  const [quality, setQuality] = useState<Quality>("2k");
   const [quantity, setQuantity] = useState(2);
   const [prompt, setPrompt] = useState("");
   const [promptMode, setPromptMode] = useState<"auto" | "manual">("auto");
@@ -222,17 +137,35 @@ export default function HomePage() {
   const [promptLoopPhase, setPromptLoopPhase] = useState<PromptLoopPhase>("typing");
   const [authCheckState, setAuthCheckState] = useState<"idle" | "checking">("idle");
   const [entryNotice, setEntryNotice] = useState<{ tone: "info" | "danger"; text: string } | null>(null);
-  const { catalog: modelCatalog, loading: modelsLoading, error: modelsError } = useImageModelCatalog();
-  const selectedModel = requestedModel || modelCatalog.defaultModel || "";
+  const {
+    catalog: modelCatalog,
+    loading: modelsLoading,
+    error: modelsError,
+    selectedChannel,
+    selectChannel,
+    preferredModel,
+    rememberModel,
+    refresh: refreshModels
+  } = useImageModelCatalog();
+  const selectedModel = requestedModel || preferredModel || modelCatalog.defaultModel || "";
   const activeModel = modelCatalog.models.find((model) => model.id === selectedModel);
+  const quality = activeModel?.qualities.includes("standard") ? "standard" : (activeModel?.qualities[0] ?? "standard");
   const modelSelectionError = modelsLoading
     ? "正在加载可用模型，请稍候。"
-    : (modelsError ??
+    : ((!modelCatalog.models.length ? modelsError : null) ??
       validateImageModelSelection(activeModel, {
-        quality: qualityToGenerateValue[quality],
+        quality,
         aspectRatio,
         quantity
       }));
+
+  useEffect(() => {
+    if (!activeModel || modelsLoading) return;
+    if (activeModel.aspectRatios.length && !activeModel.aspectRatios.includes(aspectRatio)) {
+      setAspectRatio(activeModel.aspectRatios[0]);
+    }
+    if (quantity > activeModel.maxQuantity) setQuantity(activeModel.maxQuantity);
+  }, [activeModel, modelsLoading, aspectRatio, quantity]);
 
   useEffect(() => {
     const cachedUser = peekCurrentUser();
@@ -257,11 +190,12 @@ export default function HomePage() {
   const generatePath = useMemo(() => {
     return buildGeneratePath({
       aspectRatio,
-      quality: qualityToGenerateValue[quality],
+      quality,
       quantity,
-      model: selectedModel
+      model: selectedModel,
+      channel: selectedChannel || undefined
     });
-  }, [aspectRatio, quality, quantity, selectedModel]);
+  }, [aspectRatio, quality, quantity, selectedModel, selectedChannel]);
   const actionHint =
     authCheckState === "checking"
       ? "正在检查登录状态，马上带你进入对应页面。"
@@ -378,40 +312,14 @@ export default function HomePage() {
     await enterGenerateWorkspace(generatePath, effectivePrompt);
   }
 
-  async function handleStyleOption(option: StyleOption) {
-    if (modelSelectionError) {
-      setEntryNotice({ tone: "danger", text: modelSelectionError });
-      return;
-    }
-    const presetRatio = activeModel?.aspectRatios.includes(option.aspectRatio) ? option.aspectRatio : aspectRatio;
-    const path = buildGeneratePath({
-      style: option.id,
-      aspectRatio: presetRatio,
-      quality: qualityToGenerateValue[quality],
-      quantity,
-      model: selectedModel
-    });
-    await enterGenerateWorkspace(path, {
-      prompt: option.prompt,
-      style: option.id,
-      aspectRatio: presetRatio,
-      quality: qualityToGenerateValue[quality],
-      quantity,
-      model: selectedModel
-    });
-  }
-
   function selectImageModel(modelId: string) {
     const nextModel = modelCatalog.models.find((model) => model.id === modelId);
     if (!nextModel) return;
     setSelectedModel(nextModel.id);
-    if (!nextModel.qualities.includes(qualityToGenerateValue[quality])) {
-      const nextQuality = (["1k", "2k", "4k"] as Quality[]).find((option) =>
-        nextModel.qualities.includes(qualityToGenerateValue[option])
-      );
-      setQuality(nextQuality ?? "2k");
+    rememberModel(nextModel.id);
+    if (nextModel.aspectRatios.length && !nextModel.aspectRatios.includes(aspectRatio)) {
+      setAspectRatio(nextModel.aspectRatios[0]);
     }
-    if (!nextModel.aspectRatios.includes(aspectRatio)) setAspectRatio(nextModel.aspectRatios[0]);
     setQuantity((current) => Math.min(current, nextModel.maxQuantity));
   }
 
@@ -430,7 +338,6 @@ export default function HomePage() {
           <div className="hidden items-center gap-1 md:flex">
             {[
               { id: "gallery", label: "案例" },
-              { id: "styles", label: "风格" },
               { id: "prompts", label: "提示词" },
               { id: "pricing", label: "套餐" }
             ].map((item) => (
@@ -487,7 +394,6 @@ export default function HomePage() {
           <div className="mx-auto mt-2 max-w-7xl rounded-3xl border border-white/15 bg-ink/94 p-3 shadow-2xl shadow-black/40 backdrop-blur-xl md:hidden">
             {[
               { id: "gallery", label: "案例" },
-              { id: "styles", label: "风格" },
               { id: "prompts", label: "提示词" },
               { id: "pricing", label: "套餐" }
             ].map((item) => (
@@ -549,7 +455,7 @@ export default function HomePage() {
             Imagora 将清晰提示词转化为可交付视觉资产
           </h1>
           <p className="mt-6 max-w-3xl text-pretty text-base leading-8 text-white/74 sm:text-lg">
-            面向创作者、电商运营和内容团队，提供风格选择、比例设置、批量生成、质量控制和积分预估，让图片生产流程清晰可控。
+            面向创作者、电商运营和内容团队，提供模型选择、比例设置、批量生成和积分预估，让图片生产流程清晰可控。
           </p>
 
           {/* Hero CTA */}
@@ -640,29 +546,33 @@ export default function HomePage() {
               </div>
               <div className="flex min-w-0 flex-col justify-between rounded-[1.35rem] border border-white/12 bg-white/8 p-4 md:w-64">
                 <div className="flex flex-col gap-2 text-sm">
-                  <select
-                    className="focus-ring w-full rounded-2xl border border-white/12 bg-black/40 px-3 py-2 text-white"
+                  <ImageModelSelect
+                    models={modelCatalog.models}
+                    channels={modelCatalog.channels ?? []}
+                    channel={selectedChannel}
+                    onChannelChange={(channel) => {
+                      setSelectedModel("");
+                      selectChannel(channel);
+                    }}
                     value={selectedModel}
-                    onChange={(event) => selectImageModel(event.target.value)}
-                    aria-label="选择模型"
-                    disabled={modelsLoading || !modelCatalog.models.length}
-                  >
-                    {!activeModel ? <option value="">{modelsLoading ? "加载模型中…" : "暂无可用模型"}</option> : null}
-                    {modelCatalog.models.map((option) => (
-                      <option key={option.id} value={option.id}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={selectImageModel}
+                    loading={modelsLoading}
+                    error={modelsError}
+                    onRefresh={refreshModels}
+                    label="选择模型"
+                    className="focus-ring w-full rounded-2xl border border-white/12 bg-black/40 px-3 py-2 text-white"
+                  />
                   <select
                     className="focus-ring w-full rounded-2xl border border-white/12 bg-black/40 px-3 py-2 text-white"
                     value={aspectRatio}
                     onChange={(e) => setAspectRatio(e.target.value)}
                     aria-label="选择比例"
+                    disabled={modelsLoading || !activeModel?.aspectRatios.length}
                   >
                     {aspectRatioOptions.map((o) => (
                       <option key={o.value} value={o.value} disabled={!activeModel?.aspectRatios.includes(o.value)}>
                         {o.label}
+                        {activeModel && !activeModel.aspectRatios.includes(o.value) ? "（不可用）" : ""}
                       </option>
                     ))}
                   </select>
@@ -701,22 +611,8 @@ export default function HomePage() {
               </div>
             </div>
 
-            {/* 画质 + 积分 */}
+            {/* 积分 */}
             <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto] md:items-center">
-              <div className="flex flex-wrap gap-2">
-                {(["1k", "2k", "4k"] as Quality[]).map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    aria-pressed={quality === item}
-                    onClick={() => setQuality(item)}
-                    disabled={!activeModel?.qualities.includes(qualityToGenerateValue[item])}
-                    className={`focus-ring rounded-full border px-4 py-2 text-sm transition-colors duration-200 ${quality === item ? "border-mint bg-mint text-ink" : "border-white/14 bg-white/8 text-white/72 hover:bg-white/14 hover:text-white"}`}
-                  >
-                    {item.toUpperCase()}
-                  </button>
-                ))}
-              </div>
               <div className={`flex items-center gap-3 rounded-full border px-4 py-2 text-sm ${actionHintToneClass}`}>
                 <span className="inline-flex items-center gap-2">
                   <Coins className="size-4 text-volt" aria-hidden="true" />
@@ -734,7 +630,8 @@ export default function HomePage() {
                   <p className="text-sm font-medium text-white">进入路径</p>
                   <p className="mt-2 text-sm leading-6 text-white/70">{actionHint}</p>
                   <p className="mt-2 text-xs leading-5 text-white/48">
-                    当前会带入 {aspectRatio} 比例、{quantity} 张、{quality.toUpperCase()}{" "}
+                    当前会带入 {aspectRatio} 比例、{quantity} 张、
+                    {quality === "standard" ? "标准" : quality === "high" ? "精细" : "草稿"}{" "}
                     画质和已选模型，省得你进去再点一轮。
                   </p>
                 </div>
@@ -743,7 +640,9 @@ export default function HomePage() {
                   <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-white/62">
                     <span className="rounded-xl bg-black/28 px-3 py-2">比例 {aspectRatio}</span>
                     <span className="rounded-xl bg-black/28 px-3 py-2">数量 {quantity} 张</span>
-                    <span className="rounded-xl bg-black/28 px-3 py-2">画质 {quality.toUpperCase()}</span>
+                    <span className="rounded-xl bg-black/28 px-3 py-2">
+                      画质 {quality === "standard" ? "标准" : quality === "high" ? "精细" : "草稿"}
+                    </span>
                     <span className="rounded-xl bg-black/28 px-3 py-2">模型已同步</span>
                   </div>
                 </div>
@@ -846,45 +745,6 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── 风格选择 ── */}
-      <section id="styles" className="border-y border-white/10 bg-white/[0.035] px-4 py-20 sm:py-24">
-        <div className="mx-auto max-w-7xl">
-          <SectionHeading
-            eyebrow="风格选择"
-            title="结构化风格参数让提示词更稳定"
-            description="覆盖写实、插画、动漫、产品摄影和海报等常见创作场景，减少重复调参成本，并让积分预估更容易理解。"
-          />
-          <div className="mt-10 grid gap-4 lg:grid-cols-3">
-            {styleOptions.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => void handleStyleOption(item)}
-                className="focus-ring group min-h-56 rounded-[1.35rem] border border-white/12 bg-white/7 p-4 text-left transition-colors duration-200 hover:border-white/24 hover:bg-white/10"
-              >
-                <div
-                  className={`gallery-art ${item.artClass} min-h-28`}
-                  role="img"
-                  aria-label={`${item.label}风格预览`}
-                />
-                <div className="mt-4 flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <p className="text-sm text-white/58">{item.name}</p>
-                    <h3 className="mt-1 text-xl font-semibold text-white">{item.label}</h3>
-                  </div>
-                  <span
-                    className={`shrink-0 rounded-full bg-gradient-to-r ${item.accentClass} px-3 py-1 text-sm font-semibold text-ink`}
-                  >
-                    {item.cost} 积分
-                  </span>
-                </div>
-                <p className="mt-3 text-sm leading-6 text-white/68">{item.description}</p>
-              </button>
-            ))}
-          </div>
-        </div>
-      </section>
-
       {/* ── 提示词示例 ── */}
       <section id="prompts" className="px-4 py-20 sm:py-24">
         <div className="mx-auto grid max-w-7xl gap-8 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
@@ -897,7 +757,7 @@ export default function HomePage() {
               可直接进入生成表单的专业提示词
             </h2>
             <p className="mt-5 text-base leading-8 text-white/68">
-              示例提示词围绕主体、环境、光线、构图和用途组织，便于直接复用，也便于进一步调整风格、数量、质量和积分预算。
+              示例提示词围绕主体、环境、光线、构图和用途组织，便于直接复用，也便于进一步调整模型、比例、数量和积分预算。
             </p>
           </div>
           <div className="grid gap-3">
@@ -928,11 +788,7 @@ export default function HomePage() {
             description="生成入口、积分预估、队列状态、失败退还和资产操作都保持清晰，让创作团队能稳定管理每一次图片生产。"
           />
           <div className="mt-10 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <FlowCard
-              icon={Palette}
-              title="提示词与风格"
-              text="提示词、负向提示词、风格和比例结构化配置，降低参数管理成本。"
-            />
+            <FlowCard icon={Palette} title="提示词与模型" text="填写提示词，选择模型、比例和张数，快速开始创作。" />
             <FlowCard icon={Coins} title="积分预估" text="提交前展示预计消耗和账户余额，帮助用户明确预算和生成成本。" />
             <FlowCard icon={Gauge} title="异步队列" text="清晰呈现排队、生成中、完成和失败状态，适合批量图片生产。" />
             <FlowCard

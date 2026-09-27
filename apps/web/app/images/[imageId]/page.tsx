@@ -72,6 +72,7 @@ export default function ImageDetailPage() {
       quality: metadata.quality,
       quantity: mode === "variation" ? 1 : metadata.quantity,
       model: resolveSelectableImageModel(metadata.modelName),
+      channel: metadata.channel,
       mode
     });
     router.push(
@@ -80,7 +81,8 @@ export default function ImageDetailPage() {
         aspectRatio: metadata.aspectRatio,
         quality: metadata.quality,
         quantity: mode === "variation" ? 1 : metadata.quantity,
-        model: resolveSelectableImageModel(metadata.modelName)
+        model: resolveSelectableImageModel(metadata.modelName),
+        channel: metadata.channel
       })
     );
   }
@@ -398,6 +400,7 @@ function metadataFromTask(task: Task): GenerationMetadata {
     quantity: task.quantity,
     modelProvider: task.modelProvider,
     modelName: task.modelName,
+    channel: task.channel,
     width: task.width,
     height: task.height,
     creditCost: task.creditCost,

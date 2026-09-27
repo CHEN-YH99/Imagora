@@ -142,11 +142,14 @@ export function AdminDetailDrawer({
                   <p className="mt-1">创建时间：{new Date(detail.data.task.createdAt).toLocaleString("zh-CN")}</p>
                   <p className="mt-1">更新时间：{new Date(detail.data.task.updatedAt).toLocaleString("zh-CN")}</p>
                   <p className="mt-1">
-                    开始时间：{detail.data.task.startedAt ? new Date(detail.data.task.startedAt).toLocaleString("zh-CN") : "-"}
+                    开始时间：
+                    {detail.data.task.startedAt ? new Date(detail.data.task.startedAt).toLocaleString("zh-CN") : "-"}
                   </p>
                   <p className="mt-1">
                     完成时间：
-                    {detail.data.task.completedAt ? new Date(detail.data.task.completedAt).toLocaleString("zh-CN") : "-"}
+                    {detail.data.task.completedAt
+                      ? new Date(detail.data.task.completedAt).toLocaleString("zh-CN")
+                      : "-"}
                   </p>
                   <p className="mt-1">失败码：{detail.data.task.failureCode ?? "-"}</p>
                   <p className="mt-1">失败原因：{detail.data.task.failureMessage ?? "-"}</p>
@@ -156,8 +159,15 @@ export function AdminDetailDrawer({
                     <p className="mb-2 text-white/50">关联图片</p>
                     <div className="grid grid-cols-2 gap-3">
                       {detail.data.images.map((image) => (
-                        <article key={image.id} className="overflow-hidden rounded-xl border border-white/10 bg-white/5">
-                          <AdminImagePreview image={image} alt="任务图片" className="aspect-square w-full object-cover" />
+                        <article
+                          key={image.id}
+                          className="overflow-hidden rounded-xl border border-white/10 bg-white/5"
+                        >
+                          <AdminImagePreview
+                            image={image}
+                            alt="任务图片"
+                            className="aspect-square w-full object-cover"
+                          />
                           <div className="space-y-1 p-3 text-xs text-white/60">
                             <p>{image.visibility}</p>
                             <p>
@@ -224,10 +234,12 @@ export function AdminDetailDrawer({
                   <p className="mt-1">套餐：{detail.data.plan.id}</p>
                   <p className="mt-1">创建时间：{new Date(detail.data.order.createdAt).toLocaleString("zh-CN")}</p>
                   <p className="mt-1">
-                    更新时间：{detail.data.order.updatedAt ? new Date(detail.data.order.updatedAt).toLocaleString("zh-CN") : "-"}
+                    更新时间：
+                    {detail.data.order.updatedAt ? new Date(detail.data.order.updatedAt).toLocaleString("zh-CN") : "-"}
                   </p>
                   <p className="mt-1">
-                    支付时间：{detail.data.order.paidAt ? new Date(detail.data.order.paidAt).toLocaleString("zh-CN") : "-"}
+                    支付时间：
+                    {detail.data.order.paidAt ? new Date(detail.data.order.paidAt).toLocaleString("zh-CN") : "-"}
                   </p>
                 </div>
                 {detail.data.paymentEvents.length > 0 ? (
