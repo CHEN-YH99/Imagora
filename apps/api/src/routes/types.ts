@@ -3,7 +3,7 @@ import type { createMailer } from "@imagora/mailer";
 import type { createPaymentProvider } from "@imagora/payments";
 import type { createSafetyProvider } from "@imagora/safety";
 import type { createObjectStorage } from "@imagora/storage";
-import type { GeneratedImage, GenerationTask, StoreData, User } from "@imagora/shared";
+import type { GeneratedImage, GenerationTask, PublicGenerationTask, StoreData, User } from "@imagora/shared";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -20,7 +20,10 @@ export interface ApiRouteContext {
   storage: ReturnType<typeof createObjectStorage>;
   requireAuth: (request: FastifyRequest) => Promise<{ user: User; data: StoreData }>;
   requireAdmin: (request: FastifyRequest) => Promise<{ user: User; data: StoreData }>;
-  taskWithRefund: (data: StoreData, task: GenerationTask) => GenerationTask & { refundedCredits: number };
+  taskWithRefund: (
+    data: Pick<StoreData, "creditLedgerEntries">,
+    task: GenerationTask
+  ) => PublicGenerationTask & { refundedCredits: number };
   mustFindOwnTask: (data: StoreData, userId: string, taskId: string) => GenerationTask;
   mustFindTask: (data: StoreData, taskId: string) => GenerationTask;
   mustFindOwnImage: (data: StoreData, userId: string, imageId: string) => GeneratedImage;

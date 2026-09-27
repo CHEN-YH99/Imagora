@@ -1,3 +1,4 @@
+import { imageModelDiscovery } from "./image-model-discovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import cors from "@fastify/cors";
@@ -24,6 +25,8 @@ import {
   type GenerationTask,
   type Order,
   type PaymentEvent,
+  type PublicGenerationTask,
+  publicGenerationTask,
   publicUser,
   type ReferenceImage,
   runGenerationMaintenance,
@@ -59,7 +62,12 @@ import {
 } from "./captcha-runtime.js";
 import { createGenerationEnqueueRuntime } from "./generation-enqueue-runtime.js";
 import { createGenerationRuntime } from "./generation-runtime.js";
-import { contentTypeForStorageKey, extensionForMime, extensionForMimeType, inspectReferenceUpload } from "./image-upload.js";
+import {
+  contentTypeForStorageKey,
+  extensionForMime,
+  extensionForMimeType,
+  inspectReferenceUpload
+} from "./image-upload.js";
 import { createObservabilityRuntime } from "./observability.js";
 import { createOrderMaintenanceRuntime } from "./order-maintenance.js";
 import { validateProductionConfig } from "./production-config.js";
@@ -197,6 +205,7 @@ const app = Fastify({
   trustProxy: resolveTrustProxy()
 });
 app.addHook("onClose", async () => {
+  await imageModelDiscovery.close();
   await generationEnqueueRuntime.stop();
   await generationQueue.close();
   await runtimeState.close();
@@ -547,9 +556,12 @@ function findOrderByClientRequestId(data: StoreData, userId: string, clientReque
   return null;
 }
 
-function taskWithRefund(data: StoreData, task: GenerationTask): GenerationTask & { refundedCredits: number } {
+function taskWithRefund(
+  data: Pick<StoreData, "creditLedgerEntries">,
+  task: GenerationTask
+): PublicGenerationTask & { refundedCredits: number } {
   return {
-    ...task,
+    ...publicGenerationTask(task),
     refundedCredits: taskRefundedCredits(data, task.id)
   };
 }
@@ -1921,6 +1933,7 @@ export { app };
 // API_NO_LISTEN=true 时只构建 app、不监听端口也不起后台定时器，
 // 让测试可以 import 本模块后用 app.inject 而不真正占用端口。
 if (process.env.API_NO_LISTEN !== "true") {
+  await imageModelDiscovery.start();
   generationEnqueueRuntime.start();
   startBackgroundGenerationMaintenance();
   startBackgroundOrderMaintenance();

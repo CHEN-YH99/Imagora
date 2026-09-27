@@ -5,7 +5,8 @@ import { access, mkdtemp, rm } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { TextDecoder } from "node:util";
+import { basename, dirname, join, resolve, relative } from "node:path";
 import test from "node:test";
 import { JsonStore } from "../packages/database/dist/index.js";
 
@@ -1750,6 +1751,279 @@ test("api and worker complete generation and enforce admin safety rules", async 
   }
 });
 
+test("动态目录任务跨进程固化计费与路由，4K 扣双倍且错误分辨率全额退款", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-api-discovery-"));
+  const port = await reserveUnusedPort();
+  const { createRequire } = await import("node:module");
+  const sharp = createRequire(new URL("../apps/worker/package.json", import.meta.url))("sharp");
+  const fourK = (
+    await sharp({ create: { width: 4096, height: 4096, channels: 3, background: "#999999" } })
+      .png()
+      .toBuffer()
+  ).toString("base64");
+  const modelNames = [
+    "Nano Banana 2",
+    "Nano Banana 2 Lite",
+    "Nano Banana Pro",
+    "gpt-image-2",
+    "gpt-image-2-4k",
+    "grok-imagine-image-2.0",
+    "grok-imagine-image-pro"
+  ];
+  const gateway = createFakeOpenAiServer(
+    [
+      ...modelNames.map(() => ({
+        status: 200,
+        body: (request) => ({ data: [{ b64_json: request.model === "gpt-image-2-4k" ? fourK : onePixelPngBase64 }] })
+      })),
+      { status: 200, body: { data: [{ b64_json: onePixelPngBase64 }] } }
+    ],
+    {
+      data: modelNames.map((id) => ({
+        id,
+        supported_endpoint_types: ["image-generation", "openai"],
+        supported_aspect_ratios: ["1:1"]
+      }))
+    }
+  );
+  await gateway.listen();
+  const backupGateway = createFakeOpenAiServer([{ status: 200, body: { data: [{ b64_json: onePixelPngBase64 }] } }], {
+    data: [
+      {
+        id: "Backup Image Model",
+        supported_endpoint_types: ["image-generation"],
+        supported_aspect_ratios: ["1:1", "4:5"]
+      }
+    ]
+  });
+  await backupGateway.listen();
+  const config = [
+    {
+      id: "openai:gpt-image-2",
+      label: "GPT Image 2",
+      upstreamModel: "gpt-image-2",
+      apiFormat: "gpt-image",
+      channels: ["main"],
+      creditsPerImage: 7,
+      costCentsPerImage: 4
+    },
+    {
+      id: "xai:grok-imagine-image",
+      label: "Grok",
+      upstreamModel: "grok-imagine-image",
+      apiFormat: "grok-image",
+      channels: ["main"],
+      creditsPerImage: 3,
+      costCentsPerImage: 2
+    }
+  ];
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    ALLOW_BEARER_SESSION_AUTH: "false",
+    IMAGORA_STORE_PATH: relative(process.cwd(), join(dir, "store.json")),
+    DATA_STORE: "json",
+    STORAGE_PROVIDER: "inline",
+    MAILER_PROVIDER: "console",
+    RUNTIME_STATE_PROVIDER: "memory",
+    RATE_LIMIT_PROVIDER: "memory",
+    IMAGE_CHANNEL_HEALTH_PROVIDER: "memory",
+    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+    WORKER_POLL_INTERVAL_MS: "100",
+    QUEUE_PROVIDER: "inline",
+    IMAGE_PROVIDER_DEFAULT: "openai",
+    IMAGE_MODEL_DEFAULT: "xai:grok-imagine-image",
+    IMAGE_MODEL_DISCOVERY: "true",
+    IMAGE_MODEL_DISCOVERY_CHANNEL: "main",
+    OPENAI_MAX_RETRIES: "0",
+    OPENAI_TIMEOUT_MS: "3000",
+    IMAGE_CHANNELS: JSON.stringify([
+      { name: "main", baseUrl: "http://127.0.0.1:" + gateway.port + "/v1", apiKey: "fake-dynamic-secret" },
+      { name: "backup", baseUrl: "http://127.0.0.1:" + backupGateway.port + "/v1", apiKey: "fake-backup-secret" }
+    ]),
+    IMAGE_MODELS: JSON.stringify(config)
+  };
+  const api = spawn(process.execPath, ["dist/main.js"], {
+    cwd: join(process.cwd(), "apps/api"),
+    env,
+    stdio: "ignore",
+    windowsHide: true
+  });
+  let worker;
+  try {
+    const baseUrl = "http://127.0.0.1:" + port;
+    await waitForHealth(baseUrl);
+    await access(join(dir, "image-model-catalog.json"));
+    const catalog = await get(baseUrl, "/api/generation/models");
+    assert.equal(catalog.data.models.length, 7);
+    const { session } = await login(baseUrl, "demo@imagora.local", "Demo123!");
+    const before = await get(baseUrl, "/api/users/me/credits", session);
+    const tasks = [];
+    for (const model of catalog.data.models) {
+      const expected = model.id.includes("4k") ? 14 : model.id.startsWith("xai:") ? 3 : 7;
+      const input = {
+        clientRequestId: randomUUID(),
+        prompt: "A quiet coast with warm natural light",
+        style: "realistic",
+        aspectRatio: "1:1",
+        quality: "standard",
+        quantity: 1,
+        model: model.id,
+        channel: "main"
+      };
+      const quote = await post(baseUrl, "/api/generation/quote", input, session);
+      assert.equal(quote.data.creditCost, expected);
+      const created = await post(
+        baseUrl,
+        "/api/generation/tasks",
+        { ...input, modelSnapshot: { version: 1, model: { quantityMultiplier: 0 } } },
+        session
+      );
+      assert.equal(created.data.task.creditCost, expected);
+      assert.equal(created.data.task.modelSnapshot, undefined);
+      assertPublicGenerationTask(created.data.task);
+      tasks.push(created.data.task);
+    }
+    const backupCatalog = await get(baseUrl, "/api/generation/models?channel=backup");
+    assert.deepEqual(
+      backupCatalog.data.models.map((model) => model.label),
+      ["Backup Image Model"]
+    );
+    const defaultAgain = await get(baseUrl, "/api/generation/models");
+    assert.deepEqual(defaultAgain.data, catalog.data);
+    const backupInput = {
+      clientRequestId: randomUUID(),
+      prompt: "A calm coastal landscape",
+      aspectRatio: "4:5",
+      quality: "standard",
+      quantity: 1,
+      channel: "backup",
+      model: backupCatalog.data.models[0].id
+    };
+    for (const invalid of [
+      { ...backupInput, model: "openai:gpt-image-2" },
+      { ...backupInput, channel: "missing" },
+      { ...backupInput, channel: "main" }
+    ]) {
+      for (const path of ["/api/generation/quote", "/api/generation/tasks"]) {
+        const rejected = await fetch(baseUrl + path, {
+          method: "POST",
+          headers: { ...sessionHeaders(session), "Content-Type": "application/json" },
+          body: JSON.stringify(invalid)
+        });
+        assert.equal(rejected.status, 400);
+      }
+    }
+    const backupQuote = await post(baseUrl, "/api/generation/quote", backupInput, session);
+    assert.equal(backupQuote.data.creditCost, 9);
+    const backupCreated = await post(baseUrl, "/api/generation/tasks", backupInput, session);
+    assert.equal(backupCreated.data.task.channel, "backup");
+    assert.equal(backupCreated.data.task.style, "none");
+    assert.equal(backupCreated.data.task.aspectRatio, "4:5");
+    const duplicateBackup = await post(baseUrl, "/api/generation/tasks", backupInput, session);
+    assert.equal(duplicateBackup.data.task.id, backupCreated.data.task.id);
+    assertPublicGenerationTask(duplicateBackup.data.task);
+    tasks.push(backupCreated.data.task);
+    // Worker 启动时目录只含旧配置且价格不同；新型号仍必须使用创建任务时的快照。
+    worker = spawn(process.execPath, ["apps/worker/dist/main.js"], {
+      env: { ...env, IMAGE_MODELS: JSON.stringify(config.map((model) => ({ ...model, creditsPerImage: 99 }))) },
+      stdio: "ignore",
+      windowsHide: true
+    });
+    for (const task of tasks) {
+      const completed = await waitForTask(baseUrl, session, task.id);
+      assert.equal(completed.data.task.status, "SUCCEEDED", completed.data.task.failureMessage);
+      assert.equal(completed.data.task.creditCost, task.creditCost);
+      assert.equal(completed.data.task.modelSnapshot, undefined);
+      assert.equal(completed.data.task.channel, task.channel);
+      assert.equal(completed.data.images[0].generationMetadata.channel, task.channel);
+      assert.equal(completed.data.images[0].width, task.modelName.includes("4k") ? 4096 : 1);
+      const detail = await get(baseUrl, "/api/images/" + completed.data.images[0].id, session);
+      assertPublicGenerationTask(detail.data.task);
+      assert.deepEqual(detail.data.task, completed.data.task);
+      assert.equal(detail.data.image.generationMetadata.channel, task.channel);
+      if (task.channel === "backup") {
+        const metadata = detail.data.image.generationMetadata;
+        const reusedQuote = await post(
+          baseUrl,
+          "/api/generation/quote",
+          {
+            prompt: metadata.prompt,
+            style: metadata.style,
+            aspectRatio: metadata.aspectRatio,
+            quality: metadata.quality,
+            quantity: metadata.quantity,
+            model: metadata.modelName,
+            channel: metadata.channel
+          },
+          session
+        );
+        assert.equal(reusedQuote.data.creditCost, 9, "Backup-only models must remain reusable from image metadata");
+        const stream = await fetch(baseUrl + "/api/generation/tasks/" + task.id + "/events", {
+          headers: sessionHeaders(session),
+          signal: AbortSignal.timeout(2000)
+        });
+        assert.equal(stream.status, 200);
+        const event = (await stream.text()).split("\n").find((line) => line.startsWith("data: "));
+        assert.ok(event);
+        assertPublicGenerationTask(JSON.parse(event.slice(6)).task);
+      }
+    }
+    const listed = await get(baseUrl, "/api/generation/tasks?limit=20", session);
+    for (const task of listed.data.tasks) assertPublicGenerationTask(task);
+    const after = await get(baseUrl, "/api/users/me/credits", session);
+    assert.equal(before.data.account.balance - after.data.account.balance, 57);
+    assert.deepEqual(gateway.requests.map((request) => JSON.parse(request.body).model).sort(), [...modelNames].sort());
+    assert.equal(backupGateway.requests.length, 1);
+    const backupRequest = JSON.parse(backupGateway.requests[0].body);
+    assert.equal(backupRequest.model, "Backup Image Model");
+    assert.equal(backupRequest.size, "1024x1280");
+    assert.doesNotMatch(backupRequest.prompt, /Style:|Avoid:/);
+    const store = await new JsonStore(env.IMAGORA_STORE_PATH).read();
+    for (const task of tasks) {
+      const persisted = store.generationTasks.find((item) => item.id === task.id);
+      assert.equal(persisted.modelSnapshot.version, 1);
+      assert.doesNotMatch(JSON.stringify(persisted.modelSnapshot), /fake-dynamic-secret|apiKey/);
+    }
+    const wrongResolution = await post(
+      baseUrl,
+      "/api/generation/tasks",
+      {
+        clientRequestId: randomUUID(),
+        prompt: "A quiet coast with soft natural light",
+        style: "realistic",
+        aspectRatio: "1:1",
+        quality: "standard",
+        quantity: 1,
+        model: "openai:gpt-image-2-4k"
+      },
+      session
+    );
+    const failed = await waitForTask(baseUrl, session, wrongResolution.data.task.id);
+    assert.equal(failed.data.task.status, "FAILED");
+    assert.equal(failed.data.task.refundedCredits, 14);
+    assert.match(failed.data.task.failureMessage, /4K/);
+    const refunded = await get(baseUrl, "/api/users/me/credits", session);
+    assert.equal(refunded.data.account.balance, after.data.account.balance);
+    const forbidden = await fetch(baseUrl + "/api/admin/generation/models/refresh", {
+      method: "POST",
+      headers: { Origin: defaultWriteOrigin }
+    });
+    assert.equal(forbidden.status, 401);
+  } finally {
+    api.kill();
+    worker?.kill();
+    await gateway.close();
+    await backupGateway.close();
+    const target = resolve(dir);
+    assert.equal(dirname(target), resolve(tmpdir()));
+    assert.match(basename(target), /^imagora-api-discovery-/);
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
 test("api and worker route multiple selected models to their own image gateways", async () => {
   const dir = await mkdtemp(join(tmpdir(), "imagora-api-model-routing-"));
   const port = await reserveUnusedPort();
@@ -1815,14 +2089,20 @@ test("api and worker route multiple selected models to their own image gateways"
     const catalog = await catalogResponse.json();
     assert.deepEqual(
       catalog.data.models.map((model) => model.id),
-      ["openai:gpt-image-2", "xai:grok-imagine-image"]
+      ["openai:gpt-image-2"]
     );
-    assert.doesNotMatch(JSON.stringify(catalog.data), /fake-.*-key|127\.0\.0\.1|apiKey|channels|upstreamModel/);
+    assert.equal(catalog.data.channel, "gpt");
+    const backupCatalog = await get(baseUrl, "/api/generation/models?channel=grok");
+    assert.deepEqual(
+      backupCatalog.data.models.map((model) => model.id),
+      ["xai:grok-imagine-image"]
+    );
+    assert.doesNotMatch(JSON.stringify(catalog.data), /fake-.*-key|127\.0\.0\.1|apiKey|upstreamModel/);
     const { session } = await login(baseUrl, "demo@imagora.local", "Demo123!");
     const before = await get(baseUrl, "/api/users/me/credits", session);
     for (const choice of [
-      { id: "openai:gpt-image-2", credits: 7 },
-      { id: "xai:grok-imagine-image", credits: 3 }
+      { id: "openai:gpt-image-2", credits: 7, channel: "gpt" },
+      { id: "xai:grok-imagine-image", credits: 3, channel: "grok" }
     ]) {
       const input = {
         clientRequestId: randomUUID(),
@@ -1831,7 +2111,8 @@ test("api and worker route multiple selected models to their own image gateways"
         aspectRatio: "1:1",
         quality: "standard",
         quantity: 1,
-        model: choice.id
+        model: choice.id,
+        channel: choice.channel
       };
       const quote = await post(baseUrl, "/api/generation/quote", input, session);
       assert.equal(quote.data.creditCost, choice.credits);
@@ -1843,6 +2124,8 @@ test("api and worker route multiple selected models to their own image gateways"
       assert.equal(completed.data.task.modelName, choice.id);
       assert.equal(completed.data.images.length, 1);
       assert.equal(completed.data.images[0].generationMetadata.modelName, choice.id);
+      assert.equal(completed.data.task.channel, choice.channel);
+      assert.equal(completed.data.images[0].generationMetadata.channel, choice.channel);
     }
     const after = await get(baseUrl, "/api/users/me/credits", session);
     assert.equal(before.data.account.balance - after.data.account.balance, 10);
@@ -1991,97 +2274,199 @@ test("api and worker complete generation with openai provider flow", async () =>
   }
 });
 
-test("generation task status stays responsive while openai generation is still running", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "imagora-api-openai-running-"));
-  const port = await reserveUnusedPort();
-  const storePath = join(dir, "store.json");
-  const openAiServer = createFakeOpenAiServer([
-    {
-      delayMs: 2500,
-      status: 200,
-      body: {
-        id: "openai_req_slow_1",
-        data: [{ b64_json: onePixelPngBase64 }]
-      }
-    }
-  ]);
-  await openAiServer.listen();
-  const env = {
-    ...process.env,
-    NODE_ENV: "test",
-    API_HOST: "127.0.0.1",
-    API_PORT: String(port),
-    ALLOW_BEARER_SESSION_AUTH: "false",
-    IMAGORA_STORE_PATH: storePath,
-    EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
-    ORDER_PENDING_TTL_MINUTES: "30",
-    WORKER_POLL_INTERVAL_MS: "100",
-    QUEUE_PROVIDER: "inline",
-    IMAGE_PROVIDER_DEFAULT: "openai",
-    IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
-    OPENAI_API_KEY: "sk-test",
-    OPENAI_BASE_URL: `http://127.0.0.1:${openAiServer.port}`,
-    OPENAI_TIMEOUT_MS: "10000",
-    OPENAI_MAX_RETRIES: "0",
-    OPENAI_RETRY_BASE_MS: "10"
-  };
-  const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
-  const worker = spawn(process.execPath, ["apps/worker/dist/main.js"], { env, stdio: "ignore" });
-
-  try {
-    const baseUrl = `http://127.0.0.1:${port}`;
-    await waitForHealth(baseUrl);
-
-    const demo = await login(baseUrl, "demo@imagora.local", "Demo123!");
-    const created = await post(
-      baseUrl,
-      "/api/generation/tasks",
+for (const failsSecondImage of [false, true]) {
+  test(`generation task exposes real progress with ${failsSecondImage ? "failure" : "success"} on the second image`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "imagora-api-openai-running-"));
+    const port = await reserveUnusedPort();
+    const storePath = join(dir, "store.json");
+    const openAiServer = createFakeOpenAiServer([
       {
-        clientRequestId: randomUUID(),
-        prompt: "A realistic portrait photo with natural daylight",
-        style: "realistic",
-        aspectRatio: "1:1",
-        quantity: 1,
-        quality: "standard"
+        delayMs: 2500,
+        status: 200,
+        body: {
+          id: "openai_req_slow_1",
+          data: [{ b64_json: onePixelPngBase64 }]
+        }
       },
-      demo.session
-    );
+      {
+        delayMs: 2500,
+        status: failsSecondImage ? 500 : 200,
+        body: { id: "openai_req_slow_2", data: [{ b64_json: onePixelPngBase64 }] }
+      }
+    ]);
+    await openAiServer.listen();
+    const env = {
+      ...process.env,
+      NODE_ENV: "test",
+      API_HOST: "127.0.0.1",
+      API_PORT: String(port),
+      ALLOW_BEARER_SESSION_AUTH: "false",
+      IMAGORA_STORE_PATH: storePath,
+      EXPOSE_CAPTCHA_ANSWER_FOR_TESTS: "true",
+      ORDER_PENDING_TTL_MINUTES: "30",
+      WORKER_POLL_INTERVAL_MS: "100",
+      QUEUE_PROVIDER: "inline",
+      IMAGE_PROVIDER_DEFAULT: "openai",
+      IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
+      OPENAI_API_KEY: "sk-test",
+      OPENAI_BASE_URL: `http://127.0.0.1:${openAiServer.port}`,
+      OPENAI_TIMEOUT_MS: "10000",
+      OPENAI_MAX_RETRIES: "0",
+      OPENAI_RETRY_BASE_MS: "10"
+    };
+    const api = spawn(process.execPath, ["apps/api/dist/main.js"], { env, stdio: "ignore" });
+    const worker = spawn(process.execPath, ["apps/worker/dist/main.js"], { env, stdio: "ignore" });
 
-    await waitForCondition(() => openAiServer.requests.length === 1, 3000, 50, "Worker did not reach OpenAI provider");
+    try {
+      const baseUrl = `http://127.0.0.1:${port}`;
+      await waitForHealth(baseUrl);
 
-    const detailStartedAt = Date.now();
-    const detailSnapshot = await fetchJsonWithTimeout(
-      `${baseUrl}/api/generation/tasks/${created.data.task.id}`,
-      { headers: sessionHeaders(demo.session) },
-      1500
-    );
-    const detailElapsedMs = Date.now() - detailStartedAt;
-    assert.equal(detailSnapshot.response.status, 200);
-    assert.ok(detailElapsedMs < 1500, `Task detail request took ${detailElapsedMs}ms`);
-    assert.equal(detailSnapshot.payload.data.task.status, "RUNNING");
+      const demo = await login(baseUrl, "demo@imagora.local", "Demo123!");
+      const created = await post(
+        baseUrl,
+        "/api/generation/tasks",
+        {
+          clientRequestId: randomUUID(),
+          prompt: "A realistic portrait photo with natural daylight",
+          style: "realistic",
+          aspectRatio: "1:1",
+          quantity: 2,
+          quality: "standard"
+        },
+        demo.session
+      );
 
-    const listStartedAt = Date.now();
-    const listSnapshot = await fetchJsonWithTimeout(
-      `${baseUrl}/api/generation/tasks?limit=5`,
-      { headers: sessionHeaders(demo.session) },
-      1500
-    );
-    const listElapsedMs = Date.now() - listStartedAt;
-    assert.equal(listSnapshot.response.status, 200);
-    assert.ok(listElapsedMs < 1500, `Task list request took ${listElapsedMs}ms`);
-    assert.equal(listSnapshot.payload.data.tasks[0].id, created.data.task.id);
-    assert.equal(listSnapshot.payload.data.tasks[0].status, "RUNNING");
+      await waitForCondition(
+        () => openAiServer.requests.length === 1,
+        3000,
+        50,
+        "Worker did not reach OpenAI provider"
+      );
 
-    const completed = await waitForTask(baseUrl, demo.session, created.data.task.id);
-    assert.equal(completed.data.task.status, "SUCCEEDED");
-    assert.equal(completed.data.images.length, 1);
-  } finally {
-    api.kill();
-    worker.kill();
-    await openAiServer.close();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+      const detailStartedAt = Date.now();
+      const detailSnapshot = await fetchJsonWithTimeout(
+        `${baseUrl}/api/generation/tasks/${created.data.task.id}`,
+        { headers: sessionHeaders(demo.session) },
+        1500
+      );
+      const detailElapsedMs = Date.now() - detailStartedAt;
+      assert.equal(detailSnapshot.response.status, 200);
+      assert.ok(detailElapsedMs < 1500, `Task detail request took ${detailElapsedMs}ms`);
+      assert.equal(detailSnapshot.payload.data.task.status, "RUNNING");
+      assert.equal(detailSnapshot.payload.data.task.progress.stage, "GENERATING");
+      assert.equal(detailSnapshot.payload.data.task.progress.generatedImages, 0);
+      assert.deepEqual(detailSnapshot.payload.data.task.progress.imageSteps, [1, 0]);
+      const eventsUrl = baseUrl + "/api/generation/tasks/" + created.data.task.id + "/events";
+      const unauthorized = await fetch(eventsUrl);
+      assert.equal(unauthorized.status, 401);
+      const admin = await login(baseUrl, "admin@imagora.local", "Admin123!");
+      const foreign = await fetch(eventsUrl, { headers: sessionHeaders(admin.session) });
+      assert.equal(foreign.status, 404);
+      const liveResponse = await fetch(eventsUrl, {
+        headers: sessionHeaders(demo.session),
+        signal: AbortSignal.timeout(15_000)
+      });
+      assert.equal(liveResponse.status, 200);
+      assert.ok(liveResponse.headers.get("content-type").includes("text/event-stream"));
+      const liveSnapshots = [];
+      const streamFinished = (async () => {
+        let buffer = "";
+        const decoder = new TextDecoder();
+        for await (const chunk of liveResponse.body) {
+          buffer += decoder.decode(chunk, { stream: true });
+          let boundary;
+          while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+            const event = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const data = event.split("\n").find((line) => line.startsWith("data: "));
+            if (data) {
+              const payload = JSON.parse(data.slice(6));
+              if (payload.task) {
+                assertPublicGenerationTask(payload.task);
+                liveSnapshots.push(payload);
+              }
+            }
+          }
+        }
+      })();
+
+      const listStartedAt = Date.now();
+      const listSnapshot = await fetchJsonWithTimeout(
+        `${baseUrl}/api/generation/tasks?limit=5`,
+        { headers: sessionHeaders(demo.session) },
+        1500
+      );
+      const listElapsedMs = Date.now() - listStartedAt;
+      assert.equal(listSnapshot.response.status, 200);
+      assert.ok(listElapsedMs < 1500, `Task list request took ${listElapsedMs}ms`);
+      assert.equal(listSnapshot.payload.data.tasks[0].id, created.data.task.id);
+      assert.equal(listSnapshot.payload.data.tasks[0].status, "RUNNING");
+
+      await waitForCondition(
+        () => openAiServer.requests.length === 2,
+        5000,
+        50,
+        "Worker did not request the second image"
+      );
+      const partial = await get(baseUrl, `/api/generation/tasks/${created.data.task.id}`, demo.session);
+      assert.equal(partial.data.task.status, "RUNNING");
+      assert.equal(partial.data.task.progress.generatedImages, 1);
+      assert.deepEqual(partial.data.task.progress.imageSteps, [2, 1]);
+      assert.equal(partial.data.task.progress.savedImages, 0);
+      assert.equal(partial.data.images.length, 0);
+      const persisted = await readStore(storePath);
+      assert.equal(
+        persisted.generationTasks.find((task) => task.id === created.data.task.id).progress.generatedImages,
+        1
+      );
+      const completed = await waitForTask(baseUrl, demo.session, created.data.task.id);
+      await streamFinished;
+      assert.ok(liveSnapshots.some(({ task }) => task.progress.imageSteps[0] === 1));
+      assert.ok(liveSnapshots.some(({ task }) => task.progress.generatedImages === 1 && task.status === "RUNNING"));
+      assert.equal(liveSnapshots.at(-1).task.status, completed.data.task.status);
+      const events = liveSnapshots.at(-1).task.progress.events;
+      assert.ok(events.some((event) => event.stage === "RECEIVING"));
+      assert.ok(events.every((event, index) => index === 0 || event.sequence > events[index - 1].sequence));
+      const restoredStream = await fetch(eventsUrl, {
+        headers: sessionHeaders(demo.session),
+        signal: AbortSignal.timeout(2000)
+      });
+      assert.match(await restoredStream.text(), new RegExp(completed.data.task.status));
+      if (failsSecondImage) {
+        assert.equal(completed.data.task.status, "FAILED");
+        assert.equal(completed.data.images.length, 0);
+        assert.equal(completed.data.task.progress.generatedImages, 1);
+        assert.equal(completed.data.task.progress.savedImages, 0);
+        assert.equal(completed.data.task.refundedCredits, completed.data.task.creditCost);
+        const retried = await post(baseUrl, `/api/generation/tasks/${created.data.task.id}/retry`, {}, demo.session);
+        assert.equal(retried.data.task.progress.stage, "QUEUED");
+        assert.equal(retried.data.task.progress.generatedImages, 0);
+        assert.deepEqual(retried.data.task.progress.imageSteps, []);
+        assert.deepEqual(retried.data.task.progress.events, []);
+        assertPublicGenerationTask(retried.data.task);
+      } else {
+        assert.equal(completed.data.task.status, "SUCCEEDED");
+        assert.equal(completed.data.images.length, 2);
+        assert.equal(completed.data.task.progress.stage, "COMPLETED");
+        assert.equal(completed.data.task.progress.generatedImages, 2);
+        assert.equal(completed.data.task.progress.reviewedImages, 2);
+        assert.equal(completed.data.task.progress.savedImages, 2);
+        assert.deepEqual(completed.data.task.progress.imageSteps, [5, 5]);
+        for (const stage of ["GENERATING", "RECEIVING", "REVIEWING", "SAVING", "COMPLETED"]) {
+          assert.ok(
+            events.some((event) => event.stage === stage),
+            "missing step: " + stage
+          );
+        }
+      }
+    } finally {
+      api.kill();
+      worker.kill();
+      await openAiServer.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("api and worker share the same relative json store across different process cwd values", async () => {
   const port = await reserveUnusedPort();
@@ -2686,6 +3071,43 @@ async function fetchJsonWithTimeout(url, init, timeoutMs) {
   }
 }
 
+function assertPublicGenerationTask(task) {
+  const allowed = new Set([
+    "id",
+    "userId",
+    "clientRequestId",
+    "referenceImageId",
+    "prompt",
+    "negativePrompt",
+    "style",
+    "aspectRatio",
+    "width",
+    "height",
+    "quantity",
+    "quality",
+    "modelProvider",
+    "modelName",
+    "channel",
+    "status",
+    "progress",
+    "creditCost",
+    "refundedCredits",
+    "failureCode",
+    "failureMessage",
+    "startedAt",
+    "completedAt",
+    "createdAt",
+    "updatedAt"
+  ]);
+  assert.ok(task);
+  for (const key of Object.keys(task)) assert.ok(allowed.has(key), "Unexpected public task field: " + key);
+  assert.equal(typeof task.refundedCredits, "number");
+  assert.doesNotMatch(
+    JSON.stringify(task),
+    /modelSnapshot|providerCostCents|baseUrl|costCentsPerImage|quantityMultiplier/
+  );
+}
+
 function sessionHeaders(session) {
   return {
     Origin: defaultWriteOrigin,
@@ -2940,10 +3362,16 @@ async function postStripeWebhook(baseUrl, secret, payload) {
   });
 }
 
-function createFakeOpenAiServer(responses) {
+function createFakeOpenAiServer(responses, modelDirectory) {
   const requests = [];
   let port = 0;
   const server = createHttpServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.statusCode = modelDirectory ? 200 : 404;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(modelDirectory ?? {}));
+      return;
+    }
     const next = responses.shift();
     assert.ok(next, "Unexpected OpenAI request");
     const chunks = [];
@@ -2962,7 +3390,11 @@ function createFakeOpenAiServer(responses) {
       }
       response.statusCode = next.status;
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify(next.body));
+      response.end(
+        JSON.stringify(
+          typeof next.body === "function" ? next.body(JSON.parse(Buffer.concat(chunks).toString("utf8"))) : next.body
+        )
+      );
     });
   });
 

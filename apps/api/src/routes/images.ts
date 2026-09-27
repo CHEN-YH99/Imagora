@@ -17,6 +17,7 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
     resolveInlineDataUrl,
     storage,
     store,
+    taskWithRefund,
     withFavorite
   } = context;
 
@@ -55,8 +56,11 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
     const { user, data } = await requireAuth(request);
     const { imageId } = imageParamSchema.parse(request.params);
     const image = mustFindOwnImage(data, user.id, imageId);
-    const task = data.generationTasks.find((item) => item.id === image.taskId);
-    return envelope(request, { image: withFavorite(data, user.id, image), task });
+    const task = data.generationTasks.find((item) => item.id === image.taskId && item.userId === user.id);
+    return envelope(request, {
+      image: withFavorite(data, user.id, image),
+      ...(task ? { task: taskWithRefund(data, task) } : {})
+    });
   });
 
   app.post("/api/images/:imageId/preview-url", async (request) => {

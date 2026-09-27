@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { maxPromptLength, maxQuantity } from "@imagora/shared";
+import { maxPromptLength, maxQuantity, aspectRatios } from "@imagora/shared";
 import { z } from "zod";
 import { envNumber } from "./runtime.js";
 
@@ -141,11 +141,16 @@ export const generationInputSchema = z.object({
   referenceImageId: z.string().min(1).optional(),
   prompt: z.string().min(1).max(maxPromptLength),
   negativePrompt: z.string().max(800).optional(),
-  style: z.enum(["realistic", "illustration", "anime", "product_photography", "poster"]),
-  aspectRatio: z.enum(["1:1", "3:4", "4:3", "9:16", "16:9"]),
+  style: z.enum(["none", "realistic", "illustration", "anime", "product_photography", "poster"]).default("none"),
+  aspectRatio: z.enum(aspectRatios),
   quantity: z.number().int().min(1).max(maxQuantity),
   quality: z.enum(["draft", "standard", "high"]),
-  model: z.string().trim().min(1).max(80).optional()
+  model: z.string().trim().min(1).max(80).optional(),
+  channel: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9][a-z0-9._-]{0,63}$/i)
+    .optional()
 });
 
 export const referenceUploadSchema = z.object({

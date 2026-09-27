@@ -1,3 +1,5 @@
+import { getImageModelCatalog } from "@imagora/ai-providers";
+import { imageModelDiscovery } from "../image-model-discovery.js";
 import type { Plan, SafetyAppeal, SafetyRule } from "@imagora/shared";
 import type { ApiRouteApp, ApiRouteContext } from "./types.js";
 
@@ -62,6 +64,31 @@ export function registerAdminRoutes(app: ApiRouteApp, context: ApiRouteContext):
     withSignedImageThumbnail,
     withoutPassword
   } = context;
+
+  app.get("/api/admin/generation/models", async (request) => {
+    await requireAdmin(request);
+    return envelope(request, { ...getImageModelCatalog(), discovery: imageModelDiscovery.status() });
+  });
+
+  app.post("/api/admin/generation/models/refresh", async (request) => {
+    const { user: admin } = await requireAdmin(request);
+    const discovery = await imageModelDiscovery.refresh();
+    const catalog = getImageModelCatalog();
+    await store.update((data) => {
+      audit(
+        data,
+        admin.id,
+        "image-models.refresh",
+        "IMAGE_MODEL_CATALOG",
+        "primary",
+        null,
+        null,
+        { count: catalog.models.length, updatedAt: discovery.updatedAt },
+        request
+      );
+    });
+    return envelope(request, { ...catalog, discovery });
+  });
 
   app.get("/api/admin/dashboard", async (request) => {
     await requireAdmin(request);

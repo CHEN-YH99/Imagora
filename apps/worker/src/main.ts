@@ -18,6 +18,8 @@ import { createObjectStorage } from "@imagora/storage";
 import {
   DEFAULT_PENDING_TASK_TIMEOUT_MS,
   DEFAULT_RUNNING_TASK_TIMEOUT_MS,
+  createGenerationProgress,
+  advanceGenerationProgress,
   expireCredits,
   generationMetadataFromTask,
   maxQuantity,
@@ -29,6 +31,7 @@ import {
 } from "@imagora/shared";
 import { createWorkerMaintenanceGate } from "./maintenance-runtime.js";
 import { createWorkerShutdownController } from "./shutdown-runtime.js";
+import { createGenerationProgressReporter, type ReportGenerationProgress } from "./generation-progress-runtime.js";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -202,6 +205,7 @@ async function claimTask(selectTask: (data: StoreData) => GenerationTask | undef
     }
     const now = new Date().toISOString();
     task.status = "RUNNING";
+    task.progress = createGenerationProgress("GENERATING", now);
     task.startedAt = now;
     task.completedAt = null;
     task.failureCode = null;
@@ -218,11 +222,22 @@ async function claimTask(selectTask: (data: StoreData) => GenerationTask | undef
 }
 
 async function processClaimedTask(claimedTask: ClaimedTask): Promise<void> {
-  const outcome = await executeTask(claimedTask);
+  const reporter = createGenerationProgressReporter(store, claimedTask.task, (error) => {
+    logger.warn({ err: error, taskId: claimedTask.task.id }, "generation progress persistence failed");
+  });
+  let outcome: TaskExecutionResult;
+  try {
+    outcome = await executeTask(claimedTask, reporter.report);
+  } finally {
+    await reporter.close();
+  }
   await persistTaskOutcome(claimedTask.task, outcome);
 }
 
-async function executeTask({ task, referenceImageUrl }: ClaimedTask): Promise<TaskExecutionResult> {
+async function executeTask(
+  { task, referenceImageUrl }: ClaimedTask,
+  reportProgress: ReportGenerationProgress
+): Promise<TaskExecutionResult> {
   try {
     const result = await provider.generateImage({
       taskId: task.id,
@@ -235,11 +250,20 @@ async function executeTask({ task, referenceImageUrl }: ClaimedTask): Promise<Ta
       quantity: task.quantity,
       quality: task.quality,
       model: task.modelName || undefined,
-      referenceImageUrl
+      modelSnapshot: task.modelSnapshot ?? undefined,
+      referenceImageUrl,
+      onStage: ({ stage, imageIndex }) =>
+        reportProgress({ stage }, { index: imageIndex, step: stage === "GENERATING" ? 1 : 2 }),
+      onProgress: ({ completedImages }) => reportProgress({ generatedImages: completedImages })
     });
     logger.info({ taskId: task.id, providerRequestId: result.providerRequestId }, "provider request completed");
 
-    const blockedOrReviewImage = await firstBlockedOrReviewImage(result.images);
+    reportProgress({ stage: "REVIEWING", generatedImages: result.images.length });
+    const blockedOrReviewImage = await firstBlockedOrReviewImage(
+      result.images,
+      (reviewedImages) => reportProgress({ reviewedImages }),
+      (index) => reportProgress({ stage: "REVIEWING" }, { index, step: 3 })
+    );
     if (blockedOrReviewImage) {
       return {
         kind: "blocked",
@@ -251,7 +275,8 @@ async function executeTask({ task, referenceImageUrl }: ClaimedTask): Promise<Ta
       };
     }
 
-    const createdImages = await createImages(task, result.images);
+    reportProgress({ stage: "SAVING" });
+    const createdImages = await createImages(task, result.images, reportProgress);
     if (createdImages.length === 0) {
       return {
         kind: "failed",
@@ -264,7 +289,8 @@ async function executeTask({ task, referenceImageUrl }: ClaimedTask): Promise<Ta
       quality: task.quality,
       quantity: createdImages.length,
       aspectRatio: task.aspectRatio,
-      model: task.modelName || undefined
+      model: task.modelName || undefined,
+      modelSnapshot: task.modelSnapshot ?? undefined
     });
     // 多渠道下各中转站定价不同，优先用 provider 回报的实际渠道成本；
     // mock 等不回报成本的 provider 仍回落到报价估算。
@@ -322,6 +348,17 @@ async function persistTaskOutcome(taskSnapshot: GenerationTask, outcome: TaskExe
         task.status = "SUCCEEDED";
         task.completedAt = new Date().toISOString();
         task.updatedAt = task.completedAt;
+        task.progress = advanceGenerationProgress(
+          task.progress ?? createGenerationProgress(),
+          {
+            stage: "COMPLETED",
+            imageSteps: outcome.createdImages.map(() => 5),
+            generatedImages: outcome.createdImages.length,
+            reviewedImages: outcome.createdImages.length,
+            savedImages: outcome.createdImages.length
+          },
+          task.completedAt
+        );
         return { finalized: true as const, status: task.status };
       }
 
@@ -365,14 +402,20 @@ async function persistTaskOutcome(taskSnapshot: GenerationTask, outcome: TaskExe
   }
 }
 
-async function firstBlockedOrReviewImage(images: Array<{ index: number; bytes: string; mimeType: string }>): Promise<{
+async function firstBlockedOrReviewImage(
+  images: Array<{ index: number; bytes: string; mimeType: string }>,
+  onReviewed: (reviewedImages: number) => void | Promise<void>,
+  onReviewing: (index: number) => void | Promise<void>
+): Promise<{
   index: number;
   status: "BLOCKED" | "REVIEW_REQUIRED";
   reasonCode: string;
   reasonMessage: string;
   provider: string;
 } | null> {
+  let reviewedImages = 0;
   for (const image of images) {
+    await onReviewing(image.index);
     const safetyResult = await safety.checkImage({ mimeType: image.mimeType, bytes: image.bytes });
     if (safetyResult.status === "BLOCKED" || safetyResult.status === "REVIEW_REQUIRED") {
       return {
@@ -383,18 +426,23 @@ async function firstBlockedOrReviewImage(images: Array<{ index: number; bytes: s
         provider: safetyResult.provider
       };
     }
+    reviewedImages += 1;
+    await onReviewed(reviewedImages);
   }
   return null;
 }
 
 async function createImages(
   task: GenerationTask,
-  images: Array<{ index: number; bytes: string; mimeType: string }>
+  images: Array<{ index: number; bytes: string; mimeType: string }>,
+  reportProgress: ReportGenerationProgress
 ): Promise<GeneratedImage[]> {
   const createdImages: GeneratedImage[] = [];
   try {
     for (const image of images) {
+      reportProgress({ stage: "SAVING" }, { index: image.index, step: 4 });
       createdImages.push(await createImage(task, image.index, image.bytes, image.mimeType));
+      reportProgress({ savedImages: createdImages.length });
     }
     return createdImages;
   } catch (error) {
@@ -453,6 +501,7 @@ function failTask(
 ): void {
   const now = new Date().toISOString();
   task.status = status;
+  if (task.progress) task.progress = { ...task.progress, savedImages: 0, updatedAt: now };
   task.failureCode = code;
   task.failureMessage = message;
   task.completedAt = now;
@@ -537,6 +586,13 @@ async function createImage(
 ): Promise<GeneratedImage> {
   const id = randomUUID();
   const now = new Date().toISOString();
+  const metadata = isBase64Mime(mimeType)
+    ? await sharp(Buffer.from(body, "base64")).metadata()
+    : { width: task.width, height: task.height };
+  if (!metadata.width || !metadata.height) throw new Error("图片尺寸无法识别，积分已返还。");
+  if (task.modelSnapshot?.model.resolution === "4k" && Math.max(metadata.width, metadata.height) < 4096) {
+    throw new Error("4K 模型返回的图片未达到 4K 分辨率，积分已返还。");
+  }
   const extension = extensionForMimeType(mimeType);
   const imageKey = `generated/${task.userId}/${task.id}/${id}.${extension}`;
   const stored = await storage.putObject({
@@ -570,8 +626,8 @@ async function createImage(
     thumbnailKey,
     thumbnailUrl,
     publicUrl: stored.publicUrl,
-    width: task.width,
-    height: task.height,
+    width: metadata.width,
+    height: metadata.height,
     fileSize: stored.fileSize,
     mimeType,
     safetyStatus: "PASSED",

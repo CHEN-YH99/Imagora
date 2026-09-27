@@ -1,12 +1,18 @@
-import { getImageModelCatalog } from "@imagora/ai-providers";
-import type { GenerationTask, ReferenceImage } from "@imagora/shared";
+import { createImageGenerationSnapshot, quoteImageGeneration } from "@imagora/ai-providers";
+import { imageModelDiscovery } from "../image-model-discovery.js";
+import { z } from "zod";
+import { Readable } from "node:stream";
+import { sessionToken } from "../auth-runtime.js";
+import { createGenerationEventsRuntime } from "../generation-events-runtime.js";
+import { createGenerationProgress, type GenerationTask, type ReferenceImage } from "@imagora/shared";
 import type { ApiRouteApp, ApiRouteContext } from "./types.js";
 
 export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteContext): void {
+  const generationEvents = createGenerationEventsRuntime(context.store);
+  app.addHook("preClose", async () => generationEvents.close());
   const {
     AppError,
     addDays,
-    aspectRatioDimensions,
     assertEmailVerified,
     assertFeatureEnabled,
     descCreated,
@@ -35,16 +41,39 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     withoutImagePublicUrl
   } = context;
 
+  function resolveRequestedGeneration(input: z.infer<typeof generationInputSchema>) {
+    try {
+      if (input.channel) {
+        const modelSnapshot = imageModelDiscovery.snapshot(input.channel, input.model);
+        return {
+          modelSnapshot,
+          estimated: quoteImageGeneration({ ...input, model: modelSnapshot.model.modelId, modelSnapshot })
+        };
+      }
+      const { model } = resolveGenerationProviderSelection(input.model);
+      quote({ ...input, model });
+      const modelSnapshot = createImageGenerationSnapshot(model);
+      return { modelSnapshot, estimated: quoteImageGeneration({ ...input, model, modelSnapshot }) };
+    } catch (error) {
+      throw new AppError("VALIDATION_ERROR", error instanceof Error ? error.message : "模型或线路不可用。", 400);
+    }
+  }
+
   app.get("/api/generation/models", async (request, reply) => {
     reply.header("Cache-Control", "no-store");
-    return envelope(request, getImageModelCatalog());
+    const { channel } = z.object({ channel: z.string().trim().min(1).max(64).optional() }).parse(request.query);
+    try {
+      return envelope(request, imageModelDiscovery.catalog(channel));
+    } catch (error) {
+      throw new AppError("VALIDATION_ERROR", error instanceof Error ? error.message : "线路不可用。", 400);
+    }
   });
 
   app.post("/api/generation/quote", async (request) => {
     assertFeatureEnabled("generation");
     await requireAuth(request);
     const input = generationInputSchema.parse(request.body);
-    const estimatedCost = quote(input);
+    const estimatedCost = input.channel ? resolveRequestedGeneration(input).estimated.creditCost : quote(input);
     return envelope(request, { creditCost: estimatedCost, balanceRequired: estimatedCost });
   });
 
@@ -53,10 +82,10 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     const { user } = await requireAuth(request);
     assertEmailVerified(user);
     const input = generationInputSchema.parse(request.body);
-    const { providerMetadata: resolvedProviderMetadata, model: resolvedModel } = resolveGenerationProviderSelection(
-      input.model
-    );
-    const cost = quote({ ...input, model: resolvedModel });
+    const { modelSnapshot, estimated } = resolveRequestedGeneration(input);
+    const resolvedModel = modelSnapshot.model.modelId;
+    const resolvedProviderMetadata = { name: modelSnapshot.model.provider };
+    const cost = estimated.creditCost;
     const result = await store.update(async (data) => {
       const duplicate = data.generationTasks.find(
         (task) => task.userId === user.id && task.clientRequestId === input.clientRequestId
@@ -107,7 +136,7 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
         });
       }
       const now = new Date().toISOString();
-      const dimension = aspectRatioDimensions[input.aspectRatio];
+      const dimension = estimated;
       const task: GenerationTask = {
         id: randomUUID(),
         userId: user.id,
@@ -123,7 +152,9 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
         quality: input.quality,
         modelProvider: resolvedProviderMetadata.name,
         modelName: resolvedModel,
+        modelSnapshot,
         status: "PENDING",
+        progress: createGenerationProgress("QUEUED", now),
         creditCost: cost,
         providerCostCents: 0,
         failureCode: null,
@@ -270,6 +301,50 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     return envelope(request, { task: taskWithRefund(data, task), images });
   });
 
+  app.get("/api/generation/tasks/:taskId/events", async (request, reply) => {
+    const { taskId } = idParamSchema.parse(request.params);
+    const subscription = generationEvents.subscribe(sessionToken(request), taskId);
+    const close = () => subscription.close();
+    request.raw.socket.setTimeout(0);
+    reply.raw.once("close", close);
+    try {
+      // 首个定向快照同时校验会话及任务归属；鉴权失败仍返回正常 HTTP 错误。
+      await subscription.ready;
+    } catch (error) {
+      close();
+      reply.raw.off("close", close);
+      throw error;
+    }
+    reply.header("Content-Type", "text/event-stream; charset=utf-8");
+    reply.header("Cache-Control", "no-cache, no-transform");
+    reply.header("X-Accel-Buffering", "no");
+    const stream = Readable.from(
+      (async function* () {
+        try {
+          for await (const update of subscription.events) {
+            if (update === null) {
+              yield "event: heartbeat\ndata: {}\n\n";
+              continue;
+            }
+            const { task } = update;
+            const version = [task.updatedAt, task.progress?.sequence ?? 0, task.status].join(":");
+            const images = update.images.map(withoutImagePublicUrl);
+            yield `id: ${version}\ndata: ${JSON.stringify({ task: taskWithRefund(update, task), images })}\n\n`;
+          }
+        } catch (error) {
+          if (!reply.raw.destroyed) {
+            request.log.warn({ err: error, taskId }, "generation event stream closed");
+            yield "event: unavailable\ndata: {}\n\n";
+          }
+        } finally {
+          close();
+          reply.raw.off("close", close);
+        }
+      })()
+    );
+    return reply.send(stream);
+  });
+
   app.post("/api/generation/tasks/:taskId/retry", async (request, reply) => {
     const { user } = await requireAuth(request);
     const { taskId } = idParamSchema.parse(request.params);
@@ -284,6 +359,8 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
         id: randomUUID(),
         clientRequestId: `retry:${previous.id}:${now}`,
         status: "PENDING",
+        progress: createGenerationProgress("QUEUED", now),
+        providerCostCents: 0,
         failureCode: null,
         failureMessage: null,
         startedAt: null,
@@ -305,7 +382,7 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
         `task-spend:${task.id}`,
         "Retry image generation task"
       );
-      return { task, balanceAfter: mustFindCreditAccount(data, user.id).balance };
+      return { task: taskWithRefund(data, task), balanceAfter: mustFindCreditAccount(data, user.id).balance };
     });
     await enqueueGenerationTask(result.task.id, user.id, result.task.createdAt);
     reply.status(201);
