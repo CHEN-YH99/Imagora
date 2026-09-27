@@ -47,6 +47,7 @@ services:
     environment:
       API_HOST: 0.0.0.0
       API_PORT: 4100
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       WEB_ORIGIN: ${WEB_ORIGIN:?Set WEB_ORIGIN to the public web origin}
       DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
       REDIS_URL: redis://redis:6379

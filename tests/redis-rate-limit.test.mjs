@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -143,6 +144,117 @@ test("redis rate limiter shares counters across api instances", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("proxy trust controls whether forwarded addresses can change rate-limit buckets", async (t) => {
+  const cases = [
+    { name: "unset ignores forged forwarding headers", trustProxy: undefined, statuses: [200, 429, 429] },
+    { name: "false ignores forged forwarding headers", trustProxy: "false", statuses: [200, 429, 429] },
+    { name: "zero ignores forged forwarding headers", trustProxy: "0", statuses: [200, 429, 429] },
+    { name: "untrusted peer cannot forward client IPs", trustProxy: "192.0.2.0/24", statuses: [200, 429, 429] },
+    {
+      name: "trusted proxy separates client IPs and preserves each limit",
+      trustProxy: "192.0.2.0/24, 127.0.0.0/8",
+      statuses: [200, 200, 429]
+    },
+    {
+      name: "trusted proxy stops at the nearest untrusted hop",
+      trustProxy: "127.0.0.0/8",
+      forwardedAddresses: ["203.0.113.1, 198.51.100.10", "203.0.113.2, 198.51.100.10"],
+      statuses: [200, 429]
+    }
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, { timeout: 15_000 }, async (t) => {
+      const dir = await mkdtemp(join(tmpdir(), "imagora-proxy-limit-"));
+      const port = await reserveUnusedPort();
+      const api = spawn(process.execPath, ["apps/api/dist/main.js"], {
+        env: proxyTestEnv(dir, port, scenario.trustProxy),
+        stdio: "ignore"
+      });
+      t.after(async () => {
+        await stopApi(api);
+        await rm(dir, { recursive: true, force: true });
+      });
+
+      const baseUrl = `http://127.0.0.1:${port}`;
+      await waitForHealth(baseUrl);
+      const addresses = scenario.forwardedAddresses ?? ["198.51.100.10", "198.51.100.11", "198.51.100.10"];
+      for (const [index, forwardedFor] of addresses.entries()) {
+        const response = await fetch(`${baseUrl}/api/auth/captcha`, {
+          headers: { "X-Forwarded-For": forwardedFor }
+        });
+        const payload = await response.json();
+        assert.equal(response.status, scenario.statuses[index], JSON.stringify(payload));
+        if (response.status === 429) {
+          assert.equal(payload.error.code, "RATE_LIMITED");
+        } else {
+          assert.ok(payload.data.captchaId);
+        }
+      }
+    });
+  }
+});
+
+test("numeric proxy hop counts fail startup with a migration message", { timeout: 15_000 }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "imagora-proxy-hop-"));
+  const port = await reserveUnusedPort();
+  const api = spawn(process.execPath, ["apps/api/dist/main.js"], {
+    env: proxyTestEnv(dir, port, "1"),
+    stdio: ["ignore", "ignore", "pipe"]
+  });
+  let stderr = "";
+  api.stderr.setEncoding("utf8");
+  api.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  t.after(async () => {
+    await stopApi(api);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const [code] = await once(api, "close");
+  assert.equal(code, 1, stderr);
+  assert.match(
+    stderr,
+    /TRUST_PROXY hop counts are no longer supported; configure trusted proxy IP\/CIDR addresses or false/
+  );
+});
+
+function proxyTestEnv(dir, port, trustProxy) {
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    API_HOST: "127.0.0.1",
+    API_PORT: String(port),
+    DATA_STORE: "json",
+    IMAGORA_STORE_PATH: join(dir, "store.json"),
+    QUEUE_PROVIDER: "inline",
+    MAILER_PROVIDER: "console",
+    ALERT_WEBHOOK_URL: "",
+    ALERT_EMAIL_TO: "",
+    PAYMENT_PROVIDER: "mock",
+    STORAGE_PROVIDER: "inline",
+    CAPTCHA_PROVIDER: "builtin",
+    RATE_LIMIT_PROVIDER: "memory",
+    RATE_LIMIT_CAPTCHA_MAX: "1",
+    RATE_LIMIT_WINDOW_MS: "60000"
+  };
+  if (trustProxy === undefined) {
+    delete env.TRUST_PROXY;
+  } else {
+    env.TRUST_PROXY = trustProxy;
+  }
+  return env;
+}
+
+async function stopApi(api) {
+  if (api.exitCode === null && api.signalCode === null) {
+    const closed = once(api, "close");
+    api.kill();
+    await closed;
+  }
+}
 
 function reserveUnusedPort() {
   const server = createServer();
