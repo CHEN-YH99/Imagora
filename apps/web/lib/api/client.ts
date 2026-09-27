@@ -12,9 +12,13 @@ export async function apiFetch<T>(
     method?: "GET" | "POST" | "PATCH" | "DELETE";
     body?: unknown;
     timeoutMs?: number;
+    signal?: AbortSignal;
   } = {}
 ): Promise<T> {
+  options.signal?.throwIfAborted();
   const controller = new AbortController();
+  const cancel = () => controller.abort(options.signal?.reason);
+  options.signal?.addEventListener("abort", cancel, { once: true });
   const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? defaultRequestTimeoutMs);
 
   try {
@@ -28,6 +32,7 @@ export async function apiFetch<T>(
       body: options.body === undefined ? undefined : JSON.stringify(options.body)
     });
     const payload = await readApiPayload<T>(response);
+    controller.signal.throwIfAborted();
     if (!response.ok || !payload.data) {
       if (response.status === 401 && payload.error?.code === "UNAUTHORIZED" && !isAuthEndpoint(path)) {
         notifySessionExpired();
@@ -36,6 +41,8 @@ export async function apiFetch<T>(
     }
     return payload.data;
   } catch (error) {
+    // 导航、筛选切换等主动取消应保留 AbortError，不能显示成网络超时。
+    if (options.signal?.aborted) throw options.signal.reason;
     if (isAbortError(error)) {
       throw new Error("请求超时，请检查网络后重试。");
     }
@@ -45,6 +52,7 @@ export async function apiFetch<T>(
     throw error;
   } finally {
     clearTimeout(timeoutId);
+    options.signal?.removeEventListener("abort", cancel);
   }
 }
 

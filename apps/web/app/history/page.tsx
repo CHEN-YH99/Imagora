@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Archive, ArrowUpRight, Copy, Download, FolderPlus, Heart, RefreshCw, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { AppFrame, ConfirmDialog, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
@@ -49,35 +49,85 @@ export default function HistoryPage() {
   const [loadingMoreTasks, setLoadingMoreTasks] = useState(false);
   const [loadingMoreImages, setLoadingMoreImages] = useState(false);
 
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const readSequence = useRef(0);
+  const reads = useRef(new Map<string, { sequence: number; controller: AbortController }>());
+  const historyLoading = useRef(false);
+  const currentProjectId = useRef<string | null>(selectedProjectId);
+  const currentTaskId = useRef<string | null>(selectedTaskId);
+
+  function cancelRead(scope: string) {
+    reads.current.get(scope)?.controller.abort();
+    reads.current.delete(scope);
+  }
+
+  function cancelReads() {
+    for (const entry of reads.current.values()) entry.controller.abort();
+    reads.current.clear();
+  }
+
+  function beginRead(scope: string) {
+    cancelRead(scope);
+    const controller = new AbortController();
+    const sequence = ++readSequence.current;
+    reads.current.set(scope, { sequence, controller });
+    const isCurrent = () => !controller.signal.aborted && reads.current.get(scope)?.sequence === sequence;
+    return {
+      signal: controller.signal,
+      isCurrent,
+      finish: () => {
+        if (isCurrent()) reads.current.delete(scope);
+      }
+    };
+  }
+
+  function selectProject(projectId: string | null) {
+    if (currentProjectId.current === projectId) return;
+    // 在点击时立即失效旧作用域，不等下一次 effect 才取消。
+    currentProjectId.current = projectId;
+    cancelReads();
+    setImages([]);
+    setImagePageInfo(null);
+    setDetail(null);
+    setLoadingMoreImages(false);
+    setLoadingMoreTasks(false);
+    setSelectedProjectId(projectId);
+  }
+
+  function selectTask(taskId: string | null) {
+    if (currentTaskId.current === taskId) return;
+    currentTaskId.current = taskId;
+    cancelRead("detail");
+    setDetail(null);
+    setSelectedTaskId(taskId);
+  }
+
   useEffect(() => {
     void loadHistory();
+    return cancelReads;
   }, [selectedProjectId]);
 
   useEffect(() => {
-    if (!selectedTaskId) {
-      return;
-    }
-    let canceled = false;
-    void loadTaskDetail(selectedTaskId, { isCanceled: () => canceled });
-    return () => {
-      canceled = true;
-    };
-  }, [selectedTaskId]);
+    if (!selectedTaskId || historyLoading.current) return;
+    void loadTaskDetail(selectedTaskId);
+    return () => cancelRead("detail");
+  }, [selectedTaskId, selectedProjectId, historyRevision]);
 
   const selectedTask = useMemo(
     () =>
-      (detail?.task.id === selectedTaskId ? detail.task : null) ??
       tasks.find((task) => task.id === selectedTaskId) ??
+      (detail?.task.id === selectedTaskId ? detail.task : null) ??
       tasks[0] ??
       null,
     [detail?.task, selectedTaskId, tasks]
   );
   const selectedTaskImages = useMemo(
     () =>
-      detail && detail.task.id === selectedTask?.id
+      (detail && detail.task.id === selectedTask?.id
         ? detail.images
-        : images.filter((image) => image.taskId === selectedTask?.id),
-    [detail, images, selectedTask?.id]
+        : images.filter((image) => image.taskId === selectedTask?.id)
+      ).filter((image) => !selectedProjectId || image.projectId === selectedProjectId),
+    [detail, images, selectedTask?.id, selectedProjectId]
   );
   const activeTaskIds = useMemo(
     () => tasks.filter((task) => isActiveTaskStatus(task.status)).map((task) => task.id),
@@ -89,118 +139,190 @@ export default function HistoryPage() {
     : images.length;
 
   useEffect(() => {
-    const activeSelectedTaskId = selectedTask && isActiveTaskStatus(selectedTask.status) ? selectedTask.id : null;
-    if (activeTaskIds.length === 0) {
-      return;
-    }
+    if (activeTaskIds.length === 0) return;
+    let disposed = false;
+    let running = false;
+    let resumeRequested = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
-    let canceled = false;
     const refreshActiveTasks = async () => {
-      await Promise.all(
-        activeTaskIds.map((taskId) =>
-          loadTaskDetail(taskId, {
-            quiet: true,
-            setSelectedDetail: taskId === activeSelectedTaskId,
-            isCanceled: () => canceled
-          })
-        )
-      );
-    };
-    void refreshActiveTasks();
-    const intervalId = window.setInterval(() => {
-      void refreshActiveTasks();
-    }, historyTaskPollIntervalMs);
-
-    return () => {
-      canceled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [activeTaskIdsKey, selectedTask?.id, selectedTask?.status]);
-
-  async function loadHistory(options: { append?: boolean; quiet?: boolean } = {}) {
-    const append = options.append ?? false;
-    if (append) {
-      if (loadingMoreTasks || !taskPageInfo?.hasMore) {
+      if (disposed || running || document.hidden) return;
+      if (historyLoading.current) {
+        timer = setTimeout(() => void refreshActiveTasks(), historyTaskPollIntervalMs);
         return;
       }
+      running = true;
+      resumeRequested = false;
+      const read = beginRead("poll");
+      try {
+        // 已加载多页时按 100 个 ID 分批，分批串行，整轮完成后才启动下次计时。
+        for (let offset = 0; offset < activeTaskIds.length; offset += 100) {
+          const ids = activeTaskIds.slice(offset, offset + 100);
+          const result = await apiFetch<{ tasks: Task[]; images: GeneratedImage[] }>(
+            `/api/generation/tasks/batch?ids=${ids.map(encodeURIComponent).join(",")}`,
+            { signal: read.signal }
+          );
+          if (!read.isCurrent() || disposed) return;
+          setTasks((items) => result.tasks.reduce(mergeTaskIntoList, items));
+          const selected = result.tasks.find((task) => task.id === currentTaskId.current);
+          if (selected) {
+            updateDetail({ task: selected, images: result.images.filter((image) => image.taskId === selected.id) });
+          }
+          setImages((items) =>
+            mergeImagesIntoList(
+              items,
+              result.images.filter((image) => !selectedProjectId || image.projectId === selectedProjectId)
+            )
+          );
+        }
+      } catch {
+        // 单轮失败保留现有结果，下一轮自动恢复；主动取消不显示错误。
+      } finally {
+        read.finish();
+        running = false;
+        if (!disposed && !document.hidden) {
+          timer = setTimeout(() => void refreshActiveTasks(), resumeRequested ? 0 : historyTaskPollIntervalMs);
+        }
+      }
+    };
+    const visibilityChanged = () => {
+      clearTimeout(timer);
+      if (document.hidden) {
+        cancelRead("poll");
+      } else if (running) {
+        resumeRequested = true;
+      } else {
+        void refreshActiveTasks();
+      }
+    };
+    document.addEventListener("visibilitychange", visibilityChanged);
+    void refreshActiveTasks();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      cancelRead("poll");
+      document.removeEventListener("visibilitychange", visibilityChanged);
+    };
+  }, [activeTaskIdsKey, selectedProjectId, historyRevision]);
+
+  async function loadHistory(options: { append?: boolean; quiet?: boolean } = {}) {
+    if (options.append) {
+      if (historyLoading.current || reads.current.has("moreTasks") || !taskPageInfo?.hasMore) return;
+      const read = beginRead("moreTasks");
       setLoadingMoreTasks(true);
       try {
         const taskResult = await apiFetch<{ tasks: Task[]; pageInfo: PageInfo }>(
-          `/api/generation/tasks?limit=${historyPageSize}&offset=${tasks.length}`
+          `/api/generation/tasks?limit=${historyPageSize}&offset=${tasks.length}`,
+          { signal: read.signal }
         );
+        if (!read.isCurrent()) return;
         setTasks((current) => mergeTasks(current, taskResult.tasks));
         setTaskPageInfo(taskResult.pageInfo);
       } catch (error) {
-        setMessage(error instanceof Error ? error.message : "更多生成任务加载失败，请稍后重试。");
+        if (read.isCurrent()) setMessage(error instanceof Error ? error.message : "更多生成任务加载失败，请稍后重试。");
       } finally {
-        setLoadingMoreTasks(false);
+        if (read.isCurrent()) setLoadingMoreTasks(false);
+        read.finish();
       }
       return;
     }
-    if (!options.quiet) {
-      setMessage("");
-    }
+    cancelReads();
+    historyLoading.current = true;
+    setLoadingMoreTasks(false);
+    setLoadingMoreImages(false);
+    const read = beginRead("history");
+    if (!options.quiet) setMessage("");
     try {
       const [taskResult, imageResult, projectResult] = await Promise.all([
-        apiFetch<{ tasks: Task[]; pageInfo: PageInfo }>(`/api/generation/tasks?limit=${historyPageSize}&offset=0`),
-        apiFetch<{ images: GeneratedImage[]; pageInfo: PageInfo }>(buildImagesPath(selectedProjectId, 0)),
-        apiFetch<{ projects: ImageProject[] }>("/api/image-projects")
+        apiFetch<{ tasks: Task[]; pageInfo: PageInfo }>(`/api/generation/tasks?limit=${historyPageSize}&offset=0`, {
+          signal: read.signal
+        }),
+        apiFetch<{ images: GeneratedImage[]; pageInfo: PageInfo }>(buildImagesPath(selectedProjectId, 0), {
+          signal: read.signal
+        }),
+        apiFetch<{ projects: ImageProject[] }>("/api/image-projects", { signal: read.signal })
       ]);
+      if (!read.isCurrent()) return;
+      if (selectedProjectId && !projectResult.projects.some((project) => project.id === selectedProjectId)) {
+        selectProject(null);
+        return;
+      }
       setTasks(taskResult.tasks);
       setImages(imageResult.images);
       setTaskPageInfo(taskResult.pageInfo);
       setImagePageInfo(imageResult.pageInfo);
       setProjects(projectResult.projects);
-      if (selectedProjectId && !projectResult.projects.some((project) => project.id === selectedProjectId)) {
-        setSelectedProjectId(null);
-      }
-      setSelectedTaskId((value) => value ?? taskResult.tasks[0]?.id ?? null);
+      selectTask(
+        taskResult.tasks.some((task) => task.id === currentTaskId.current)
+          ? currentTaskId.current
+          : (taskResult.tasks[0]?.id ?? null)
+      );
     } catch (error) {
-      if (!options.quiet) {
+      if (read.isCurrent() && !options.quiet) {
         setMessage(error instanceof Error ? error.message : "生成历史加载失败，请稍后重试。");
       }
+    } finally {
+      if (read.isCurrent()) {
+        historyLoading.current = false;
+        setHistoryRevision((revision) => revision + 1);
+      }
+      read.finish();
     }
   }
 
   async function loadMoreImages() {
-    if (loadingMoreImages || !imagePageInfo?.hasMore) {
-      return;
-    }
+    if (historyLoading.current || reads.current.has("moreImages") || !imagePageInfo?.hasMore) return;
+    const read = beginRead("moreImages");
     setLoadingMoreImages(true);
     try {
       const nextOffset = imagePageInfo.offset + imagePageInfo.limit;
       const imageResult = await apiFetch<{ images: GeneratedImage[]; pageInfo: PageInfo }>(
-        buildImagesPath(selectedProjectId, nextOffset)
+        buildImagesPath(selectedProjectId, nextOffset),
+        { signal: read.signal }
       );
+      if (!read.isCurrent()) return;
       setImages((current) => appendImages(current, imageResult.images));
       setImagePageInfo(imageResult.pageInfo);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "更多项目资产加载失败，请稍后重试。");
+      if (read.isCurrent()) setMessage(error instanceof Error ? error.message : "更多项目资产加载失败，请稍后重试。");
     } finally {
-      setLoadingMoreImages(false);
+      if (read.isCurrent()) setLoadingMoreImages(false);
+      read.finish();
     }
   }
 
-  async function loadTaskDetail(
-    taskId: string,
-    options: { quiet?: boolean; isCanceled?: () => boolean; setSelectedDetail?: boolean } = {}
-  ): Promise<TaskDetail | null> {
+  function updateDetail(result: TaskDetail) {
+    setDetail((previous) => {
+      if (previous?.task.id === result.task.id && isOlderTask(result.task, previous.task)) return previous;
+      return {
+        task: result.task,
+        images: result.images.map((image) => ({
+          ...image,
+          favorite: image.favorite ?? previous?.images.find((item) => item.id === image.id)?.favorite
+        }))
+      };
+    });
+  }
+
+  async function loadTaskDetail(taskId: string): Promise<void> {
+    const read = beginRead("detail");
     try {
-      const result = await apiFetch<TaskDetail>(`/api/generation/tasks/${taskId}`);
-      if (options.isCanceled?.()) {
-        return null;
-      }
-      if (options.setSelectedDetail !== false) {
-        setDetail(result);
-      }
+      const result = await apiFetch<TaskDetail>(`/api/generation/tasks/${encodeURIComponent(taskId)}`, {
+        signal: read.signal
+      });
+      if (!read.isCurrent() || currentTaskId.current !== taskId) return;
+      updateDetail(result);
       setTasks((items) => mergeTaskIntoList(items, result.task));
-      setImages((items) => mergeImagesIntoList(items, result.images));
-      return result;
+      setImages((items) =>
+        mergeImagesIntoList(
+          items,
+          result.images.filter((image) => !selectedProjectId || image.projectId === selectedProjectId)
+        )
+      );
     } catch (error) {
-      if (!options.quiet && !options.isCanceled?.()) {
-        setMessage(error instanceof Error ? error.message : "任务详情加载失败，请稍后重试。");
-      }
-      return null;
+      if (read.isCurrent()) setMessage(error instanceof Error ? error.message : "任务详情加载失败，请稍后重试。");
+    } finally {
+      read.finish();
     }
   }
 
@@ -278,7 +400,7 @@ export default function HistoryPage() {
         body: { name, description: "从历史资产工作台创建" }
       });
       setProjects((items) => [result.project, ...items]);
-      setSelectedProjectId(result.project.id);
+      selectProject(result.project.id);
       setNewProjectName("");
       setMessage("项目已创建。");
     } catch (error) {
@@ -315,11 +437,15 @@ export default function HistoryPage() {
   }
 
   async function loadProjectsQuietly() {
+    const read = beginRead("projects");
     try {
-      const result = await apiFetch<{ projects: ImageProject[] }>("/api/image-projects");
+      const result = await apiFetch<{ projects: ImageProject[] }>("/api/image-projects", { signal: read.signal });
+      if (!read.isCurrent()) return;
       setProjects(result.projects);
     } catch {
       // 项目计数刷新失败不应覆盖刚完成的图片操作提示。
+    } finally {
+      read.finish();
     }
   }
 
@@ -333,12 +459,13 @@ export default function HistoryPage() {
         method: "DELETE"
       });
       setProjects((items) => items.filter((project) => project.id !== pendingArchiveProject.id));
-      if (selectedProjectId === pendingArchiveProject.id) {
-        setSelectedProjectId(null);
+      if (currentProjectId.current === pendingArchiveProject.id) {
+        selectProject(null);
+      } else {
+        void loadHistory({ quiet: true });
       }
       setPendingArchiveProject(null);
       setMessage("项目已归档，图片已回到未分组状态。");
-      void loadHistory({ quiet: true });
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "项目归档失败，请稍后重试。");
     } finally {
@@ -418,7 +545,7 @@ export default function HistoryPage() {
                 : "border-white/12 text-white/68 hover:bg-white/10"
             }`}
             type="button"
-            onClick={() => setSelectedProjectId(null)}
+            onClick={() => selectProject(null)}
           >
             全部资产 · {imagePageInfo?.total ?? images.length}
           </button>
@@ -429,7 +556,7 @@ export default function HistoryPage() {
                   selectedProjectId === project.id ? "bg-mint/10 text-white" : "text-white/68 hover:bg-white/10"
                 }`}
                 type="button"
-                onClick={() => setSelectedProjectId(project.id)}
+                onClick={() => selectProject(project.id)}
               >
                 {project.name} · {project.imageCount ?? 0}
               </button>
@@ -483,7 +610,7 @@ export default function HistoryPage() {
                     : "border-white/10 bg-black/20 hover:bg-white/8"
                 }`}
                 type="button"
-                onClick={() => setSelectedTaskId(task.id)}
+                onClick={() => selectTask(task.id)}
               >
                 <div className="flex items-start justify-between gap-4">
                   <p className="min-w-0 flex-1 line-clamp-2 text-sm leading-6 text-white/74">{task.prompt}</p>
@@ -677,7 +804,11 @@ function mergeTaskIntoList(tasks: Task[], task: Task): Task[] {
   if (!tasks.some((item) => item.id === task.id)) {
     return [task, ...tasks];
   }
-  return tasks.map((item) => (item.id === task.id ? task : item));
+  return tasks.map((item) => (item.id === task.id && !isOlderTask(task, item) ? task : item));
+}
+
+function isOlderTask(incoming: Task, current: Task): boolean {
+  return Date.parse(incoming.updatedAt) < Date.parse(current.updatedAt);
 }
 
 function mergeImagesIntoList(images: GeneratedImage[], nextImages: GeneratedImage[]): GeneratedImage[] {

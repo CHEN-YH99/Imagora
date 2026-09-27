@@ -43,9 +43,10 @@
   },
   "overrides": {
     "esbuild": "0.28.1",
-    "postcss": "8.5.15",
+    "postcss": "8.5.28",
+    "deepmerge-ts": "8.0.2",
     "next": {
-      "postcss": "8.5.15"
+      "postcss": "8.5.28"
     },
     "tsx": {
       "esbuild": "0.28.1"

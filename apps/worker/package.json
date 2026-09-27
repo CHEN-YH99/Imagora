@@ -19,7 +19,7 @@
     "@imagora/storage": "0.1.0",
     "pino": "^9.5.0",
     "pino-pretty": "12.1.0",
-    "sharp": "^0.33.5"
+    "sharp": "^0.35.4"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
