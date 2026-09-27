@@ -1,10 +1,23 @@
+import type {
+  GenerationTask as TaskRow,
+  GeneratedImage as ImageRow,
+  CreditLedgerEntry as LedgerRow
+} from "../generated/client/index.js";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Prisma, PrismaClient } from "../generated/client/index.js";
 import { generationMetadataFromTask } from "@imagora/shared";
-import type { CreditLedgerEntry, GenerationMetadata, Plan, SafetyAppeal, StoreData, User } from "@imagora/shared";
+import type {
+  CreditLedgerEntry,
+  GenerationMetadata,
+  GenerationProgress,
+  Plan,
+  SafetyAppeal,
+  StoreData,
+  User
+} from "@imagora/shared";
 import { persistStoreDiff } from "./prisma-store-persistence.js";
 
 const workspaceRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -12,8 +25,28 @@ const defaultPath = resolve(workspaceRoot, "data", "imagora-store.json");
 
 export interface Store {
   read(): Promise<StoreData>;
+  readGenerationStream(query: GenerationStreamQuery): Promise<GenerationStreamData>;
+  updateGenerationProgress(write: GenerationProgressWrite): Promise<void>;
   write(data: StoreData): Promise<void>;
   update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T>;
+}
+
+export interface GenerationStreamQuery {
+  taskIds: string[];
+  sessionTokens: string[];
+}
+
+export interface GenerationStreamData {
+  sessions: Array<{ token: string; userId: string; expiresAt: string; userStatus: User["status"] }>;
+  generationTasks: StoreData["generationTasks"];
+  generatedImages: StoreData["generatedImages"];
+  creditLedgerEntries: StoreData["creditLedgerEntries"];
+}
+
+export interface GenerationProgressWrite {
+  taskId: string;
+  startedAt: string;
+  progress: GenerationProgress;
 }
 
 export function createStore(): Store {
@@ -32,6 +65,7 @@ export function createStore(): Store {
 export class JsonStore implements Store {
   readonly filePath: string;
   private updateChain: Promise<void> = Promise.resolve();
+  private streamCache?: { version: string; data: StoreData };
 
   constructor(filePath = resolveStorePath(process.env.IMAGORA_STORE_PATH)) {
     this.filePath = filePath;
@@ -40,6 +74,38 @@ export class JsonStore implements Store {
   async read(): Promise<StoreData> {
     await this.ensureInitialized();
     return this.readUnlocked();
+  }
+
+  async readGenerationStream(query: GenerationStreamQuery): Promise<GenerationStreamData> {
+    // 原子替换的文件句柄对应同一份快照；仅在其他进程写入后重新解析。
+    const file = await open(this.filePath, "r").catch(async (error: unknown) => {
+      if (!isNodeError(error, "ENOENT")) throw error;
+      await this.ensureInitialized();
+      return open(this.filePath, "r");
+    });
+    try {
+      const stat = await file.stat({ bigint: true });
+      const version = [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+      if (this.streamCache?.version !== version) {
+        this.streamCache = {
+          version,
+          data: normalizeStoreData(JSON.parse(await file.readFile("utf8")) as Partial<StoreData>)
+        };
+      }
+      return projectGenerationStream(this.streamCache.data, query);
+    } finally {
+      await file.close();
+    }
+  }
+
+  async updateGenerationProgress(write: GenerationProgressWrite): Promise<void> {
+    await this.update((data) => {
+      const task = data.generationTasks.find((item) => item.id === write.taskId);
+      if (!task || task.status !== "RUNNING" || task.startedAt !== write.startedAt) return;
+      if ((task.progress?.sequence ?? 0) >= (write.progress.sequence ?? 0)) return;
+      task.progress = structuredClone(write.progress);
+      task.updatedAt = write.progress.updatedAt;
+    });
   }
 
   async write(data: StoreData): Promise<void> {
@@ -118,6 +184,14 @@ class DevelopmentFallbackStore implements Store {
     return this.run((store) => store.read());
   }
 
+  async readGenerationStream(query: GenerationStreamQuery): Promise<GenerationStreamData> {
+    return this.run((store) => store.readGenerationStream(query));
+  }
+
+  async updateGenerationProgress(write: GenerationProgressWrite): Promise<void> {
+    return this.run((store) => store.updateGenerationProgress(write));
+  }
+
   async write(data: StoreData): Promise<void> {
     return this.run((store) => store.write(data));
   }
@@ -154,6 +228,75 @@ export class PrismaStore implements Store {
   async read(): Promise<StoreData> {
     await this.ensureSeeded();
     return this.readFromClient(this.prisma);
+  }
+
+  async readGenerationStream(query: GenerationStreamQuery): Promise<GenerationStreamData> {
+    // 只读一致性快照，不执行种子检查，也不争用 Store 写事务的 advisory lock。
+    return this.prisma.$transaction(
+      async (tx) => {
+        const sessions = await tx.session.findMany({
+          where: { token: { in: query.sessionTokens }, expiresAt: { gt: new Date() } },
+          select: { token: true, userId: true, expiresAt: true, user: { select: { status: true } } }
+        });
+        const userIds = [
+          ...new Set(sessions.filter((session) => session.user.status === "ACTIVE").map((session) => session.userId))
+        ];
+        const tasks = userIds.length
+          ? await tx.generationTask.findMany({
+              where: { id: { in: query.taskIds }, userId: { in: userIds } }
+            })
+          : [];
+        const taskIds = tasks.map((task) => task.id);
+        const [images, entries] = taskIds.length
+          ? await Promise.all([
+              tx.generatedImage.findMany({
+                where: { taskId: { in: taskIds }, userId: { in: userIds }, deletedAt: null }
+              }),
+              tx.creditLedgerEntry.findMany({
+                where: { userId: { in: userIds }, sourceType: "TASK", sourceId: { in: taskIds }, type: "REFUND" }
+              })
+            ])
+          : [[], []];
+        const generationTasks = tasks.map(generationTaskFromRow);
+        return {
+          sessions: sessions.map((session) => ({
+            token: session.token,
+            userId: session.userId,
+            expiresAt: session.expiresAt.toISOString(),
+            userStatus: session.user.status
+          })),
+          generationTasks,
+          generatedImages: images.map((image) => generatedImageFromRow(image, generationTasks)),
+          creditLedgerEntries: entries.map(creditLedgerEntryFromRow)
+        };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 5_000 }
+    );
+  }
+
+  async updateGenerationProgress(write: GenerationProgressWrite): Promise<void> {
+    // 与原有任务终态事务协调，但只更新一条任务，不读取、克隆或 diff 全库。
+    await this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(73341001)");
+        await tx.generationTask.updateMany({
+          where: {
+            id: write.taskId,
+            status: "RUNNING",
+            startedAt: new Date(write.startedAt),
+            OR: [
+              { progress: { equals: Prisma.DbNull } },
+              { progress: { path: ["sequence"], lt: write.progress.sequence ?? 0 } }
+            ]
+          },
+          data: {
+            progress: write.progress as unknown as Prisma.InputJsonObject,
+            updatedAt: new Date(write.progress.updatedAt)
+          }
+        });
+      },
+      { timeout: 5_000 }
+    );
   }
 
   private async readFromClient(client: PrismaClient | Prisma.TransactionClient): Promise<StoreData> {
@@ -201,31 +344,7 @@ export class PrismaStore implements Store {
       client.alertNotification.findMany()
     ]);
 
-    const generationTaskViews: StoreData["generationTasks"] = generationTasks.map((task) => ({
-      id: task.id,
-      userId: task.userId,
-      clientRequestId: task.clientRequestId,
-      referenceImageId: task.referenceImageId,
-      prompt: task.prompt,
-      negativePrompt: task.negativePrompt,
-      style: task.style as StoreData["generationTasks"][number]["style"],
-      aspectRatio: task.aspectRatio as StoreData["generationTasks"][number]["aspectRatio"],
-      width: task.width,
-      height: task.height,
-      quantity: task.quantity,
-      quality: task.quality as StoreData["generationTasks"][number]["quality"],
-      modelProvider: task.modelProvider,
-      modelName: task.modelName,
-      status: task.status,
-      creditCost: task.creditCost,
-      providerCostCents: task.providerCostCents,
-      failureCode: task.failureCode,
-      failureMessage: task.failureMessage,
-      startedAt: task.startedAt?.toISOString() ?? null,
-      completedAt: task.completedAt?.toISOString() ?? null,
-      createdAt: task.createdAt.toISOString(),
-      updatedAt: task.updatedAt.toISOString()
-    }));
+    const generationTaskViews: StoreData["generationTasks"] = generationTasks.map(generationTaskFromRow);
 
     return {
       users: users.map((user) => ({
@@ -270,19 +389,7 @@ export class PrismaStore implements Store {
         totalSpent: account.totalSpent,
         updatedAt: account.updatedAt.toISOString()
       })),
-      creditLedgerEntries: creditLedgerEntries.map((entry) => ({
-        id: entry.id,
-        userId: entry.userId,
-        type: entry.type,
-        amount: entry.amount,
-        balanceAfter: entry.balanceAfter,
-        sourceType: entry.sourceType,
-        sourceId: entry.sourceId,
-        idempotencyKey: entry.idempotencyKey,
-        remark: entry.remark,
-        expiresAt: entry.expiresAt?.toISOString() ?? null,
-        createdAt: entry.createdAt.toISOString()
-      })),
+      creditLedgerEntries: creditLedgerEntries.map(creditLedgerEntryFromRow),
       generationTasks: generationTaskViews,
       referenceImages: referenceImages.map((image) => ({
         id: image.id,
@@ -300,32 +407,7 @@ export class PrismaStore implements Store {
         expiresAt: image.expiresAt.toISOString(),
         deletedAt: image.deletedAt?.toISOString() ?? null
       })),
-      generatedImages: generatedImages.map((image) => {
-        const createdAt = image.createdAt.toISOString();
-        return {
-          id: image.id,
-          taskId: image.taskId,
-          userId: image.userId,
-          projectId: image.projectId,
-          storageKey: image.storageKey,
-          thumbnailKey: image.thumbnailKey,
-          thumbnailUrl: image.thumbnailUrl ?? image.publicUrl ?? "",
-          publicUrl: image.publicUrl ?? "",
-          width: image.width,
-          height: image.height,
-          fileSize: image.fileSize,
-          mimeType: image.mimeType,
-          safetyStatus: image.safetyStatus,
-          visibility: image.visibility,
-          generationMetadata: normalizeGenerationMetadata(
-            image.generationMetadata,
-            generationTaskViews.find((task) => task.id === image.taskId),
-            { taskId: image.taskId, width: image.width, height: image.height, createdAt }
-          ),
-          deletedAt: image.deletedAt?.toISOString() ?? null,
-          createdAt
-        };
-      }),
+      generatedImages: generatedImages.map((image) => generatedImageFromRow(image, generationTaskViews)),
       imageFavorites: imageFavorites.map((favorite) => ({
         userId: favorite.userId,
         imageId: favorite.imageId,
@@ -501,6 +583,115 @@ export class PrismaStore implements Store {
     const before = await this.readFromClient(tx);
     await persistStoreDiff(tx, before, createInitialData());
   }
+}
+
+function generationTaskFromRow(task: TaskRow): StoreData["generationTasks"][number] {
+  return {
+    id: task.id,
+    userId: task.userId,
+    clientRequestId: task.clientRequestId,
+    referenceImageId: task.referenceImageId,
+    prompt: task.prompt,
+    negativePrompt: task.negativePrompt,
+    style: task.style as StoreData["generationTasks"][number]["style"],
+    aspectRatio: task.aspectRatio as StoreData["generationTasks"][number]["aspectRatio"],
+    width: task.width,
+    height: task.height,
+    quantity: task.quantity,
+    quality: task.quality as StoreData["generationTasks"][number]["quality"],
+    modelProvider: task.modelProvider,
+    modelName: task.modelName,
+    modelSnapshot: task.modelSnapshot as unknown as StoreData["generationTasks"][number]["modelSnapshot"],
+    progress: task.progress as unknown as StoreData["generationTasks"][number]["progress"],
+    status: task.status,
+    creditCost: task.creditCost,
+    providerCostCents: task.providerCostCents,
+    failureCode: task.failureCode,
+    failureMessage: task.failureMessage,
+    startedAt: task.startedAt?.toISOString() ?? null,
+    completedAt: task.completedAt?.toISOString() ?? null,
+    createdAt: task.createdAt.toISOString(),
+    updatedAt: task.updatedAt.toISOString()
+  };
+}
+
+function creditLedgerEntryFromRow(entry: LedgerRow): CreditLedgerEntry {
+  return {
+    id: entry.id,
+    userId: entry.userId,
+    type: entry.type,
+    amount: entry.amount,
+    balanceAfter: entry.balanceAfter,
+    sourceType: entry.sourceType,
+    sourceId: entry.sourceId,
+    idempotencyKey: entry.idempotencyKey,
+    remark: entry.remark,
+    expiresAt: entry.expiresAt?.toISOString() ?? null,
+    createdAt: entry.createdAt.toISOString()
+  };
+}
+
+function generatedImageFromRow(
+  image: ImageRow,
+  generationTaskViews: StoreData["generationTasks"]
+): StoreData["generatedImages"][number] {
+  const createdAt = image.createdAt.toISOString();
+  return {
+    id: image.id,
+    taskId: image.taskId,
+    userId: image.userId,
+    projectId: image.projectId,
+    storageKey: image.storageKey,
+    thumbnailKey: image.thumbnailKey,
+    thumbnailUrl: image.thumbnailUrl ?? image.publicUrl ?? "",
+    publicUrl: image.publicUrl ?? "",
+    width: image.width,
+    height: image.height,
+    fileSize: image.fileSize,
+    mimeType: image.mimeType,
+    safetyStatus: image.safetyStatus,
+    visibility: image.visibility,
+    generationMetadata: normalizeGenerationMetadata(
+      image.generationMetadata,
+      generationTaskViews.find((task) => task.id === image.taskId),
+      { taskId: image.taskId, width: image.width, height: image.height, createdAt }
+    ),
+    deletedAt: image.deletedAt?.toISOString() ?? null,
+    createdAt
+  };
+}
+
+function projectGenerationStream(data: StoreData, query: GenerationStreamQuery): GenerationStreamData {
+  const tokens = new Set(query.sessionTokens);
+  const users = new Map(data.users.map((user) => [user.id, user]));
+  const sessions = data.sessions
+    .filter((session) => tokens.has(session.token) && Date.parse(session.expiresAt) > Date.now())
+    .map((session) => ({
+      token: session.token,
+      userId: session.userId,
+      expiresAt: session.expiresAt,
+      userStatus: users.get(session.userId)?.status ?? ("DELETED" as const)
+    }));
+  const userIds = new Set(
+    sessions.filter((session) => session.userStatus === "ACTIVE").map((session) => session.userId)
+  );
+  const requested = new Set(query.taskIds);
+  const generationTasks = data.generationTasks.filter((task) => requested.has(task.id) && userIds.has(task.userId));
+  const taskIds = new Set(generationTasks.map((task) => task.id));
+  return structuredClone({
+    sessions,
+    generationTasks,
+    generatedImages: data.generatedImages.filter(
+      (image) => taskIds.has(image.taskId) && userIds.has(image.userId) && !image.deletedAt
+    ),
+    creditLedgerEntries: data.creditLedgerEntries.filter(
+      (entry) =>
+        entry.type === "REFUND" &&
+        entry.sourceType === "TASK" &&
+        taskIds.has(entry.sourceId) &&
+        userIds.has(entry.userId)
+    )
+  });
 }
 
 export function createInitialData(): StoreData {
@@ -807,6 +998,11 @@ function normalizeGenerationMetadata(
   image: Pick<StoreData["generatedImages"][number], "taskId" | "width" | "height" | "createdAt">
 ): GenerationMetadata {
   if (isGenerationMetadata(metadata)) {
+    // 旧 PostgreSQL 序列化曾遗漏 channel；只补缺失线路，不覆盖图片已有的生成参数。
+    if (!metadata.channel && task) {
+      const channel = generationMetadataFromTask(task).channel;
+      if (channel) return { ...metadata, channel };
+    }
     return metadata;
   }
   if (task) {

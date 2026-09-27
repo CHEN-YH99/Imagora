@@ -1,3 +1,5 @@
+import type { AspectRatio } from "@imagora/shared";
+
 export interface ImageChannelConfig {
   /** 渠道标识，用于日志、熔断键、成本归因；同一池内唯一 */
   name: string;
@@ -13,6 +15,8 @@ export interface ImageChannelConfig {
    * 否则 providerCostCents 记的是假账，毛利报表会骗人。
    */
   costCentsPerImage?: number;
+  /** 同型号绑定在该线路上可用的比例，供故障切换筛选。 */
+  aspectRatios?: AspectRatio[];
 }
 
 const CHANNEL_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/i;

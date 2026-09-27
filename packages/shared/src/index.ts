@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import type { AspectRatio } from "./image-models.js";
+export { aspectRatios, aspectRatioOptions, aspectRatioDimensions } from "./image-models.js";
+export type { AspectRatio } from "./image-models.js";
 
 export type UserRole = "USER" | "ADMIN";
 export type UserStatus = "ACTIVE" | "SUSPENDED" | "DELETED";
@@ -9,8 +12,7 @@ export type SafetyStatus = "PASSED" | "BLOCKED" | "REVIEW_REQUIRED";
 export type OrderStatus = "PENDING" | "PAID" | "CANCELED" | "REFUNDED" | "CLOSED";
 export type ImageVisibility = "PRIVATE" | "PUBLIC" | "HIDDEN";
 export type Quality = "draft" | "standard" | "high";
-export type StyleId = "realistic" | "illustration" | "anime" | "product_photography" | "poster";
-export type AspectRatio = "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
+export type StyleId = "none" | "realistic" | "illustration" | "anime" | "product_photography" | "poster";
 export type ModelId = string;
 
 export interface User {
@@ -87,6 +89,64 @@ export interface CreditLedgerEntry {
   createdAt: string;
 }
 
+export type {
+  ImageApiFormat,
+  ImageSize,
+  ImageModelChannel,
+  ImageAspectRatioSource,
+  ProviderModelConfig,
+  ImageGenerationSnapshot
+} from "./image-models.js";
+
+export type GenerationProgressStage = "QUEUED" | "GENERATING" | "RECEIVING" | "REVIEWING" | "SAVING" | "COMPLETED";
+
+export interface GenerationProgressSnapshot {
+  stage: GenerationProgressStage;
+  /** 每张图片的真实处理步骤，0 等待、1 请求、2 接收、3 审核、4 保存、5 交付。 */
+  imageSteps?: number[];
+  sequence?: number;
+  generatedImages: number;
+  reviewedImages: number;
+  savedImages: number;
+  updatedAt: string;
+}
+
+export interface GenerationProgress extends GenerationProgressSnapshot {
+  /** 有界事件记录，用于跨进程推送和断线补发。 */
+  events?: GenerationProgressSnapshot[];
+}
+
+export function createGenerationProgress(
+  stage: GenerationProgressStage = "QUEUED",
+  updatedAt = new Date().toISOString()
+): GenerationProgress {
+  return {
+    stage,
+    imageSteps: [],
+    sequence: 0,
+    events: [],
+    generatedImages: 0,
+    reviewedImages: 0,
+    savedImages: 0,
+    updatedAt
+  };
+}
+
+export function advanceGenerationProgress(
+  current: GenerationProgress,
+  update: Partial<GenerationProgressSnapshot>,
+  updatedAt = new Date().toISOString()
+): GenerationProgress {
+  const { events = [], ...previous } = current;
+  const next: GenerationProgressSnapshot = {
+    ...previous,
+    ...update,
+    sequence: (current.sequence ?? 0) + 1,
+    updatedAt
+  };
+  return { ...next, events: [...events, next].slice(-64) };
+}
+
 export interface GenerationTask {
   id: string;
   userId: string;
@@ -102,7 +162,10 @@ export interface GenerationTask {
   quality: Quality;
   modelProvider: string;
   modelName: string;
+  channel?: string;
+  modelSnapshot?: import("./image-models.js").ImageGenerationSnapshot | null;
   status: TaskStatus;
+  progress?: GenerationProgress | null;
   creditCost: number;
   // 供应商侧真实成本（分），任务成功后由 worker 落库，用于毛利核算
   providerCostCents: number;
@@ -114,6 +177,35 @@ export interface GenerationTask {
   updatedAt: string;
 }
 
+/** 用户侧任务字段白名单；内部快照和供应商成本仅用于服务端。 */
+export type PublicGenerationTask = Pick<
+  GenerationTask,
+  | "id"
+  | "userId"
+  | "clientRequestId"
+  | "referenceImageId"
+  | "prompt"
+  | "negativePrompt"
+  | "style"
+  | "aspectRatio"
+  | "width"
+  | "height"
+  | "quantity"
+  | "quality"
+  | "modelProvider"
+  | "modelName"
+  | "channel"
+  | "status"
+  | "progress"
+  | "creditCost"
+  | "failureCode"
+  | "failureMessage"
+  | "startedAt"
+  | "completedAt"
+  | "createdAt"
+  | "updatedAt"
+>;
+
 export interface GenerationMetadata {
   taskId: string;
   prompt: string;
@@ -124,6 +216,7 @@ export interface GenerationMetadata {
   quantity: number;
   modelProvider: string;
   modelName: string;
+  channel?: string;
   width: number;
   height: number;
   creditCost: number;
@@ -405,14 +498,6 @@ export class AppError extends Error {
   }
 }
 
-export const aspectRatioDimensions: Record<AspectRatio, { width: number; height: number }> = {
-  "1:1": { width: 1024, height: 1024 },
-  "3:4": { width: 960, height: 1280 },
-  "4:3": { width: 1280, height: 960 },
-  "9:16": { width: 900, height: 1600 },
-  "16:9": { width: 1600, height: 900 }
-};
-
 export const maxPromptLength = 7000;
 export const maxQuantity = 4;
 // OpenAI 批量生图会按请求张数放大超时预算，高质量四宫格时 30 分钟以内都属于正常兜底窗口。
@@ -436,7 +521,42 @@ export function publicUser(user: User): PublicUser {
   };
 }
 
+function generationChannelFromTask(task: GenerationTask): string | undefined {
+  return task.modelSnapshot?.model.primaryChannel ?? task.modelSnapshot?.channels[0]?.name ?? task.channel;
+}
+
+export function publicGenerationTask(task: GenerationTask): PublicGenerationTask {
+  const channel = generationChannelFromTask(task);
+  return {
+    id: task.id,
+    userId: task.userId,
+    clientRequestId: task.clientRequestId,
+    referenceImageId: task.referenceImageId,
+    prompt: task.prompt,
+    negativePrompt: task.negativePrompt,
+    style: task.style,
+    aspectRatio: task.aspectRatio,
+    width: task.width,
+    height: task.height,
+    quantity: task.quantity,
+    quality: task.quality,
+    modelProvider: task.modelProvider,
+    modelName: task.modelName,
+    ...(channel ? { channel } : {}),
+    status: task.status,
+    progress: task.progress,
+    creditCost: task.creditCost,
+    failureCode: task.failureCode,
+    failureMessage: task.failureMessage,
+    startedAt: task.startedAt,
+    completedAt: task.completedAt,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt
+  };
+}
+
 export function generationMetadataFromTask(task: GenerationTask): GenerationMetadata {
+  const channel = generationChannelFromTask(task);
   return {
     taskId: task.id,
     prompt: task.prompt,
@@ -447,6 +567,7 @@ export function generationMetadataFromTask(task: GenerationTask): GenerationMeta
     quantity: task.quantity,
     modelProvider: task.modelProvider,
     modelName: task.modelName,
+    ...(channel ? { channel } : {}),
     width: task.width,
     height: task.height,
     creditCost: task.creditCost,
@@ -681,7 +802,7 @@ function refundTaskCreditsWithIndex(
   return { refunded: true, amount: refundAmount, balanceAfter: account.balance };
 }
 
-export function taskRefundedCredits(data: StoreData, taskId: string): number {
+export function taskRefundedCredits(data: Pick<StoreData, "creditLedgerEntries">, taskId: string): number {
   let refunded = 0;
   for (const entry of data.creditLedgerEntries) {
     if (entry.type === "REFUND" && entry.sourceType === "TASK" && entry.sourceId === taskId) {

@@ -192,6 +192,8 @@ model GenerationTask {
   quality         String
   modelProvider   String          @map("model_provider")
   modelName       String          @map("model_name")
+  modelSnapshot   Json?           @map("model_snapshot")
+  progress        Json?
   status          TaskStatus      @default(PENDING)
   creditCost      Int             @map("credit_cost")
   providerCostCents Int           @default(0) @map("provider_cost_cents")

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ImageModelDiscovery,
   OpenAiImageGenerationProvider,
   createChannelHealthStore,
   getImageModelCatalog,
   listSupportedModels,
+  publishImageModelConfigs,
   quoteImageGeneration,
   readImageModelConfigs,
   resolveDefaultImageModel,
@@ -83,6 +85,8 @@ async function withConfig(callback, overrides = {}) {
   const values = {
     AI_PROVIDER: "openai",
     IMAGE_PROVIDER_DEFAULT: undefined,
+    IMAGE_MODEL_DISCOVERY_CHANNEL: undefined,
+    IMAGE_MODEL_DISCOVERY: undefined,
     OPENAI_API_KEY: undefined,
     IMAGE_MODEL_DEFAULT: undefined,
     OPENAI_IMAGE_MODEL: undefined,
@@ -145,6 +149,144 @@ test("model catalog lists only enabled routable models and never exposes channel
   });
 });
 
+test("动态模型目录只发布当前 API 的模型，并保留同型号备用线路", async () => {
+  const discoveryModels = JSON.stringify([
+    {
+      id: "openai:gpt-image-2",
+      label: "GPT Image 2",
+      upstreamModel: "gpt-image-2",
+      apiFormat: "gpt-image",
+      channels: ["gpt-primary", "gpt-backup"],
+      creditsPerImage: 7,
+      costCentsPerImage: 4
+    },
+    {
+      id: "xai:grok-imagine-image",
+      label: "Grok Imagine",
+      upstreamModel: "grok-imagine-image",
+      apiFormat: "grok-image",
+      channels: ["grok"],
+      creditsPerImage: 3,
+      costCentsPerImage: 2
+    }
+  ]);
+  const responses = {
+    "gpt-primary.example": [
+      { id: "gpt-image-2" },
+      { id: "gpt-image-2-4k" },
+      { id: "gpt-primary-image" },
+      { id: "gpt-chat" }
+    ],
+    "grok.example": [{ id: "grok-2-image-1212" }, { id: "nano-banana" }, { id: "grok-chat" }],
+    "gpt-backup.example": [{ id: "gpt-image-2" }, { id: "gpt-backup-only-image" }]
+  };
+
+  await withConfig(
+    async () => {
+      const discovery = new ImageModelDiscovery({
+        fetch: async (url) => {
+          const host = new URL(url).host;
+          return new Response(JSON.stringify({ data: responses[host] ?? [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      });
+      try {
+        await discovery.refresh();
+        assert.equal(discovery.status().primaryChannel, "gpt-primary");
+        assert.deepEqual(
+          getImageModelCatalog().models.map((model) => model.label),
+          ["GPT Image 2", "gpt-image-2-4k", "gpt-primary-image"]
+        );
+        assert.equal(
+          getImageModelCatalog().models.find((model) => model.label === "gpt-image-2-4k")?.creditMultiplier,
+          2
+        );
+        assert.equal(
+          getImageModelCatalog().models.find((model) => model.label === "gpt-primary-image")?.creditMultiplier,
+          1
+        );
+        assert.deepEqual(
+          readImageModelConfigs()
+            .find((model) => model.modelId === "openai:gpt-image-2")
+            ?.channels?.map((channel) => channel.name),
+          ["gpt-primary", "gpt-backup"]
+        );
+
+        process.env.IMAGE_MODEL_DISCOVERY_CHANNEL = "grok";
+        await discovery.refresh();
+        assert.equal(discovery.status().primaryChannel, "grok");
+        assert.deepEqual(
+          getImageModelCatalog().models.map((model) => model.label),
+          ["grok-2-image-1212", "nano-banana"]
+        );
+        assert.equal(
+          getImageModelCatalog().models.every((model) => model.label !== "gpt-backup-only-image"),
+          true
+        );
+        assert.equal(
+          getImageModelCatalog().models.every((model) => model.creditMultiplier !== 2),
+          true
+        );
+        assert.throws(() => resolveProviderModel("openai:gpt-image-2"), /Unsupported image model/);
+      } finally {
+        await discovery.close();
+        publishImageModelConfigs(undefined);
+      }
+    },
+    { IMAGE_MODELS: discoveryModels, IMAGE_MODEL_DISCOVERY: "true" }
+  );
+});
+
+test("静态 GPT Image 4K 型号按原始积分双倍计费，普通型号不加倍", async () => {
+  const fourK = {
+    id: "openai:gpt-image-2-4k",
+    label: "GPT Image 2 4K",
+    upstreamModel: "gpt-image-2-4k",
+    aspectRatios: ["1:1"],
+    apiFormat: "gpt-image",
+    channels: ["gpt-primary"],
+    creditsPerImage: 7,
+    costCentsPerImage: 4
+  };
+  await withConfig(
+    () => {
+      assert.equal(quoteImageGeneration({ ...input, model: models[0].id }).creditCost, 7);
+      assert.equal(quoteImageGeneration({ ...input, model: fourK.id }).creditCost, 14);
+      assert.equal(quoteImageGeneration({ ...input, model: fourK.id, quantity: 2 }).creditCost, 28);
+      assert.equal(quoteImageGeneration({ ...input, model: fourK.id }).size, "4096x4096");
+    },
+    { IMAGE_MODELS: JSON.stringify([...models.slice(0, 2), fourK]) }
+  );
+});
+test("GPT Image 4K maps every supported aspect ratio to a valid aligned size", async () => {
+  const ratios = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "1:2", "2:1", "21:9"];
+  const fourK = {
+    id: "openai:gpt-image-2-4k",
+    label: "GPT Image 2 4K",
+    upstreamModel: "gpt-image-2-4k",
+    aspectRatios: ratios,
+    apiFormat: "gpt-image",
+    channels: ["gpt-primary"],
+    creditsPerImage: 7,
+    costCentsPerImage: 4
+  };
+
+  await withConfig(
+    () => {
+      for (const aspectRatio of ratios) {
+        const quote = quoteImageGeneration({ ...input, model: fourK.id, aspectRatio });
+        const [width, height] = quote.size.split("x").map(Number);
+        assert.equal(width % 16, 0);
+        assert.equal(height % 16, 0);
+        assert.ok(Math.max(width, height) <= 4096);
+      }
+    },
+    { IMAGE_MODELS: JSON.stringify([...models.slice(0, 2), fourK]) }
+  );
+});
+
 test("configured channels select the compatible provider without a legacy API key", async () => {
   await withConfig(() => assert.equal(resolveDefaultImageProvider(), "openai"), { AI_PROVIDER: undefined });
 });
@@ -205,7 +347,7 @@ test("model configuration rejects invalid JSON, duplicate ids and unsafe or unsu
       { maxQuantity: 5 },
       { maxQuantity: 1.5 },
       { qualities: ["high"] },
-      { aspectRatios: ["2:1"] }
+      { aspectRatios: ["8:7"] }
     ]) {
       assert.throws(() =>
         readImageModelConfigs({ ...env, IMAGE_MODELS: JSON.stringify([{ ...models[1], ...replacement }]) })
@@ -375,7 +517,13 @@ test("unknown, disabled or unsupported choices never issue an upstream request",
 });
 
 test("generic OpenAI-compatible image models use the minimal image request contract", async () => {
-  const generic = { ...models[1], id: "custom:image-model", apiFormat: "openai-images", upstreamModel: "image-model" };
+  const generic = {
+    ...models[1],
+    id: "custom:image-model",
+    apiFormat: "openai-images",
+    upstreamModel: "image-model",
+    aspectRatios: ["1:1"]
+  };
   await withConfig(
     () =>
       withGateway(async (provider, calls) => {
@@ -387,6 +535,24 @@ test("generic OpenAI-compatible image models use the minimal image request contr
         assert.equal(calls[0].body.aspect_ratio, undefined);
       }),
     { IMAGE_MODELS: JSON.stringify([generic]) }
+  );
+});
+
+test("已知旧版本只开放原生三种尺寸，显式范围不能扩大官方能力", async () => {
+  const base = { ...models[0], id: "openai:gpt-image-1", upstreamModel: "gpt-image-1" };
+  await withConfig(
+    () => {
+      assert.deepEqual(getImageModelCatalog().models[0].aspectRatios, ["1:1", "2:3", "3:2"]);
+      assert.throws(() => quoteImageGeneration({ ...input, model: base.id, aspectRatio: "16:9" }), /比例/);
+      assert.equal(quoteImageGeneration({ ...input, model: base.id, aspectRatio: "3:2" }).size, "1536x1024");
+    },
+    { IMAGE_MODELS: JSON.stringify([base]) }
+  );
+  await withConfig(
+    () => {
+      assert.deepEqual(getImageModelCatalog().models[0].aspectRatios, ["1:1"]);
+    },
+    { IMAGE_MODELS: JSON.stringify([{ ...base, aspectRatios: ["1:1", "16:9"] }]) }
   );
 });
 

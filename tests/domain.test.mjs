@@ -8,6 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   assertProductionOpenAiGenerationConfig,
+  createChannelHealthStore,
   DEFAULT_OPENAI_MAX_RETRIES,
   DEFAULT_OPENAI_TIMEOUT_MS,
   MAX_PRODUCTION_OPENAI_MAX_RETRIES,
@@ -56,7 +57,9 @@ test("provider quote resolves active mock provider model and charges by quality,
     assert.equal(resolvedModel, "mock:default");
     assert.equal(quote.provider, "mock");
     assert.equal(quote.model, "mock:default");
-    assert.equal(quote.size, "1536x1024");
+    assert.equal(quote.size, "1536x864");
+    assert.equal(quote.width, 1536);
+    assert.equal(quote.height, 864);
     assert.equal(quote.creditCost, 14);
   } finally {
     restoreEnv(previous);
@@ -202,19 +205,33 @@ test("openai provider retries once on rate limit and returns images", async () =
     delete process.env.OPENAI_IMAGE_MODEL;
 
     const provider = new OpenAiImageGenerationProvider();
+    const progressEvents = [];
+    const stageEvents = [];
     const result = await provider.generateImage({
       taskId: "task-openai-retry",
+      onStage: (event) => {
+        stageEvents.push(event);
+      },
       prompt: "A clean product visualization",
       style: "product_photography",
       aspectRatio: "1:1",
       width: 1024,
       height: 1024,
       quantity: 1,
-      quality: "standard"
+      quality: "standard",
+      onProgress: (progress) => {
+        progressEvents.push(progress);
+      }
     });
 
     assert.equal(server.requests.length, 2);
     assert.equal(result.images.length, 1);
+    assert.deepEqual(progressEvents, [{ completedImages: 1, totalImages: 1 }]);
+    assert.deepEqual(stageEvents, [
+      { stage: "GENERATING", imageIndex: 0 },
+      { stage: "GENERATING", imageIndex: 0 },
+      { stage: "RECEIVING", imageIndex: 0 }
+    ]);
     assert.equal(result.providerRequestId, "req_retry_success");
     assert.match(server.requests[0].authorization ?? "", /^Bearer sk-test$/);
     for (const request of server.requests) {
@@ -293,6 +310,168 @@ test("openai provider does not auto-retry timed out image requests", async () =>
   }
 });
 
+test("openai progress persistence delay does not consume the response body timeout", async () => {
+  await withOpenAiProgressFixture(
+    [{ status: 200, body: { id: "req-slow-progress", data: [{ b64_json: onePixelPngBase64 }] } }],
+    async ({ provider, server, channelEvents }) => {
+      let progressSaved = false;
+      let pendingSave;
+      try {
+        const result = await provider.generateImage({
+          ...fakeOpenAiInput("slow-progress"),
+          onStage: ({ stage }) => {
+            if (stage === "RECEIVING") {
+              pendingSave = sleep(250).then(() => {
+                progressSaved = true;
+              });
+              return pendingSave;
+            }
+          }
+        });
+        assert.equal(result.images[0].bytes, onePixelPngBase64);
+        assert.equal(result.providerRequestId, "req-slow-progress");
+        assert.ok(pendingSave, "RECEIVING must still be reported");
+        assert.equal(progressSaved, false, "Image delivery must not wait for progress persistence");
+        assert.equal(server.requests.length, 1);
+        assert.deepEqual(
+          channelEvents.map((event) => event.type),
+          ["channel_succeeded"]
+        );
+      } finally {
+        await pendingSave;
+      }
+    }
+  );
+});
+
+test("provider progress callbacks cannot block batch delivery or discard successful images", async (t) => {
+  for (const providerName of ["openai", "mock"]) {
+    for (const behavior of ["pending", "throw", "reject"]) {
+      await t.test(providerName + " " + behavior, async () => {
+        await withOpenAiProgressFixture(
+          Array.from({ length: 2 }, () => ({ status: 200, body: { data: [{ b64_json: onePixelPngBase64 }] } })),
+          async ({ provider: openAiProvider, server, channelEvents }) => {
+            const provider = providerName === "openai" ? openAiProvider : new MockImageGenerationProvider();
+            const events = [];
+            let release;
+            const pending = new Promise((resolve) => {
+              release = resolve;
+            });
+            let releasedByTimeout = false;
+            const timer = setTimeout(() => {
+              releasedByTimeout = true;
+              release();
+            }, 750);
+            const notify = (event) => {
+              events.push(event);
+              if (behavior === "throw") throw new Error("progress store unavailable");
+              if (behavior === "reject") {
+                return sleep(10).then(() => {
+                  throw new Error("progress store unavailable");
+                });
+              }
+              return pending;
+            };
+            try {
+              const result = await provider.generateImage({
+                ...fakeOpenAiInput("progress-observers"),
+                quantity: 2,
+                onStage: ({ stage, imageIndex }) => notify([stage, imageIndex]),
+                onProgress: ({ completedImages, totalImages }) => notify(["COMPLETED", completedImages, totalImages])
+              });
+              assert.equal(result.images.length, 2);
+              assert.equal(releasedByTimeout, false, "Pending observers must not delay generation");
+              assert.deepEqual(events, [
+                ["GENERATING", 0],
+                ["RECEIVING", 0],
+                ["COMPLETED", 1, 2],
+                ["GENERATING", 1],
+                ["RECEIVING", 1],
+                ["COMPLETED", 2, 2]
+              ]);
+              assert.equal(server.requests.length, providerName === "openai" ? 2 : 0);
+              assert.equal(channelEvents.filter((event) => event.type === "channel_failed").length, 0);
+              // Let rejected observers settle: node:test must not see an unhandled rejection.
+              await sleep(30);
+            } finally {
+              clearTimeout(timer);
+              release();
+            }
+          }
+        );
+      });
+    }
+  }
+});
+
+test("openai response body timeout is preserved without retry or channel failover", async (t) => {
+  for (const status of [200, 503]) {
+    await t.test("HTTP " + status, async () => {
+      await withOpenAiProgressFixture(
+        [
+          { status, body: { data: [{ b64_json: onePixelPngBase64 }] }, bodyDelayMs: 250 },
+          { status: 200, body: { data: [{ b64_json: onePixelPngBase64 }] } }
+        ],
+        async ({ provider, server, channelEvents }) => {
+          const stages = [];
+          const progress = [];
+          await assert.rejects(
+            provider.generateImage({
+              ...fakeOpenAiInput("body-timeout"),
+              onStage: (event) => {
+                stages.push(event.stage);
+              },
+              onProgress: (event) => {
+                progress.push(event);
+              }
+            }),
+            (error) => {
+              assert.ok(error instanceof ProviderError);
+              assert.equal(error.code, "PROVIDER_TIMEOUT");
+              assert.ok(["AbortError", "TimeoutError"].includes(error.options.details?.name));
+              return true;
+            }
+          );
+          assert.equal(server.requests.length, 1, "A timed-out body must not cause another paid request");
+          assert.deepEqual(stages, status === 200 ? ["GENERATING", "RECEIVING"] : ["GENERATING"]);
+          assert.deepEqual(progress, []);
+          assert.equal(channelEvents.length, 1);
+          assert.equal(channelEvents[0].code, "PROVIDER_TIMEOUT");
+          assert.equal(channelEvents[0].willFailover, false);
+        },
+        { includeBackup: true }
+      );
+    });
+  }
+});
+
+test("openai response body errors retain format and HTTP error mappings", async (t) => {
+  for (const [status, rawBody, code] of [
+    [200, "not-json", "PROVIDER_BAD_RESPONSE"],
+    [200, "null", "PROVIDER_BAD_RESPONSE"],
+    [200, "{}", "PROVIDER_BAD_RESPONSE"],
+    [401, "not-json", "PROVIDER_AUTH_FAILED"],
+    [429, "not-json", "PROVIDER_RATE_LIMITED"],
+    [503, "not-json", "PROVIDER_FAILED"]
+  ]) {
+    await t.test(status + " " + rawBody, async () => {
+      await withOpenAiProgressFixture(
+        [{ status, rawBody }],
+        async ({ provider, server }) => {
+          await assert.rejects(provider.generateImage(fakeOpenAiInput("body-errors")), (error) => {
+            assert.ok(error instanceof ProviderError);
+            assert.equal(error.code, code);
+            assert.equal(error.statusCode, status);
+            return true;
+          });
+          assert.equal(server.requests.length, 1);
+        },
+        { maxRetries: 0 }
+      );
+    });
+  }
+});
+
 test("openai provider accepts non-array and nested image payload variants", async () => {
   const server = createFakeOpenAiServer([
     {
@@ -363,29 +542,30 @@ test("openai provider accepts non-array and nested image payload variants", asyn
     process.env.IMAGE_MODEL_DEFAULT = "openai:gpt-image-2";
     delete process.env.OPENAI_IMAGE_MODEL;
 
-    const result = await new OpenAiImageGenerationProvider().generateImage({
-      ...fakeOpenAiInput("variant-success"),
-      quantity: 5
-    });
-
+    const provider = new OpenAiImageGenerationProvider();
+    const first = await provider.generateImage({ ...fakeOpenAiInput("variant-success"), quantity: 4 });
+    const last = await provider.generateImage({ ...fakeOpenAiInput("variant-last"), quantity: 1 });
     assert.equal(server.requests.length, 5);
-    for (const request of server.requests) {
-      const requestBody = JSON.parse(request.body);
-      assert.equal(requestBody.n, 1);
-    }
-    assert.equal(result.images.length, 5);
-    for (const image of result.images) {
+    for (const request of server.requests) assert.equal(JSON.parse(request.body).n, 1);
+    const images = [...first.images, ...last.images];
+    assert.equal(images.length, 5);
+    for (const image of images) {
       assert.equal(image.mimeType, "image/png");
       assert.equal(image.bytes, onePixelPngBase64);
     }
-    assert.equal(result.providerRequestId, "openai_variant-success");
-    assert.deepEqual(result.raw.requestIds, [
-      "req_variant_data_url",
-      "req_variant_content",
-      "req_variant_mixed_content",
-      "req_variant_nested_image",
-      "req_variant_image_string"
-    ]);
+    assert.equal(first.providerRequestId, "openai_variant-success");
+    assert.equal(last.providerRequestId, "req_variant_image_string");
+    assert.deepEqual(
+      [...first.raw.requestIds, ...last.raw.requestIds],
+      [
+        "req_variant_data_url",
+        "req_variant_content",
+        "req_variant_mixed_content",
+        "req_variant_nested_image",
+        "req_variant_image_string"
+      ]
+    );
+    await provider.close();
   } finally {
     restoreEnv(previous);
     await server.close();
@@ -1398,6 +1578,49 @@ function fakeOpenAiInput(taskId) {
   };
 }
 
+async function withOpenAiProgressFixture(responses, run, { includeBackup = false, maxRetries = 2 } = {}) {
+  const env = {
+    NODE_ENV: "test",
+    IMAGE_PROVIDER_DEFAULT: "openai",
+    IMAGE_MODEL_DEFAULT: "openai:gpt-image-2",
+    IMAGE_MODEL_DISCOVERY: "false",
+    IMAGE_MODELS: undefined,
+    IMAGE_CHANNELS: undefined,
+    IMAGE_CHANNEL_FAILOVER_ON_TIMEOUT: undefined,
+    OPENAI_IMAGE_MODEL: undefined,
+    OPENAI_TIMEOUT_MS: "120",
+    OPENAI_MAX_RETRIES: String(maxRetries),
+    OPENAI_RETRY_BASE_MS: "1"
+  };
+  const previous = snapshotEnv(Object.keys(env));
+  const server = createFakeOpenAiServer(responses);
+  let provider;
+  try {
+    restoreEnv(env);
+    await server.listen();
+    const channelEvents = [];
+    const primary = {
+      name: "progress-fixture",
+      baseUrl: `http://127.0.0.1:${server.port}/v1`,
+      apiKey: "sk-test",
+      enabled: true,
+      priority: 0
+    };
+    provider = new OpenAiImageGenerationProvider({
+      channels: includeBackup ? [primary, { ...primary, name: "backup", priority: 1 }] : [primary],
+      healthStore: createChannelHealthStore({ provider: "memory" }),
+      onChannelEvent: (event) => {
+        channelEvents.push(event);
+      }
+    });
+    await run({ provider, server, channelEvents });
+  } finally {
+    await provider?.close();
+    await server.close();
+    restoreEnv(previous);
+  }
+}
+
 function createFakeOpenAiServer(responses) {
   const requests = [];
   let port = 0;
@@ -1420,7 +1643,15 @@ function createFakeOpenAiServer(responses) {
       }
       response.statusCode = next.status;
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify(next.body));
+      const body = next.rawBody ?? JSON.stringify(next.body);
+      if (next.bodyDelayMs) {
+        // Send success/error headers and a partial JSON body before stalling the stream.
+        response.write(body.slice(0, 1));
+        await sleep(next.bodyDelayMs);
+        response.end(body.slice(1));
+      } else {
+        response.end(body);
+      }
     });
   });
 

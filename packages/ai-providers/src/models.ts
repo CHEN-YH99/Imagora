@@ -1,42 +1,29 @@
-import { type AspectRatio, type Quality } from "@imagora/shared";
+import {
+  aspectRatios as supportedAspectRatios,
+  type AspectRatio,
+  type Quality,
+  type ProviderModelConfig,
+  type ImageSize,
+  type ImageModelChannel
+} from "@imagora/shared";
 import { resolveAllImageChannels, type ImageChannelConfig } from "./channels.js";
 
-export type ImageApiFormat = "gpt-image" | "openai-images" | "grok-image";
-export type ImageSize = "1024x1024" | "1024x1536" | "1536x1024";
-
-export interface ImageModelChannel {
-  name: string;
-  upstreamModel?: string;
-  costCentsPerImage?: number;
-}
-
-export interface ProviderModelConfig {
-  provider: "openai" | "mock";
-  modelId: string;
-  upstreamModel: string;
-  label: string;
-  enabled: boolean;
-  apiFormat: ImageApiFormat;
-  channels?: ImageModelChannel[];
-  qualities: Quality[];
-  aspectRatios: AspectRatio[];
-  maxQuantity: number;
-  qualityMultiplier: Record<Quality, number>;
-  sizeMultiplier: Record<ImageSize, number>;
-  quantityMultiplier: number;
-  costCentsPerImage: number;
-}
+export type { ImageApiFormat, ImageSize, ImageModelChannel, ProviderModelConfig } from "@imagora/shared";
 
 export interface PublicImageModel {
   id: string;
   label: string;
   qualities: Quality[];
   aspectRatios: AspectRatio[];
+  aspectRatioSource?: ProviderModelConfig["aspectRatioSource"];
   maxQuantity: number;
+  group?: string;
+  creditMultiplier?: 1 | 2;
+  resolution?: "standard" | "4k";
 }
 
 const qualities: Quality[] = ["draft", "standard", "high"];
-const aspectRatios: AspectRatio[] = ["1:1", "3:4", "4:3", "9:16", "16:9"];
+const aspectRatios: AspectRatio[] = [...supportedAspectRatios];
 const imageSizes: ImageSize[] = ["1024x1024", "1024x1536", "1536x1024"];
 const modelIdPattern = /^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._/-]*$/i;
 
@@ -49,6 +36,7 @@ const defaultOpenAiModel: ProviderModelConfig = {
   apiFormat: "gpt-image",
   qualities,
   aspectRatios,
+  aspectRatioSource: "documented",
   maxQuantity: 4,
   qualityMultiplier: { draft: 0.75, standard: 1, high: 1.7 },
   sizeMultiplier: { "1024x1024": 1, "1024x1536": 1.22, "1536x1024": 1.22 },
@@ -62,13 +50,46 @@ const defaultMockModel: ProviderModelConfig = {
   modelId: "mock:default",
   upstreamModel: "mock",
   label: "Imagora Mock",
+  aspectRatioSource: "configured",
   qualityMultiplier: { draft: 0.4, standard: 0.65, high: 1 },
   sizeMultiplier: { "1024x1024": 1, "1024x1536": 1.1, "1536x1024": 1.1 },
   quantityMultiplier: 4,
   costCentsPerImage: 0
 };
 
+let discoveredRegistry: { fingerprint: string; models: ProviderModelConfig[] } | undefined;
+
+export function modelConfigurationFingerprint(env: Partial<Record<string, string | undefined>> = process.env): string {
+  // 动态模型目录属于“当前选中的 API 渠道”。切换渠道后必须让注册表失效，
+  // 否则前端仍可能读到上一条 API 的模型列表。
+  return JSON.stringify([
+    env.IMAGE_MODELS,
+    env.IMAGE_CHANNELS,
+    env.OPENAI_BASE_URL,
+    env.IMAGE_MODEL_DISCOVERY_CHANNEL,
+    env.IMAGE_MODEL_DISCOVERY
+  ]);
+}
+
+export function publishImageModelConfigs(models: ProviderModelConfig[] | undefined): void {
+  discoveredRegistry = models
+    ? { fingerprint: modelConfigurationFingerprint(), models: structuredClone(models) }
+    : undefined;
+}
+
 export function readImageModelConfigs(
+  env: Partial<Record<string, string | undefined>> = process.env
+): ProviderModelConfig[] {
+  if (discoveredRegistry?.fingerprint === modelConfigurationFingerprint(env))
+    return structuredClone(discoveredRegistry.models);
+  return readConfiguredImageModels(env);
+}
+
+export function hasDiscoveredImageModels(): boolean {
+  return discoveredRegistry?.fingerprint === modelConfigurationFingerprint();
+}
+
+export function readConfiguredImageModels(
   env: Partial<Record<string, string | undefined>> = process.env
 ): ProviderModelConfig[] {
   const raw = env.IMAGE_MODELS?.trim();
@@ -102,14 +123,18 @@ export function resolveModelChannels(model: ProviderModelConfig, channels: Image
   const enabled = channels.filter((channel) => channel.enabled);
   if (!model.channels) return enabled;
 
-  return enabled.flatMap((channel) => {
+  const ordered = model.primaryChannel
+    ? [...enabled].sort((a, b) => Number(b.name === model.primaryChannel) - Number(a.name === model.primaryChannel))
+    : enabled;
+  return ordered.flatMap((channel) => {
     const binding = model.channels?.find((entry) => entry.name === channel.name);
     if (!binding) return [];
     return [
       {
         ...channel,
         upstreamModel: binding.upstreamModel ?? model.upstreamModel,
-        costCentsPerImage: binding.costCentsPerImage ?? model.costCentsPerImage
+        costCentsPerImage: binding.costCentsPerImage ?? model.costCentsPerImage,
+        aspectRatios: binding.aspectRatios ?? model.aspectRatios
       }
     ];
   });
@@ -121,7 +146,11 @@ export function publicImageModel(model: ProviderModelConfig): PublicImageModel {
     label: model.label,
     qualities: [...model.qualities],
     aspectRatios: [...model.aspectRatios],
-    maxQuantity: model.maxQuantity
+    ...(model.aspectRatioSource ? { aspectRatioSource: model.aspectRatioSource } : {}),
+    maxQuantity: model.maxQuantity,
+    ...(model.group ? { group: model.group } : {}),
+    ...(model.creditMultiplier ? { creditMultiplier: model.creditMultiplier } : {}),
+    ...(model.resolution ? { resolution: model.resolution } : {})
   };
 }
 
@@ -153,6 +182,9 @@ function normalizeModel(value: unknown, index: number): ProviderModelConfig {
     channelNames.add(name);
     return {
       name,
+      ...(binding.aspectRatios === undefined
+        ? {}
+        : { aspectRatios: readOptions(binding.aspectRatios, aspectRatios, bindingPrefix + ".aspectRatios") }),
       ...(binding.upstreamModel === undefined
         ? {}
         : {
@@ -167,7 +199,11 @@ function normalizeModel(value: unknown, index: number): ProviderModelConfig {
   });
   const supportedQualities = apiFormat === "gpt-image" ? qualities : ["standard" as const];
   const allowedQualities = readOptions(entry.qualities, supportedQualities, prefix + ".qualities");
-  const allowedRatios = readOptions(entry.aspectRatios, aspectRatios, prefix + ".aspectRatios");
+  const ratioAllowlist =
+    entry.aspectRatios === undefined
+      ? undefined
+      : readOptions(entry.aspectRatios, aspectRatios, prefix + ".aspectRatios");
+  const ratioCapabilities = resolveImageAspectRatios(upstreamModel, { configured: ratioAllowlist });
   const maxQuantity = entry.maxQuantity === undefined ? 4 : readNumber(entry.maxQuantity, prefix + ".maxQuantity");
   if (!Number.isInteger(maxQuantity) || maxQuantity > 4) throw new Error(prefix + ".maxQuantity must be 1 to 4");
   return {
@@ -177,9 +213,11 @@ function normalizeModel(value: unknown, index: number): ProviderModelConfig {
     upstreamModel,
     enabled: entry.enabled !== false,
     apiFormat,
+    ...(isGpt4kModel(upstreamModel) ? { resolution: "4k" as const, creditMultiplier: 2 as const } : {}),
     channels,
     qualities: allowedQualities,
-    aspectRatios: allowedRatios,
+    ...ratioCapabilities,
+    ...(ratioAllowlist ? { aspectRatioAllowlist: ratioAllowlist } : {}),
     maxQuantity,
     quantityMultiplier: readNumber(entry.creditsPerImage, prefix + ".creditsPerImage"),
     costCentsPerImage: readNumber(entry.costCentsPerImage, prefix + ".costCentsPerImage", true),
@@ -249,4 +287,71 @@ function readMultipliers<Key extends string>(
     if (record[key] !== undefined) result[key] = readNumber(record[key], name + "." + key);
   }
   return result;
+}
+
+/** 仅精确匹配已核对的型号/官方别名；不能让新版本继承计费模板的能力。 */
+export function documentedImageAspectRatios(upstreamModel: string): AspectRatio[] | undefined {
+  const id = upstreamModel.trim().toLowerCase().replace(/[ _]+/g, "-");
+  // https://developers.openai.com/api/docs/guides/image-generation#earlier-gpt-image-models
+  if (["gpt-image-2", "gpt-image-2-2026-04-21"].includes(id)) return [...aspectRatios];
+  // 当前网关确认 gpt-image-2-4k 走 GPT Image 同协议，并开放同一套比例。
+  if (id === "gpt-image-2-4k") return [...aspectRatios];
+  if (["gpt-image-1", "gpt-image-1-mini", "gpt-image-1.5"].includes(id)) return ["1:1", "2:3", "3:2"];
+  // https://ai.google.dev/gemini-api/docs/image-generation#aspect_ratios_and_image_size
+  if (
+    [
+      "nano-banana",
+      "nano-banana-2",
+      "nano-banana-2-lite",
+      "nano-banana-pro",
+      "gemini-2.5-flash-image",
+      "gemini-3.1-flash-image",
+      "gemini-3.1-flash-image-preview",
+      "gemini-3.1-flash-lite-image",
+      "gemini-3-pro-image",
+      "gemini-3-pro-image-preview"
+    ].includes(id)
+  )
+    return aspectRatios.filter((ratio) => ratio !== "1:2" && ratio !== "2:1");
+  // https://docs.x.ai/developers/model-capabilities/images/generation#aspect-ratio
+  if (
+    [
+      "grok-imagine-image",
+      "grok-imagine-image-2.0",
+      "grok-imagine-image-pro",
+      "grok-imagine-image-quality",
+      "grok-imagine-image-quality-20260403",
+      "grok-imagine-image-quality-latest"
+    ].includes(id)
+  )
+    return aspectRatios.filter((ratio) => ratio !== "4:5" && ratio !== "5:4");
+  // 其他第三方型号不能仅通过名称推断支持范围。
+  return undefined;
+}
+
+export function resolveImageAspectRatios(
+  upstreamModel: string,
+  options: { declared?: AspectRatio[]; configured?: AspectRatio[]; channel?: AspectRatio[] } = {}
+): Pick<ProviderModelConfig, "aspectRatios" | "aspectRatioSource"> {
+  const documented = documentedImageAspectRatios(upstreamModel);
+  const supported = options.declared ?? documented ?? options.channel ?? options.configured ?? [];
+  return {
+    aspectRatios: aspectRatios.filter(
+      (ratio) =>
+        supported.includes(ratio) &&
+        (!options.configured || options.configured.includes(ratio)) &&
+        (!options.channel || options.channel.includes(ratio))
+    ),
+    aspectRatioSource: options.declared
+      ? "upstream"
+      : documented
+        ? "documented"
+        : options.channel || options.configured
+          ? "configured"
+          : "unverified"
+  };
+}
+
+export function isGpt4kModel(upstreamModel: string): boolean {
+  return /^gpt[-_ ]image(?:[-_ ][a-z0-9.]+)*[-_ ]4k$/i.test(upstreamModel);
 }

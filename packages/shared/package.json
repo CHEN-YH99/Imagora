@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./image-models": {
+      "types": "./dist/image-models.d.ts",
+      "default": "./dist/image-models.js"
     }
   },
   "scripts": {
