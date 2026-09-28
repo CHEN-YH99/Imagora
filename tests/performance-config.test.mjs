@@ -64,7 +64,7 @@ test("queue worker settings expose bounded performance defaults", async () => {
   );
 });
 
-test("worker maintenance gate throttles claim-time full maintenance", async () => {
+test("worker maintenance gate throttles bounded maintenance independently of task claims", async () => {
   const { createWorkerMaintenanceGate } = await import("../apps/worker/dist/maintenance-runtime.js");
   const gate = createWorkerMaintenanceGate(60_000);
 
@@ -79,8 +79,11 @@ test("worker maintenance gate throttles claim-time full maintenance", async () =
   assert.equal(unthrottledGate.shouldRun(1_000), true);
 
   const workerMain = await readFile("apps/worker/src/main.ts", "utf8");
-  assert.match(workerMain, /if \(workerMaintenanceGate\.shouldRun\(\)\) {\s+runWorkerMaintenance\(data\);\s+}/);
-  assert.doesNotMatch(workerMain, /store\.update\(\(data\) => {\s+runWorkerMaintenance\(data\);/);
+  // 维护分批轮转且受间隔门控；领取只加载目标任务，worker 不再调用全库 update。
+  assert.match(workerMain, /if \(workerMaintenanceGate\.shouldRun\(\)\) {\s+await runWorkerMaintenance\(\);\s+}/);
+  assert.doesNotMatch(workerMain, /store\.(?:read|update)\(/);
+  assert.match(workerMain, /generationMaintenanceRunner\.run\(/);
+  assert.match(workerMain, /store\.updateScoped\({ generationTasks: taskScope/);
   assert.match(workerMain, /WORKER_MAINTENANCE_INTERVAL_MS", 60_000/);
 });
 
@@ -225,11 +228,7 @@ test("pending generation reconciliation rotates small batches and retries failur
   let queueAvailable = false;
   const enqueuedTaskIds = [];
   const runtime = createGenerationEnqueueRuntime({
-    store: {
-      async read() {
-        return { generationTasks: tasks };
-      }
-    },
+    store: pendingTaskStore(tasks),
     queue: {
       async enqueueGenerationTask(job) {
         enqueuedTaskIds.push(job.taskId);
@@ -261,11 +260,7 @@ test("generation enqueue reconciliation suppresses repeated outage logs and repo
   const logs = [];
   let queueAvailable = false;
   const runtime = createGenerationEnqueueRuntime({
-    store: {
-      async read() {
-        return { generationTasks: [task] };
-      }
-    },
+    store: pendingTaskStore([task]),
     queue: {
       async enqueueGenerationTask() {
         if (!queueAvailable) {
@@ -296,11 +291,7 @@ test("immediate generation enqueue suppresses repeated outage logs and reports r
   const logs = [];
   let queueAvailable = false;
   const runtime = createGenerationEnqueueRuntime({
-    store: {
-      async read() {
-        return { generationTasks: [] };
-      }
-    },
+    store: pendingTaskStore([]),
     queue: {
       async enqueueGenerationTask() {
         if (!queueAvailable) {
@@ -336,13 +327,10 @@ test("generation enqueue shutdown waits for an active reconciliation", async () 
     releaseRead = resolve;
   });
   const runtime = createGenerationEnqueueRuntime({
-    store: {
-      async read() {
-        readStarted();
-        await readBlockedPromise;
-        return { generationTasks: [] };
-      }
-    },
+    store: pendingTaskStore([], async () => {
+      readStarted();
+      await readBlockedPromise;
+    }),
     queue: {
       async enqueueGenerationTask() {}
     },
@@ -369,11 +357,7 @@ test("generation enqueue shutdown waits for active immediate enqueue attempts", 
   const enqueueStarted = deferred();
   const enqueueRelease = deferred();
   const runtime = createGenerationEnqueueRuntime({
-    store: {
-      async read() {
-        return { generationTasks: [] };
-      }
-    },
+    store: pendingTaskStore([]),
     queue: {
       async enqueueGenerationTask() {
         enqueueStarted.resolve();
@@ -403,12 +387,9 @@ test("stopped generation enqueue runtime does not restart or access store and qu
   let readCalls = 0;
   let enqueueCalls = 0;
   const runtime = createGenerationEnqueueRuntime({
-    store: {
-      async read() {
-        readCalls += 1;
-        return { generationTasks: [] };
-      }
-    },
+    store: pendingTaskStore([], () => {
+      readCalls += 1;
+    }),
     queue: {
       async enqueueGenerationTask() {
         enqueueCalls += 1;
@@ -459,6 +440,21 @@ test("prisma store persists entity diffs without full-table rewrites or nested t
   assert.match(persistenceSource, /\.upsert\(/);
   assert.match(persistenceSource, /\.deleteMany\(\{/);
 });
+
+// 按 JsonStore/PrismaStore 相同语义模拟定向读取：只取 PENDING，按 (createdAt, id) 升序，游标之后取 limit 条。
+function pendingTaskStore(tasks, beforeRead) {
+  return {
+    async readPendingGenerationTasks({ after, limit }) {
+      await beforeRead?.();
+      const compare = (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+      return tasks
+        .filter((task) => task.status === "PENDING" && (!after || compare(task, after) > 0))
+        .sort(compare)
+        .slice(0, limit)
+        .map(({ id, userId, createdAt }) => ({ id, userId, createdAt }));
+    }
+  };
+}
 
 function pendingTask(id, createdAt) {
   return {

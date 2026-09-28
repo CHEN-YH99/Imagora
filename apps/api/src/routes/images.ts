@@ -4,7 +4,6 @@ import type { ApiRouteApp, ApiRouteContext } from "./types.js";
 export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext): void {
   const {
     assertFeatureEnabled,
-    descCreated,
     envelope,
     envNumber,
     extensionForMimeType,
@@ -13,7 +12,6 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
     imageParamSchema,
     AppError,
     mustFindOwnImage,
-    requireAuth,
     requireSession,
     resolveInlineDataUrl,
     storage,
@@ -23,25 +21,14 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
   } = context;
 
   app.get("/api/images", async (request) => {
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const query = imageQuerySchema.parse(request.query);
+    const data = await store.readImages({ ...query, userId: user.id });
     if (query.projectId) {
       mustFindOwnActiveProject(data, user.id, query.projectId, AppError);
     }
-    const matchingImages = data.generatedImages
-      .filter((image) => image.userId === user.id && !image.deletedAt && image.visibility !== "HIDDEN")
-      .filter((image) => (query.projectId ? image.projectId === query.projectId : true))
-      .filter((image) =>
-        query.favorite === undefined
-          ? true
-          : data.imageFavorites.some((favorite) => favorite.userId === user.id && favorite.imageId === image.id) ===
-            query.favorite
-      )
-      .sort(descCreated);
-    const total = matchingImages.length;
-    const images = matchingImages
-      .slice(query.offset, query.offset + query.limit)
-      .map((image) => withFavorite(data, user.id, image));
+    const total = data.total;
+    const images = data.generatedImages.map((image) => withFavorite(data, user.id, image));
     return envelope(request, {
       images,
       pageInfo: {
@@ -54,8 +41,9 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.get("/api/images/:imageId", async (request) => {
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { imageId } = imageParamSchema.parse(request.params);
+    const data = await store.readImages({ userId: user.id, imageId, offset: 0, limit: 1 });
     const image = mustFindOwnImage(data, user.id, imageId);
     const task = data.generationTasks.find((item) => item.id === image.taskId && item.userId === user.id);
     return envelope(request, {
@@ -65,8 +53,9 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.post("/api/images/:imageId/preview-url", async (request) => {
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { imageId } = imageParamSchema.parse(request.params);
+    const data = await store.readImages({ userId: user.id, imageId, offset: 0, limit: 1 });
     const image = mustFindOwnImage(data, user.id, imageId);
     const expiresInSeconds = Math.max(
       60,
@@ -141,8 +130,9 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
 
   app.post("/api/images/:imageId/download-url", async (request) => {
     assertFeatureEnabled("downloads");
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { imageId } = imageParamSchema.parse(request.params);
+    const data = await store.readImages({ userId: user.id, imageId, offset: 0, limit: 1 });
     const image = mustFindOwnImage(data, user.id, imageId);
     const expiresInSeconds = Math.max(60, Math.min(envNumber("DOWNLOAD_URL_TTL_MINUTES", 15) * 60, 60 * 60 * 24 * 7));
     const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
@@ -154,8 +144,9 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
   });
 
   app.delete("/api/images/:imageId", async (request) => {
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const { imageId } = imageParamSchema.parse(request.params);
+    const data = await store.readImages({ userId: user.id, imageId, offset: 0, limit: 1 });
     const image = mustFindOwnImage(data, user.id, imageId);
     await storage.deleteObject(image.storageKey);
     if (image.thumbnailKey && image.thumbnailKey !== image.storageKey) {
@@ -183,7 +174,7 @@ export function registerImageRoutes(app: ApiRouteApp, context: ApiRouteContext):
 }
 
 function mustFindOwnActiveProject(
-  data: StoreData,
+  data: Pick<StoreData, "imageProjects">,
   userId: string,
   projectId: string,
   AppError: ApiRouteContext["AppError"]

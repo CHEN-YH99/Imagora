@@ -4,6 +4,7 @@ import { z } from "zod";
 import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import type { StoreScope } from "@imagora/database";
 import { generationInputSchema, generationRetrySchema, taskBatchQuerySchema } from "../schemas.js";
 import { sessionToken } from "../auth-runtime.js";
 import { createGenerationEventsRuntime } from "../generation-events-runtime.js";
@@ -84,18 +85,22 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     return envelope(request, { creditCost: estimatedCost, balanceRequired: estimatedCost });
   });
 
-  function retryGenerationInput(data: StoreData, userId: string, taskId: string, requestId?: string) {
-    const previous = mustFindOwnTask(data, userId, taskId);
-    if (!["FAILED", "BLOCKED"].includes(previous.status)) {
-      throw new AppError("TASK_NOT_RETRYABLE", "Only failed or blocked tasks can be retried", 400);
-    }
+  function retryClientRequestId(taskId: string, requestId?: string) {
     // 原任务参与命名空间；旧客户端不传标识时，同一失败任务也只能创建一次重试。
     const key = createHash("sha256")
       .update(JSON.stringify([taskId, requestId ?? null]))
       .digest("hex");
+    return `retry:${key}`;
+  }
+
+  function retryGenerationInput(data: StoreData, userId: string, taskId: string, clientRequestId: string) {
+    const previous = mustFindOwnTask(data, userId, taskId);
+    if (!["FAILED", "BLOCKED"].includes(previous.status)) {
+      throw new AppError("TASK_NOT_RETRYABLE", "Only failed or blocked tasks can be retried", 400);
+    }
     return generationInputSchema.parse({
       ...generationMetadataFromTask(previous),
-      clientRequestId: `retry:${key}`,
+      clientRequestId,
       referenceImageId: previous.referenceImageId ?? undefined,
       negativePrompt: previous.negativePrompt ?? undefined,
       model: previous.modelName
@@ -108,13 +113,34 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     assertEmailVerified(user);
     // 重试与新建共用开关、登录、邮箱验证与限流；原任务 ID 在鉴权之后才解析。
     const submission = retry
-      ? {
-          kind: "retry" as const,
-          ...idParamSchema.parse(request.params),
-          ...generationRetrySchema.parse(request.body ?? {})
-        }
-      : { kind: "create" as const, input: generationInputSchema.parse(request.body) };
-    const result = await store.update(async (data) => {
+      ? (() => {
+          const { taskId } = idParamSchema.parse(request.params);
+          const { clientRequestId } = generationRetrySchema.parse(request.body ?? {});
+          return { kind: "retry" as const, taskId, clientRequestId: retryClientRequestId(taskId, clientRequestId) };
+        })()
+      : (() => {
+          const input = generationInputSchema.parse(request.body);
+          return { kind: "create" as const, input, clientRequestId: input.clientRequestId };
+        })();
+    // 只加载本次提交涉及的任务、账户、流水、参考图与生效中的安全规则，不读全库。
+    const scope = {
+      creditAccounts: { userIds: [user.id] },
+      generationTasks: {
+        userId: user.id,
+        clientRequestIds: [submission.clientRequestId],
+        ...(submission.kind === "retry" ? { ids: [submission.taskId] } : {})
+      },
+      creditLedgerEntries: "loadedTasks",
+      referenceImages: {
+        ...(submission.kind === "create" && submission.input.referenceImageId
+          ? { ids: [submission.input.referenceImageId] }
+          : {}),
+        loadedTasks: submission.kind === "retry"
+      },
+      safetyRules: "active",
+      safetyEvents: "append"
+    } satisfies StoreScope;
+    const result = await store.updateScoped(scope, async (data) => {
       const input =
         submission.kind === "retry"
           ? retryGenerationInput(data, user.id, submission.taskId, submission.clientRequestId)

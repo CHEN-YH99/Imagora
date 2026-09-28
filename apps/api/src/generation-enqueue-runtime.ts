@@ -16,7 +16,7 @@ export interface GenerationEnqueueReconciliation {
 }
 
 interface GenerationEnqueueRuntimeOptions {
-  store: Pick<Store, "read">;
+  store: Pick<Store, "readPendingGenerationTasks">;
   queue: Pick<GenerationQueue, "enqueueGenerationTask">;
   intervalMs: number;
   batchSize: number;
@@ -100,8 +100,7 @@ export function createGenerationEnqueueRuntime(options: GenerationEnqueueRuntime
     }
 
     activeReconciliation = (async () => {
-      const snapshot = await options.store.read();
-      const pendingTasks = selectPendingTasks(snapshot.generationTasks);
+      const pendingTasks = await selectPendingTasks();
       const attempts = await Promise.all(pendingTasks.map((task) => attemptEnqueue(task)));
       const lastAttemptedTask = pendingTasks.at(-1);
       if (lastAttemptedTask) {
@@ -137,19 +136,18 @@ export function createGenerationEnqueueRuntime(options: GenerationEnqueueRuntime
     return activeReconciliation;
   }
 
-  function selectPendingTasks(tasks: GenerationTask[]): PendingTask[] {
-    const pendingTasks = tasks.filter((task) => task.status === "PENDING").sort(comparePendingTaskPosition);
-    if (pendingTasks.length === 0) {
-      return [];
-    }
-
+  // 游标之后取一批；不足一批时从头补齐（即回绕到游标及之前的任务），只按需定向读取 PENDING 任务。
+  async function selectPendingTasks(): Promise<PendingTask[]> {
     const cursor = reconciliationCursor;
-    const cursorIndex = cursor ? pendingTasks.findIndex((task) => comparePendingTaskPosition(task, cursor) > 0) : 0;
-    const startIndex = cursorIndex === -1 ? 0 : cursorIndex;
-    if (startIndex === 0) {
-      return pendingTasks.slice(0, batchSize);
+    const afterCursor = cursor
+      ? await options.store.readPendingGenerationTasks({ after: cursor, limit: batchSize })
+      : [];
+    if (afterCursor.length >= batchSize) {
+      return afterCursor;
     }
-    return [...pendingTasks.slice(startIndex), ...pendingTasks.slice(0, startIndex)].slice(0, batchSize);
+    const selected = new Set(afterCursor.map((task) => task.id));
+    const fromStart = await options.store.readPendingGenerationTasks({ limit: batchSize });
+    return [...afterCursor, ...fromStart.filter((task) => !selected.has(task.id))].slice(0, batchSize);
   }
 
   function start(): void {
@@ -197,14 +195,6 @@ export function createGenerationEnqueueRuntime(options: GenerationEnqueueRuntime
     start,
     stop
   };
-}
-
-function comparePendingTaskPosition(
-  left: Pick<PendingTask, "createdAt" | "id">,
-  right: Pick<PendingTask, "createdAt" | "id">
-): number {
-  const createdAtComparison = left.createdAt.localeCompare(right.createdAt);
-  return createdAtComparison || left.id.localeCompare(right.id);
 }
 
 function positiveInteger(value: number, fallback: number): number {

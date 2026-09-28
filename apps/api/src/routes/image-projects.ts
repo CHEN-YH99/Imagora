@@ -9,24 +9,19 @@ type ImageProjectView = ImageProject & {
 export function registerImageProjectRoutes(app: ApiRouteApp, context: ApiRouteContext): void {
   const {
     AppError,
-    descUpdated,
     envelope,
     imageProjectCreateSchema,
     imageProjectParamSchema,
     imageProjectPatchSchema,
     mustFindOwnImage,
     randomUUID,
-    requireAuth,
     requireSession,
     store
   } = context;
 
   app.get("/api/image-projects", async (request) => {
-    const { user, data } = await requireAuth(request);
-    const projects = data.imageProjects
-      .filter((project) => project.userId === user.id && !project.archivedAt)
-      .sort(descUpdated)
-      .map((project) => withProjectStats(data, project));
+    const { user } = await requireSession(request);
+    const projects = await store.readImageProjects(user.id);
     return envelope(request, { projects });
   });
 

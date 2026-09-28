@@ -47,6 +47,7 @@ test("read endpoints and SSE never load the full Store through logging or authen
   const taskId = "scoped-task-" + crypto.randomUUID();
   const orderId = "scoped-order-" + crypto.randomUUID();
   const token = "scoped-session-" + crypto.randomUUID();
+  const imageId = "scoped-image-" + crypto.randomUUID();
   await store.update((data) => {
     data.sessions.push({
       token,
@@ -78,6 +79,24 @@ test("read endpoints and SSE never load the full Store through logging or authen
       completedAt: now,
       createdAt: now,
       updatedAt: now
+    });
+    data.generatedImages.push({
+      id: imageId,
+      userId: user.id,
+      taskId,
+      projectId: null,
+      storageKey: "fixture.png",
+      thumbnailKey: "fixture-thumb.png",
+      thumbnailUrl: "data:image/png;base64,AA==",
+      publicUrl: "",
+      width: 1024,
+      height: 1024,
+      fileSize: 10,
+      mimeType: "image/png",
+      safetyStatus: "PASSED",
+      visibility: "PRIVATE",
+      deletedAt: null,
+      createdAt: now
     });
     data.orders.push({
       id: orderId,
@@ -114,7 +133,14 @@ test("read endpoints and SSE never load the full Store through logging or authen
     const paths = [
       "/api/auth/me",
       "/api/users/me",
+      "/api/users/me/credits",
+      "/api/users/me/credit-ledger?limit=1",
+      "/api/users/me/safety-events?limit=1",
+      "/api/auth/sessions",
       "/api/plans",
+      "/api/images?offset=0&limit=1",
+      "/api/images/" + imageId,
+      "/api/image-projects",
       "/api/generation/tasks?status=SUCCEEDED&offset=0&limit=1",
       "/api/generation/tasks/" + taskId,
       "/api/generation/tasks/batch?ids=" + taskId,

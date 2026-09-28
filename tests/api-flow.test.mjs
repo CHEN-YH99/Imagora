@@ -1660,6 +1660,11 @@ test("api and worker complete generation and enforce admin safety rules", async 
     assert.equal(restoredPaymentCredits.data.account.balance, webhookPaid.data.balanceAfter);
     const storeAfterPaidOrderReconcile = await readStore(storePath);
     assert.equal(
+      storeAfterPaidOrderReconcile.orders.find((order) => order.id === refundOrder.data.order.id).status,
+      "REFUNDED",
+      "Historical payment success events must not reopen a refunded order"
+    );
+    assert.equal(
       storeAfterPaidOrderReconcile.creditLedgerEntries.filter(
         (entry) =>
           entry.sourceId === orderCreated.data.order.id &&

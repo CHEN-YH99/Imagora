@@ -37,7 +37,6 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
     randomUUID,
     registerSchema,
     requestPasswordResetSchema,
-    requireAuth,
     requireSession,
     resetPasswordSchema,
     saveCaptchaChallenge,
@@ -316,7 +315,8 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
 
   // 会话列表：展示当前用户所有有效会话，并标记当前请求所在会话。
   app.get("/api/auth/sessions", async (request) => {
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
+    const data = await store.readUserRecords({ userId: user.id, sessions: true });
     const currentToken = sessionToken(request);
     const sessions = data.sessions
       .filter((session) => session.userId === user.id)
@@ -581,28 +581,23 @@ export function registerAuthRoutes(app: ApiRouteApp, context: ApiRouteContext): 
   });
 
   app.get("/api/users/me/credits", async (request) => {
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
+    const data = await store.readUserRecords({ userId: user.id, creditAccount: true });
     const account = mustFindCreditAccount(data, user.id);
     return envelope(request, { account });
   });
 
   app.get("/api/users/me/credit-ledger", async (request) => {
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const query = paginationSchema.parse(request.query);
-    const entries = data.creditLedgerEntries
-      .filter((entry) => entry.userId === user.id)
-      .sort(descCreated)
-      .slice(0, query.limit);
+    const { creditLedgerEntries: entries } = await store.readUserRecords({ userId: user.id, ledgerLimit: query.limit });
     return envelope(request, { entries });
   });
 
   app.get("/api/users/me/safety-events", async (request) => {
-    const { user, data } = await requireAuth(request);
+    const { user } = await requireSession(request);
     const query = paginationSchema.parse(request.query);
-    const events = data.safetyEvents
-      .filter((event) => event.userId === user.id)
-      .sort(descCreated)
-      .slice(0, query.limit);
+    const { safetyEvents: events } = await store.readUserRecords({ userId: user.id, safetyEventLimit: query.limit });
     return envelope(request, { events });
   });
 }

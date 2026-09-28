@@ -420,7 +420,7 @@ function mustFindUser(data: StoreData, userId: string): User {
   return user;
 }
 
-function mustFindCreditAccount(data: StoreData, userId: string) {
+function mustFindCreditAccount(data: Pick<StoreData, "creditAccounts">, userId: string) {
   const account = data.creditAccounts.find((item) => item.userId === userId);
   if (!account) {
     throw new AppError("NOT_FOUND", "Credit account was not found", 404);
@@ -460,7 +460,7 @@ function mustFindOwnReferenceImage(data: StoreData, userId: string, referenceIma
   return image;
 }
 
-function mustFindOwnImage(data: StoreData, userId: string, imageId: string): GeneratedImage {
+function mustFindOwnImage(data: Pick<StoreData, "generatedImages">, userId: string, imageId: string): GeneratedImage {
   const image = data.generatedImages.find((item) => item.id === imageId && item.userId === userId && !item.deletedAt);
   if (!image) {
     throw new AppError("NOT_FOUND", "Image was not found", 404);
@@ -589,7 +589,7 @@ function reconcileSucceededPaymentEvents(data: StoreData, now: string): number {
       continue;
     }
     const order = data.orders.find((item) => item.id === event.orderId);
-    if (!order || order.status === "PAID") {
+    if (!order || !["PENDING", "CLOSED"].includes(order.status)) {
       continue;
     }
     if (
@@ -1155,7 +1155,11 @@ function adjustCredits(
   return true;
 }
 
-function withFavorite(data: StoreData, userId: string, image: GeneratedImage): GeneratedImage & { favorite: boolean } {
+function withFavorite(
+  data: Pick<StoreData, "imageFavorites">,
+  userId: string,
+  image: GeneratedImage
+): GeneratedImage & { favorite: boolean } {
   return {
     ...withoutImagePublicUrl(image),
     favorite: data.imageFavorites.some((favorite) => favorite.userId === userId && favorite.imageId === image.id)

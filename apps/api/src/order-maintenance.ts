@@ -1,4 +1,5 @@
 import type { createPaymentProvider } from "@imagora/payments";
+import { createGenerationMaintenanceRunner, type Store } from "@imagora/database";
 import {
   DEFAULT_PENDING_TASK_TIMEOUT_MS,
   DEFAULT_RUNNING_TASK_TIMEOUT_MS,
@@ -35,10 +36,15 @@ interface PaymentSucceededInput {
 }
 
 interface OrderMaintenanceRuntimeOptions {
-  store: {
-    read(): Promise<StoreData>;
-    update<T>(fn: (data: StoreData) => T | Promise<T>): Promise<T>;
-  };
+  store: Pick<
+    Store,
+    | "read"
+    | "update"
+    | "updateScoped"
+    | "readGenerationMaintenanceCandidates"
+    | "readCreditExpiryUsers"
+    | "trimOperationalIncidents"
+  >;
   paymentProvider: ReturnType<typeof createPaymentProvider>;
   closeExpiredPendingOrders(data: StoreData, now: string): number;
   reconcileSucceededPaymentEvents(data: StoreData, now: string): number;
@@ -59,6 +65,7 @@ export interface OrderMaintenanceRuntime {
 }
 
 export function createOrderMaintenanceRuntime(options: OrderMaintenanceRuntimeOptions): OrderMaintenanceRuntime {
+  const generationMaintenanceRunner = createGenerationMaintenanceRunner(options.store);
   function generationMaintenanceOptions(): { pendingTimeoutMs: number; runningTimeoutMs: number } {
     return {
       pendingTimeoutMs: envNumber("GENERATION_PENDING_TIMEOUT_MS", DEFAULT_PENDING_TASK_TIMEOUT_MS),
@@ -92,10 +99,10 @@ export function createOrderMaintenanceRuntime(options: OrderMaintenanceRuntimeOp
     }
 
     const timer = setInterval(() => {
-      options.store
-        .update((data) => {
-          const generationMaintenance = runGenerationMaintenance(data, generationMaintenanceOptions());
-          const expiredCredits = expireCredits(data);
+      generationMaintenanceRunner
+        .run(generationMaintenanceOptions())
+        .then((generationMaintenance) => {
+          const expiredCredits = generationMaintenance.expiredCredits;
           if (
             generationMaintenance.failedPendingTasks ||
             generationMaintenance.failedRunningTasks ||

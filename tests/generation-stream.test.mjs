@@ -513,6 +513,233 @@ test("JSON scoped reads isolate users, page tasks and keep cached snapshots immu
   assert.equal((await store.read()).users[0].status, "ACTIVE");
 });
 
+test("image queries push ownership, favorite filtering and pagination into Prisma without reading unrelated tables", async () => {
+  const calls = [];
+  const project = {
+    id: "project-1",
+    userId: task.userId,
+    name: "one",
+    description: "",
+    coverImageId: image.id,
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: null
+  };
+  let missingProject = false;
+  const tx = {
+    imageProject: {
+      async findMany(args) {
+        calls.push(["project", args]);
+        return missingProject ? [] : [row(project, ["createdAt", "updatedAt"])];
+      }
+    },
+    generatedImage: {
+      async findMany(args) {
+        calls.push(["images", args]);
+        return [
+          {
+            ...row({ ...image, projectId: project.id }, ["createdAt"]),
+            task: row(task, ["startedAt", "createdAt", "updatedAt"]),
+            favorites: [{ userId: task.userId, imageId: image.id, createdAt: new Date(now) }]
+          }
+        ];
+      },
+      async count(args) {
+        calls.push(["count", args]);
+        return 25;
+      }
+    },
+    creditLedgerEntry: {
+      async findMany(args) {
+        calls.push(["refunds", args]);
+        return [row(entry, ["createdAt"])];
+      }
+    }
+  };
+  const store = new PrismaStore({
+    async $transaction(run, options) {
+      assert.equal(options.isolationLevel, "RepeatableRead");
+      return run(tx);
+    }
+  });
+  const query = { userId: task.userId, projectId: project.id, favorite: true, offset: 10, limit: 5 };
+  const page = await store.readImages(query);
+  assert.equal(page.total, 25);
+  assert.equal(page.generatedImages[0].id, image.id);
+  const imageQuery = calls.find(([kind]) => kind === "images")[1];
+  assert.equal(imageQuery.skip, 10);
+  assert.equal(imageQuery.take, 5);
+  assert.deepEqual(imageQuery.where, {
+    userId: task.userId,
+    deletedAt: null,
+    visibility: { not: "HIDDEN" },
+    projectId: project.id,
+    favorites: { some: { userId: task.userId } }
+  });
+  assert.deepEqual(calls.find(([kind]) => kind === "count")[1].where, imageQuery.where);
+  assert.equal(
+    calls.some(([kind]) => kind === "refunds"),
+    false
+  );
+  assert.deepEqual(
+    page.imageFavorites.map((favorite) => favorite.userId),
+    [task.userId]
+  );
+  assert.deepEqual(page.generationTasks, []);
+  calls.length = 0;
+  const detail = await store.readImages({ userId: task.userId, imageId: image.id, offset: 0, limit: 1 });
+  assert.equal(detail.generationTasks[0].id, task.id);
+  assert.equal(detail.creditLedgerEntries[0].id, entry.id);
+  assert.deepEqual(calls.find(([kind]) => kind === "refunds")[1].where.sourceId, { in: [task.id] });
+  calls.length = 0;
+  await store.readImages({ userId: task.userId, favorite: false, offset: 0, limit: 5 });
+  assert.deepEqual(calls[0][1].where.favorites, { none: { userId: task.userId } });
+  calls.length = 0;
+  missingProject = true;
+  assert.equal((await store.readImages(query)).total, 0);
+  assert.deepEqual(
+    calls.map(([kind]) => kind),
+    ["project"]
+  );
+  tx.generatedImage.findMany = async () => [
+    {
+      ...row(image, ["createdAt"]),
+      task: row({ ...task, userId: "foreign-user" }, ["startedAt", "createdAt", "updatedAt"]),
+      favorites: []
+    }
+  ];
+  tx.creditLedgerEntry.findMany = () => assert.fail("An unrelated task must never fetch refunds");
+  const isolated = await store.readImages({ userId: task.userId, imageId: image.id, offset: 0, limit: 1 });
+  assert.deepEqual(isolated.generationTasks, []);
+  assert.deepEqual(isolated.creditLedgerEntries, []);
+});
+
+test("image pagination keeps tenant boundaries, favorites, hidden images and project covers consistent", async () => {
+  const dir = await fs.mkdtemp(join(tmpdir(), "imagora-image-page-"));
+  const store = new JsonStore(join(dir, "store.json"));
+  const data = storeData();
+  data.imageProjects = [
+    {
+      id: "p",
+      userId: task.userId,
+      name: "own",
+      description: "",
+      coverImageId: "b",
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null
+    },
+    {
+      id: "foreign-p",
+      userId: "foreign",
+      name: "foreign",
+      description: "",
+      coverImageId: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null
+    },
+    {
+      id: "archived",
+      userId: task.userId,
+      name: "archived",
+      description: "",
+      coverImageId: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: now
+    }
+  ];
+  data.generatedImages = [
+    { ...image, id: "a", projectId: "p" },
+    { ...image, id: "b", projectId: "p" },
+    { ...image, id: "c", projectId: "p", visibility: "HIDDEN" },
+    { ...image, id: "deleted", projectId: "p", deletedAt: now },
+    { ...image, id: "foreign", userId: "foreign", projectId: "foreign-p" }
+  ];
+  data.imageFavorites = [
+    { userId: task.userId, imageId: "a", createdAt: now },
+    { userId: "foreign", imageId: "b", createdAt: now }
+  ];
+  await store.write(data);
+  const base = { userId: task.userId, offset: 0, limit: 1 };
+  const first = await store.readImages(base);
+  const second = await store.readImages({ ...base, offset: 1 });
+  assert.equal(first.total, 2);
+  assert.deepEqual([first.generatedImages[0].id, second.generatedImages[0].id], ["b", "a"]);
+  assert.deepEqual(
+    (await store.readImages({ ...base, favorite: true })).generatedImages.map((image) => image.id),
+    ["a"]
+  );
+  assert.deepEqual(
+    (await store.readImages({ ...base, favorite: false })).generatedImages.map((image) => image.id),
+    ["b"]
+  );
+  for (const projectId of ["foreign-p", "archived", "missing"]) {
+    const result = await store.readImages({ ...base, projectId });
+    assert.equal(result.total, 0);
+    assert.deepEqual(result.imageProjects, []);
+  }
+  assert.equal((await store.readImages({ ...base, imageId: "foreign" })).total, 0);
+  assert.equal((await store.readImages({ ...base, imageId: "deleted" })).total, 0);
+  // 保持现有详情契约：列表隐藏的图片仍可由所有者直接访问。
+  assert.equal((await store.readImages({ ...base, imageId: "c" })).total, 1);
+  const projects = await store.readImageProjects(task.userId);
+  assert.equal(projects.length, 1);
+  assert.equal(projects[0].imageCount, 2);
+  assert.equal(projects[0].coverThumbnailUrl, image.thumbnailUrl);
+  first.generatedImages[0].visibility = "HIDDEN";
+  assert.equal((await store.readImages(base)).total, 2);
+});
+
+test("user records query only requested entities and enforce tenant and database limits", async () => {
+  const calls = [];
+  const store = new PrismaStore({
+    userCreditAccount: {
+      async findMany(args) {
+        calls.push(["account", args]);
+        return [];
+      }
+    },
+    creditLedgerEntry: {
+      async findMany(args) {
+        calls.push(["ledger", args]);
+        return [row(entry, ["createdAt"])];
+      }
+    },
+    safetyEvent: {
+      async findMany(args) {
+        calls.push(["safety", args]);
+        return [];
+      }
+    },
+    session: {
+      async findMany(args) {
+        calls.push(["sessions", args]);
+        return [];
+      }
+    }
+  });
+  await store.readUserRecords({ userId: task.userId, creditAccount: true });
+  assert.deepEqual(calls, [["account", { where: { userId: task.userId } }]]);
+  calls.length = 0;
+  const ledger = await store.readUserRecords({ userId: task.userId, ledgerLimit: 7 });
+  assert.deepEqual(calls, [
+    ["ledger", { where: { userId: task.userId }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 7 }]
+  ]);
+  assert.equal(ledger.creditLedgerEntries[0].id, entry.id);
+  calls.length = 0;
+  await store.readUserRecords({ userId: task.userId, safetyEventLimit: 3 });
+  assert.equal(calls[0][0], "safety");
+  assert.deepEqual(calls[0][1].where, { userId: task.userId });
+  assert.equal(calls[0][1].take, 3);
+  calls.length = 0;
+  await store.readUserRecords({ userId: task.userId, sessions: true });
+  assert.equal(calls[0][0], "sessions");
+  assert.equal(calls[0][1].where.userId, task.userId);
+  assert.ok(calls[0][1].where.expiresAt.gt instanceof Date);
+});
+
 test("Prisma progress writes one guarded row without reading the store", async () => {
   const calls = [];
   const prisma = {

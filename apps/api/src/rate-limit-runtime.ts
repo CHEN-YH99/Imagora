@@ -1,11 +1,12 @@
 import { createConnection } from "node:net";
-import { AppError, type StoreData } from "@imagora/shared";
+import { AppError } from "@imagora/shared";
+import type { SessionIdentity } from "@imagora/database";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { sessionToken } from "./auth-runtime.js";
 import { envNumber, pathOnly } from "./runtime.js";
 
 interface RateLimitStore {
-  read(): Promise<StoreData>;
+  readSession(token: string): Promise<SessionIdentity | null>;
 }
 
 export interface RateLimitBucket {
@@ -177,10 +178,8 @@ export function createRateLimitRuntime(store: RateLimitStore): {
     if (!token) {
       return request.ip;
     }
-    const data = await store.read();
-    const now = new Date();
-    const session = data.sessions.find((item) => item.token === token && new Date(item.expiresAt) > now);
-    return session ? `user:${session.userId}` : request.ip;
+    const session = await store.readSession(token);
+    return session ? `user:${session.user.id}` : request.ip;
   }
 
   return { enforceRateLimit };

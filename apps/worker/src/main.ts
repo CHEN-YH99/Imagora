@@ -11,7 +11,7 @@ import {
   resolveDefaultImageProvider,
   resolveImageChannels
 } from "@imagora/ai-providers";
-import { createStore } from "@imagora/database";
+import { createStore, createGenerationMaintenanceRunner, type StoreScope } from "@imagora/database";
 import { startGenerationWorker, type GenerationQueueJob, type GenerationWorkerHandle } from "@imagora/queue";
 import { createSafetyProvider } from "@imagora/safety";
 import { createObjectStorage } from "@imagora/storage";
@@ -20,11 +20,9 @@ import {
   DEFAULT_RUNNING_TASK_TIMEOUT_MS,
   createGenerationProgress,
   advanceGenerationProgress,
-  expireCredits,
   generationMetadataFromTask,
   maxQuantity,
   refundTaskCredits,
-  runGenerationMaintenance,
   type GeneratedImage,
   type GenerationTask,
   type StoreData
@@ -52,6 +50,7 @@ const logger = pino({
 validateProductionConfig();
 
 const store = createStore();
+const generationMaintenanceRunner = createGenerationMaintenanceRunner(store);
 const provider = createImageGenerationProvider(undefined, {
   onChannelEvent(event) {
     switch (event.type) {
@@ -187,19 +186,20 @@ async function processQueuedJob(job: GenerationQueueJob): Promise<void> {
 }
 
 async function claimNextPendingTask(): Promise<ClaimedTask | null> {
-  return claimTask((data) => data.generationTasks.find((item) => item.status === "PENDING"));
+  return claimTask({ nextPending: true });
 }
 
 async function claimTaskById(taskId: string): Promise<ClaimedTask | null> {
-  return claimTask((data) => data.generationTasks.find((item) => item.id === taskId && item.status === "PENDING"));
+  return claimTask({ ids: [taskId] });
 }
 
-async function claimTask(selectTask: (data: StoreData) => GenerationTask | undefined): Promise<ClaimedTask | null> {
-  return store.update((data) => {
-    if (workerMaintenanceGate.shouldRun()) {
-      runWorkerMaintenance(data);
-    }
-    const task = selectTask(data);
+async function claimTask(taskScope: NonNullable<StoreScope["generationTasks"]>): Promise<ClaimedTask | null> {
+  // 候选任务与过期用户分批轮转；维护和领取都不加载完整 Store。
+  if (workerMaintenanceGate.shouldRun()) {
+    await runWorkerMaintenance();
+  }
+  return store.updateScoped({ generationTasks: taskScope, referenceImages: { loadedTasks: true } }, (data) => {
+    const task = data.generationTasks.find((item) => item.status === "PENDING");
     if (!task) {
       return null;
     }
@@ -333,7 +333,16 @@ async function persistTaskOutcome(taskSnapshot: GenerationTask, outcome: TaskExe
   };
 
   try {
-    persistResult = await store.update((data) => {
+    // 只加载本任务、账户、本任务流水与未关闭故障；退款所需的已扣/已退/幂等键都在本任务流水里。
+    const scope = {
+      generationTasks: { ids: [taskSnapshot.id] },
+      creditAccounts: { userIds: [taskSnapshot.userId] },
+      creditLedgerEntries: "loadedTasks",
+      generatedImages: "append",
+      safetyEvents: "append",
+      operationalIncidents: { openTaskIds: [taskSnapshot.id] }
+    } satisfies StoreScope;
+    persistResult = await store.updateScoped(scope, (data) => {
       const task = data.generationTasks.find((item) => item.id === taskSnapshot.id);
       if (!task || task.status !== "RUNNING") {
         return { finalized: false as const, status: task?.status ?? null };
@@ -545,9 +554,6 @@ function recordOperationalIncident(
     updatedAt: now,
     resolvedAt: null
   });
-  data.operationalIncidents = data.operationalIncidents
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    .slice(0, incidentRetentionMax());
 }
 
 function sanitizeOperationalMessage(message: string): string {
@@ -561,9 +567,11 @@ function incidentRetentionMax(): number {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 100;
 }
 
-function runWorkerMaintenance(data: StoreData): void {
-  runGenerationMaintenance(data, generationMaintenanceOptions());
-  expireCredits(data);
+async function runWorkerMaintenance(): Promise<void> {
+  await generationMaintenanceRunner.run({
+    ...generationMaintenanceOptions(),
+    incidentRetentionMax: incidentRetentionMax()
+  });
 }
 
 function generationMaintenanceOptions() {

@@ -173,6 +173,8 @@ model CreditLedgerEntry {
   @@index([userId, createdAt(sort: Desc)])
   @@index([type, expiresAt])
   @@index([userId, sourceType, sourceId, type])
+  @@index([sourceType, sourceId, type])
+  @@index([type, expiresAt, userId])
   @@map("credit_ledger_entries")
 }
 

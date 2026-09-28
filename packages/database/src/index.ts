@@ -4,7 +4,12 @@ import type {
   CreditLedgerEntry as LedgerRow,
   User as UserRow,
   Order as OrderRow,
-  Plan as PlanRow
+  Plan as PlanRow,
+  ImageProject as ImageProjectRow,
+  UserCreditAccount as CreditAccountRow,
+  ReferenceImage as ReferenceImageRow,
+  SafetyRule as SafetyRuleRow,
+  OperationalIncident as IncidentRow
 } from "../generated/client/index.js";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -16,12 +21,33 @@ import type {
   CreditLedgerEntry,
   GenerationMetadata,
   GenerationProgress,
+  GenerationTask,
   Plan,
   SafetyAppeal,
   StoreData,
   User
 } from "@imagora/shared";
-import { persistStoreDiff } from "./prisma-store-persistence.js";
+import { createEmptyStoreData, persistStoreDiff } from "./prisma-store-persistence.js";
+import {
+  readPrismaGenerationCandidates,
+  readPrismaCreditExpiryUsers,
+  selectGenerationCandidates,
+  selectCreditExpiryUsers,
+  trimPrismaIncidents,
+  type GenerationMaintenanceQuery,
+  type CreditExpiryQuery
+} from "./maintenance-queries.js";
+export type { GenerationMaintenanceQuery, CreditExpiryQuery } from "./maintenance-queries.js";
+export { createGenerationMaintenanceRunner } from "./maintenance-runtime.js";
+import {
+  applyStoreDiff,
+  guardStoreScope,
+  projectStoreScope,
+  scopedReferenceImageIds,
+  type StoreScope
+} from "./store-scope.js";
+
+export type { StoreScope } from "./store-scope.js";
 
 const workspaceRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const defaultPath = resolve(workspaceRoot, "data", "imagora-store.json");
@@ -31,6 +57,15 @@ export interface Store {
   read(): Promise<StoreData>;
   readSession(token: string): Promise<SessionIdentity | null>;
   readGenerationTasks(query: GenerationTasksQuery): Promise<GenerationTasksData>;
+  readImages(query: ImagesQuery): Promise<ImagesData>;
+  readUserRecords(query: UserRecordsQuery): Promise<UserRecordsData>;
+  readImageProjects(userId: string): Promise<ImageProjectView[]>;
+  readGenerationMaintenanceCandidates(
+    query: GenerationMaintenanceQuery
+  ): Promise<Array<{ id: string; userId: string }>>;
+  readCreditExpiryUsers(query: CreditExpiryQuery): Promise<string[]>;
+  trimOperationalIncidents(keep: number): Promise<number>;
+  readPendingGenerationTasks(query: PendingGenerationTasksQuery): Promise<PendingGenerationTask[]>;
   readOrders(query: OrdersQuery): Promise<{ orders: StoreData["orders"]; plans: Plan[] }>;
   readActivePlans(): Promise<Plan[]>;
   closeExpiredUserOrders(userId: string, cutoff: string, now: string): Promise<number>;
@@ -38,6 +73,16 @@ export interface Store {
   updateGenerationProgress(write: GenerationProgressWrite): Promise<void>;
   write(data: StoreData): Promise<void>;
   update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T>;
+  /** 只加载 scope 声明的记录并在同一写锁内提交差异；回调访问未声明的表会抛错。 */
+  updateScoped<T>(scope: StoreScope, mutate: (data: StoreData) => T | Promise<T>): Promise<T>;
+}
+
+export type PendingGenerationTask = Pick<GenerationTask, "id" | "userId" | "createdAt">;
+
+export interface PendingGenerationTasksQuery {
+  /** 只返回排在该位置之后（createdAt、id 升序）的任务。 */
+  after?: Pick<GenerationTask, "createdAt" | "id">;
+  limit: number;
 }
 
 export interface GenerationStreamQuery {
@@ -73,6 +118,35 @@ export interface OrdersQuery {
   orderId?: string;
   limit?: number;
 }
+
+export interface UserRecordsQuery {
+  userId: string;
+  creditAccount?: boolean;
+  ledgerLimit?: number;
+  safetyEventLimit?: number;
+  sessions?: boolean;
+}
+
+export type UserRecordsData = Pick<StoreData, "creditAccounts" | "creditLedgerEntries" | "safetyEvents" | "sessions">;
+
+export interface ImagesQuery {
+  userId: string;
+  imageId?: string;
+  projectId?: string;
+  favorite?: boolean;
+  offset: number;
+  limit: number;
+}
+
+export type ImagesData = Pick<
+  StoreData,
+  "generatedImages" | "generationTasks" | "creditLedgerEntries" | "imageFavorites" | "imageProjects"
+> & { total: number };
+
+export type ImageProjectView = StoreData["imageProjects"][number] & {
+  imageCount: number;
+  coverThumbnailUrl: string | null;
+};
 
 export interface GenerationStreamData {
   sessions: Array<{ token: string; userId: string; expiresAt: string; userStatus: User["status"] }>;
@@ -156,6 +230,125 @@ export class JsonStore implements Store {
     });
   }
 
+  async readGenerationMaintenanceCandidates(query: GenerationMaintenanceQuery) {
+    return selectGenerationCandidates(await this.readSnapshot(), query);
+  }
+
+  async readCreditExpiryUsers(query: CreditExpiryQuery): Promise<string[]> {
+    return selectCreditExpiryUsers(await this.readSnapshot(), query);
+  }
+
+  async trimOperationalIncidents(keep: number): Promise<number> {
+    if (!Number.isSafeInteger(keep) || keep < 0) throw new RangeError("Invalid incident retention limit");
+    return this.update((data) => {
+      const incidents = data.operationalIncidents ?? [];
+      const removed = Math.max(0, incidents.length - keep);
+      if (removed)
+        data.operationalIncidents = incidents
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id))
+          .slice(0, keep);
+      return removed;
+    });
+  }
+
+  async readUserRecords(query: UserRecordsQuery): Promise<UserRecordsData> {
+    const data = await this.readSnapshot();
+    const byCreated = <T extends { createdAt: string; id: string }>(items: T[]) =>
+      items.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+    return structuredClone({
+      creditAccounts: query.creditAccount ? data.creditAccounts.filter((row) => row.userId === query.userId) : [],
+      creditLedgerEntries:
+        query.ledgerLimit === undefined
+          ? []
+          : byCreated(data.creditLedgerEntries.filter((row) => row.userId === query.userId)).slice(
+              0,
+              query.ledgerLimit
+            ),
+      safetyEvents:
+        query.safetyEventLimit === undefined
+          ? []
+          : byCreated(data.safetyEvents.filter((row) => row.userId === query.userId)).slice(0, query.safetyEventLimit),
+      sessions: query.sessions
+        ? data.sessions
+            .filter((row) => row.userId === query.userId && Date.parse(row.expiresAt) > Date.now())
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.token.localeCompare(a.token))
+        : []
+    });
+  }
+
+  async readImages(query: ImagesQuery): Promise<ImagesData> {
+    const data = await this.readSnapshot();
+    const imageProjects = query.projectId
+      ? data.imageProjects.filter(
+          (project) => project.id === query.projectId && project.userId === query.userId && !project.archivedAt
+        )
+      : [];
+    const favoriteIds = new Set(
+      data.imageFavorites.filter((item) => item.userId === query.userId).map((item) => item.imageId)
+    );
+    const matching =
+      query.projectId && !imageProjects.length
+        ? []
+        : data.generatedImages
+            .filter(
+              (image) =>
+                image.userId === query.userId &&
+                !image.deletedAt &&
+                (query.imageId ? image.id === query.imageId : image.visibility !== "HIDDEN") &&
+                (!query.projectId || image.projectId === query.projectId) &&
+                (query.favorite === undefined || favoriteIds.has(image.id) === query.favorite)
+            )
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+    const generatedImages = matching.slice(query.offset, query.offset + query.limit);
+    const imageIds = new Set(generatedImages.map((image) => image.id));
+    const taskIds = new Set(query.imageId ? generatedImages.map((image) => image.taskId) : []);
+    return structuredClone({
+      generatedImages,
+      imageProjects,
+      imageFavorites: data.imageFavorites.filter((item) => item.userId === query.userId && imageIds.has(item.imageId)),
+      generationTasks: data.generationTasks.filter((task) => task.userId === query.userId && taskIds.has(task.id)),
+      creditLedgerEntries: data.creditLedgerEntries.filter(
+        (entry) =>
+          entry.userId === query.userId &&
+          entry.sourceType === "TASK" &&
+          entry.type === "REFUND" &&
+          taskIds.has(entry.sourceId)
+      ),
+      total: matching.length
+    });
+  }
+
+  async readImageProjects(userId: string): Promise<ImageProjectView[]> {
+    const data = await this.readSnapshot();
+    return structuredClone(
+      data.imageProjects
+        .filter((project) => project.userId === userId && !project.archivedAt)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id))
+        .map((project) => {
+          const images = data.generatedImages
+            .filter(
+              (image) =>
+                image.userId === userId &&
+                image.projectId === project.id &&
+                !image.deletedAt &&
+                image.visibility !== "HIDDEN"
+            )
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+          const cover = images.find((image) => image.id === project.coverImageId) ?? images[0];
+          return { ...project, imageCount: images.length, coverThumbnailUrl: cover?.thumbnailUrl ?? null };
+        })
+    );
+  }
+
+  async readPendingGenerationTasks(query: PendingGenerationTasksQuery): Promise<PendingGenerationTask[]> {
+    const { after } = query;
+    return (await this.readSnapshot()).generationTasks
+      .filter((task) => task.status === "PENDING" && (!after || comparePendingPosition(task, after) > 0))
+      .sort(comparePendingPosition)
+      .slice(0, query.limit)
+      .map(({ id, userId, createdAt }) => ({ id, userId, createdAt }));
+  }
+
   async readOrders(query: OrdersQuery): Promise<{ orders: StoreData["orders"]; plans: Plan[] }> {
     const data = await this.readSnapshot();
     const orders = data.orders
@@ -237,20 +430,35 @@ export class JsonStore implements Store {
   }
 
   async update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
+    return this.serialized(async (data) => mutate(data));
+  }
+
+  async updateScoped<T>(scope: StoreScope, mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
+    // 与 Prisma 相同的投影与防漏读保护，JSON 下的接口测试即可覆盖 scope 声明是否完整。
+    return this.serialized(async (data) => {
+      const scoped = projectStoreScope(data, scope);
+      const before = structuredClone(scoped);
+      const result = await mutate(guardStoreScope(scoped, scope));
+      applyStoreDiff(data, before, scoped);
+      return result;
+    });
+  }
+
+  private async serialized<T>(operation: (data: StoreData) => Promise<T>): Promise<T> {
     let result: T | undefined;
-    const operation = this.updateChain.then(async () => {
+    const run = this.updateChain.then(async () => {
       await withFileLock(this.filePath, async () => {
         await this.ensureInitializedUnlocked();
         const data = await this.readUnlocked();
-        result = await mutate(data);
+        result = await operation(data);
         await this.writeUnlocked(data);
       });
     });
-    this.updateChain = operation.then(
+    this.updateChain = run.then(
       () => undefined,
       () => undefined
     );
-    await operation;
+    await run;
     return result as T;
   }
 
@@ -314,6 +522,34 @@ class DevelopmentFallbackStore implements Store {
     return this.run((store) => store.readGenerationTasks(query));
   }
 
+  async readGenerationMaintenanceCandidates(query: GenerationMaintenanceQuery) {
+    return this.run((store) => store.readGenerationMaintenanceCandidates(query));
+  }
+
+  async readCreditExpiryUsers(query: CreditExpiryQuery): Promise<string[]> {
+    return this.run((store) => store.readCreditExpiryUsers(query));
+  }
+
+  async trimOperationalIncidents(keep: number): Promise<number> {
+    return this.run((store) => store.trimOperationalIncidents(keep));
+  }
+
+  async readUserRecords(query: UserRecordsQuery): Promise<UserRecordsData> {
+    return this.run((store) => store.readUserRecords(query));
+  }
+
+  async readImages(query: ImagesQuery): Promise<ImagesData> {
+    return this.run((store) => store.readImages(query));
+  }
+
+  async readImageProjects(userId: string): Promise<ImageProjectView[]> {
+    return this.run((store) => store.readImageProjects(userId));
+  }
+
+  async readPendingGenerationTasks(query: PendingGenerationTasksQuery): Promise<PendingGenerationTask[]> {
+    return this.run((store) => store.readPendingGenerationTasks(query));
+  }
+
   async readOrders(query: OrdersQuery): Promise<{ orders: StoreData["orders"]; plans: Plan[] }> {
     return this.run((store) => store.readOrders(query));
   }
@@ -344,6 +580,10 @@ class DevelopmentFallbackStore implements Store {
 
   async update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
     return this.run((store) => store.update(mutate));
+  }
+
+  async updateScoped<T>(scope: StoreScope, mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
+    return this.run((store) => store.updateScoped(scope, mutate));
   }
 
   private async run<T>(operation: (store: Store) => Promise<T>): Promise<T> {
@@ -420,6 +660,193 @@ export class PrismaStore implements Store {
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 5_000 }
     );
+  }
+
+  async readGenerationMaintenanceCandidates(query: GenerationMaintenanceQuery) {
+    return readPrismaGenerationCandidates(this.prisma, query);
+  }
+
+  async readCreditExpiryUsers(query: CreditExpiryQuery): Promise<string[]> {
+    return readPrismaCreditExpiryUsers(this.prisma, query);
+  }
+
+  async trimOperationalIncidents(keep: number): Promise<number> {
+    return this.serialized((tx) => trimPrismaIncidents(tx, keep));
+  }
+
+  async readUserRecords(query: UserRecordsQuery): Promise<UserRecordsData> {
+    const [creditAccounts, entries, events, sessions] = await Promise.all([
+      query.creditAccount ? this.prisma.userCreditAccount.findMany({ where: { userId: query.userId } }) : [],
+      query.ledgerLimit === undefined
+        ? []
+        : this.prisma.creditLedgerEntry.findMany({
+            where: { userId: query.userId },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            take: query.ledgerLimit
+          }),
+      query.safetyEventLimit === undefined
+        ? []
+        : this.prisma.safetyEvent.findMany({
+            where: { userId: query.userId },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            take: query.safetyEventLimit
+          }),
+      query.sessions
+        ? this.prisma.session.findMany({
+            where: { userId: query.userId, expiresAt: { gt: new Date() } },
+            orderBy: [{ createdAt: "desc" }, { token: "desc" }]
+          })
+        : []
+    ]);
+    return {
+      creditAccounts: creditAccounts.map(creditAccountFromRow),
+      creditLedgerEntries: entries.map(creditLedgerEntryFromRow),
+      safetyEvents: events.map((event) => ({
+        id: event.id,
+        userId: event.userId,
+        targetType: event.targetType as StoreData["safetyEvents"][number]["targetType"],
+        targetId: event.targetId,
+        status: event.status,
+        reasonCode: event.reasonCode,
+        reasonMessage: event.reasonMessage,
+        provider: event.provider,
+        createdAt: event.createdAt.toISOString()
+      })),
+      sessions: sessions.map((session) => ({
+        token: session.token,
+        userId: session.userId,
+        createdAt: session.createdAt.toISOString(),
+        expiresAt: session.expiresAt.toISOString()
+      }))
+    };
+  }
+
+  async readImages(query: ImagesQuery): Promise<ImagesData> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const projects = query.projectId
+          ? await tx.imageProject.findMany({ where: { id: query.projectId, userId: query.userId, archivedAt: null } })
+          : [];
+        const imageProjects = projects.map(imageProjectFromRow);
+        if (query.projectId && !projects.length) {
+          return {
+            generatedImages: [],
+            generationTasks: [],
+            creditLedgerEntries: [],
+            imageFavorites: [],
+            imageProjects,
+            total: 0
+          };
+        }
+        const where: Prisma.GeneratedImageWhereInput = {
+          userId: query.userId,
+          deletedAt: null,
+          ...(query.imageId ? { id: query.imageId } : { visibility: { not: "HIDDEN" } }),
+          ...(query.projectId ? { projectId: query.projectId } : {}),
+          ...(query.favorite === undefined
+            ? {}
+            : {
+                favorites: query.favorite ? { some: { userId: query.userId } } : { none: { userId: query.userId } }
+              })
+        };
+        const [rows, total] = await Promise.all([
+          tx.generatedImage.findMany({
+            where,
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            skip: query.offset,
+            take: query.limit,
+            include: { favorites: { where: { userId: query.userId } }, task: true }
+          }),
+          tx.generatedImage.count({ where })
+        ]);
+        // 旧图片可能缺少元数据；仅关联当前页任务恢复兼容字段，绝不读取全部任务。
+        const generationTasks = rows
+          .map((image) => generationTaskFromRow(image.task))
+          .filter((task) => task.userId === query.userId);
+        const taskIds = [...new Set(generationTasks.map((task) => task.id))];
+        const entries =
+          query.imageId && taskIds.length
+            ? await tx.creditLedgerEntry.findMany({
+                where: { userId: query.userId, sourceType: "TASK", type: "REFUND", sourceId: { in: taskIds } }
+              })
+            : [];
+        return {
+          generatedImages: rows.map((image) => generatedImageFromRow(image, generationTasks)),
+          generationTasks: query.imageId ? generationTasks : [],
+          creditLedgerEntries: entries.map(creditLedgerEntryFromRow),
+          imageFavorites: rows.flatMap((image) =>
+            image.favorites.map((favorite) => ({
+              userId: favorite.userId,
+              imageId: favorite.imageId,
+              createdAt: favorite.createdAt.toISOString()
+            }))
+          ),
+          imageProjects,
+          total
+        };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 5_000 }
+    );
+  }
+
+  async readImageProjects(userId: string): Promise<ImageProjectView[]> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        const visible = { userId, deletedAt: null, visibility: { not: "HIDDEN" as const } };
+        const projects = await tx.imageProject.findMany({
+          where: { userId, archivedAt: null },
+          orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+          include: {
+            _count: { select: { images: { where: visible } } },
+            images: {
+              where: visible,
+              orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+              take: 1,
+              select: { id: true, projectId: true, thumbnailUrl: true, publicUrl: true }
+            }
+          }
+        });
+        const coverIds = projects.flatMap((project) => (project.coverImageId ? [project.coverImageId] : []));
+        const covers = coverIds.length
+          ? await tx.generatedImage.findMany({
+              where: { ...visible, id: { in: coverIds } },
+              select: { id: true, projectId: true, thumbnailUrl: true, publicUrl: true }
+            })
+          : [];
+        return projects.map((project) => {
+          const cover =
+            covers.find((image) => image.id === project.coverImageId && image.projectId === project.id) ??
+            project.images[0];
+          return {
+            ...imageProjectFromRow(project),
+            imageCount: project._count.images,
+            coverThumbnailUrl: cover ? (cover.thumbnailUrl ?? cover.publicUrl ?? "") : null
+          };
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 5_000 }
+    );
+  }
+
+  async readPendingGenerationTasks(query: PendingGenerationTasksQuery): Promise<PendingGenerationTask[]> {
+    const { after } = query;
+    const rows = await this.prisma.generationTask.findMany({
+      where: {
+        status: "PENDING",
+        ...(after
+          ? {
+              OR: [
+                { createdAt: { gt: new Date(after.createdAt) } },
+                { createdAt: new Date(after.createdAt), id: { gt: after.id } }
+              ]
+            }
+          : {})
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: query.limit,
+      select: { id: true, userId: true, createdAt: true }
+    });
+    return rows.map((task) => ({ id: task.id, userId: task.userId, createdAt: task.createdAt.toISOString() }));
   }
 
   async readOrders(query: OrdersQuery): Promise<{ orders: StoreData["orders"]; plans: Plan[] }> {
@@ -610,31 +1037,10 @@ export class PrismaStore implements Store {
         usedAt: token.usedAt?.toISOString() ?? null,
         createdAt: token.createdAt.toISOString()
       })),
-      creditAccounts: creditAccounts.map((account) => ({
-        userId: account.userId,
-        balance: account.balance,
-        totalEarned: account.totalEarned,
-        totalSpent: account.totalSpent,
-        updatedAt: account.updatedAt.toISOString()
-      })),
+      creditAccounts: creditAccounts.map(creditAccountFromRow),
       creditLedgerEntries: creditLedgerEntries.map(creditLedgerEntryFromRow),
       generationTasks: generationTaskViews,
-      referenceImages: referenceImages.map((image) => ({
-        id: image.id,
-        userId: image.userId,
-        storageKey: image.storageKey,
-        publicUrl: image.publicUrl ?? "",
-        originalFileName: image.originalFileName,
-        mimeType: image.mimeType as StoreData["referenceImages"][number]["mimeType"],
-        fileSize: image.fileSize,
-        width: image.width,
-        height: image.height,
-        contentHash: image.contentHash,
-        safetyStatus: image.safetyStatus,
-        createdAt: image.createdAt.toISOString(),
-        expiresAt: image.expiresAt.toISOString(),
-        deletedAt: image.deletedAt?.toISOString() ?? null
-      })),
+      referenceImages: referenceImages.map(referenceImageFromRow),
       generatedImages: generatedImages.map((image) => generatedImageFromRow(image, generationTaskViews)),
       imageFavorites: imageFavorites.map((favorite) => ({
         userId: favorite.userId,
@@ -699,14 +1105,7 @@ export class PrismaStore implements Store {
         provider: event.provider,
         createdAt: event.createdAt.toISOString()
       })),
-      safetyRules: safetyRules.map((rule) => ({
-        id: rule.id,
-        term: rule.term,
-        action: rule.action,
-        status: rule.status,
-        createdAt: rule.createdAt.toISOString(),
-        updatedAt: rule.updatedAt.toISOString()
-      })),
+      safetyRules: safetyRules.map(safetyRuleFromRow),
       safetyAppeals: safetyAppeals.map((appeal) => ({
         id: appeal.id,
         userId: appeal.userId,
@@ -730,22 +1129,7 @@ export class PrismaStore implements Store {
         userAgent: log.userAgent,
         createdAt: log.createdAt.toISOString()
       })),
-      operationalIncidents: operationalIncidents.map((incident) => ({
-        id: incident.id,
-        severity: incident.severity as StoreData["operationalIncidents"][number]["severity"],
-        area: incident.area as StoreData["operationalIncidents"][number]["area"],
-        status: incident.status as StoreData["operationalIncidents"][number]["status"],
-        message: incident.message,
-        errorCode: incident.errorCode,
-        requestId: incident.requestId,
-        userId: incident.userId,
-        taskId: incident.taskId,
-        orderId: incident.orderId,
-        route: incident.route,
-        createdAt: incident.createdAt.toISOString(),
-        updatedAt: incident.updatedAt.toISOString(),
-        resolvedAt: incident.resolvedAt?.toISOString() ?? null
-      })),
+      operationalIncidents: operationalIncidents.map(operationalIncidentFromRow),
       alertNotifications: alertNotifications.map((notification) => ({
         id: notification.id,
         alertId: notification.alertId,
@@ -772,26 +1156,103 @@ export class PrismaStore implements Store {
   }
 
   async update<T>(mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
+    return this.serialized(async (tx) => {
+      await this.seedIfEmpty(tx);
+      const data = await this.readFromClient(tx);
+      const before = structuredClone(data);
+      const result = await mutate(data);
+      await persistStoreDiff(tx, before, data);
+      return result;
+    });
+  }
+
+  async updateScoped<T>(scope: StoreScope, mutate: (data: StoreData) => T | Promise<T>): Promise<T> {
+    await this.ensureSeeded();
+    // 仍持有全局写锁：旧 update 以整行绝对值写积分账户，不加锁会互相覆盖；收益来自不再读全库。
+    return this.serialized(async (tx) => {
+      const data = await this.loadScope(tx, scope);
+      const before = structuredClone(data);
+      const result = await mutate(guardStoreScope(data, scope));
+      await persistStoreDiff(tx, before, data);
+      return result;
+    });
+  }
+
+  private async serialized<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
     let result: T | undefined;
-    const operation = this.updateChain.then(async () => {
+    const run = this.updateChain.then(async () => {
       await this.prisma.$transaction(
         async (tx) => {
           await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(73341001)");
-          await this.seedIfEmpty(tx);
-          const data = await this.readFromClient(tx);
-          const before = structuredClone(data);
-          result = await mutate(data);
-          await persistStoreDiff(tx, before, data);
+          result = await operation(tx);
         },
         { timeout: 30_000 }
       );
     });
-    this.updateChain = operation.then(
+    this.updateChain = run.then(
       () => undefined,
       () => undefined
     );
-    await operation;
+    await run;
     return result as T;
+  }
+
+  private async loadScope(tx: Prisma.TransactionClient, scope: StoreScope): Promise<StoreData> {
+    const data = createEmptyStoreData();
+    const taskScope = scope.generationTasks;
+    if (taskScope && "nextPending" in taskScope) {
+      data.generationTasks = (
+        await tx.generationTask.findMany({
+          where: { status: "PENDING" },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          take: 1
+        })
+      ).map(generationTaskFromRow);
+    } else if (taskScope && (taskScope.ids?.length || taskScope.clientRequestIds?.length)) {
+      data.generationTasks = (
+        await tx.generationTask.findMany({
+          where: {
+            ...(taskScope.userId ? { userId: taskScope.userId } : {}),
+            OR: [
+              ...(taskScope.ids?.length ? [{ id: { in: taskScope.ids } }] : []),
+              ...(taskScope.clientRequestIds?.length ? [{ clientRequestId: { in: taskScope.clientRequestIds } }] : [])
+            ]
+          }
+        })
+      ).map(generationTaskFromRow);
+    }
+    const taskIds = data.generationTasks.map((task) => task.id);
+    const referenceImageIds = scopedReferenceImageIds(scope, data.generationTasks);
+    const userIds = scope.creditAccounts?.userIds ?? [];
+    const openTaskIds = scope.operationalIncidents?.openTaskIds ?? [];
+    const [creditAccounts, creditLedgerEntries, referenceImages, safetyRules, operationalIncidents] = await Promise.all(
+      [
+        userIds.length ? tx.userCreditAccount.findMany({ where: { userId: { in: userIds } } }) : [],
+        scope.creditLedgerEntries === "loadedTasks" && taskIds.length
+          ? tx.creditLedgerEntry.findMany({
+              where: {
+                OR: [
+                  { sourceType: "TASK", sourceId: { in: taskIds } },
+                  { idempotencyKey: { in: taskIds.map((id) => `task-refund:${id}`) } }
+                ]
+              }
+            })
+          : typeof scope.creditLedgerEntries === "object" && scope.creditLedgerEntries.userIds.length
+            ? tx.creditLedgerEntry.findMany({ where: { userId: { in: scope.creditLedgerEntries.userIds } } })
+            : [],
+        referenceImageIds.length ? tx.referenceImage.findMany({ where: { id: { in: referenceImageIds } } }) : [],
+        scope.safetyRules === "active" ? tx.safetyRule.findMany({ where: { status: "ACTIVE" } }) : [],
+        openTaskIds.length
+          ? tx.operationalIncident.findMany({ where: { status: "OPEN", taskId: { in: openTaskIds } } })
+          : []
+      ]
+    );
+    data.creditAccounts = creditAccounts.map(creditAccountFromRow);
+    data.creditLedgerEntries = creditLedgerEntries.map(creditLedgerEntryFromRow);
+    data.referenceImages = referenceImages.map(referenceImageFromRow);
+    data.safetyRules = safetyRules.map(safetyRuleFromRow);
+    data.operationalIncidents = operationalIncidents.map(operationalIncidentFromRow);
+    return data;
   }
 
   private async ensureSeeded(): Promise<void> {
@@ -847,6 +1308,19 @@ function orderFromRow(order: OrderRow): StoreData["orders"][number] {
   };
 }
 
+function imageProjectFromRow(project: ImageProjectRow): StoreData["imageProjects"][number] {
+  return {
+    id: project.id,
+    userId: project.userId,
+    name: project.name,
+    description: project.description,
+    coverImageId: project.coverImageId,
+    createdAt: project.createdAt.toISOString(),
+    updatedAt: project.updatedAt.toISOString(),
+    archivedAt: project.archivedAt?.toISOString() ?? null
+  };
+}
+
 function planFromRow(plan: PlanRow): Plan {
   return { ...plan, createdAt: plan.createdAt.toISOString(), updatedAt: plan.updatedAt.toISOString() };
 }
@@ -883,6 +1357,72 @@ function generationTaskFromRow(task: TaskRow): StoreData["generationTasks"][numb
     createdAt: task.createdAt.toISOString(),
     updatedAt: task.updatedAt.toISOString()
   };
+}
+
+function creditAccountFromRow(account: CreditAccountRow): StoreData["creditAccounts"][number] {
+  return {
+    userId: account.userId,
+    balance: account.balance,
+    totalEarned: account.totalEarned,
+    totalSpent: account.totalSpent,
+    updatedAt: account.updatedAt.toISOString()
+  };
+}
+
+function referenceImageFromRow(image: ReferenceImageRow): StoreData["referenceImages"][number] {
+  return {
+    id: image.id,
+    userId: image.userId,
+    storageKey: image.storageKey,
+    publicUrl: image.publicUrl ?? "",
+    originalFileName: image.originalFileName,
+    mimeType: image.mimeType as StoreData["referenceImages"][number]["mimeType"],
+    fileSize: image.fileSize,
+    width: image.width,
+    height: image.height,
+    contentHash: image.contentHash,
+    safetyStatus: image.safetyStatus,
+    createdAt: image.createdAt.toISOString(),
+    expiresAt: image.expiresAt.toISOString(),
+    deletedAt: image.deletedAt?.toISOString() ?? null
+  };
+}
+
+function safetyRuleFromRow(rule: SafetyRuleRow): StoreData["safetyRules"][number] {
+  return {
+    id: rule.id,
+    term: rule.term,
+    action: rule.action,
+    status: rule.status,
+    createdAt: rule.createdAt.toISOString(),
+    updatedAt: rule.updatedAt.toISOString()
+  };
+}
+
+function operationalIncidentFromRow(incident: IncidentRow): StoreData["operationalIncidents"][number] {
+  return {
+    id: incident.id,
+    severity: incident.severity as StoreData["operationalIncidents"][number]["severity"],
+    area: incident.area as StoreData["operationalIncidents"][number]["area"],
+    status: incident.status as StoreData["operationalIncidents"][number]["status"],
+    message: incident.message,
+    errorCode: incident.errorCode,
+    requestId: incident.requestId,
+    userId: incident.userId,
+    taskId: incident.taskId,
+    orderId: incident.orderId,
+    route: incident.route,
+    createdAt: incident.createdAt.toISOString(),
+    updatedAt: incident.updatedAt.toISOString(),
+    resolvedAt: incident.resolvedAt?.toISOString() ?? null
+  };
+}
+
+function comparePendingPosition(
+  left: Pick<GenerationTask, "createdAt" | "id">,
+  right: Pick<GenerationTask, "createdAt" | "id">
+): number {
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
 function creditLedgerEntryFromRow(entry: LedgerRow): CreditLedgerEntry {

@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { StoreData } from "@imagora/shared";
 import { Prisma } from "../generated/client/index.js";
+import { storeEntityKeys } from "./store-scope.js";
 
 type TransactionClient = Prisma.TransactionClient;
 
@@ -35,38 +36,43 @@ export function createEmptyStoreData(): StoreData {
 }
 
 export async function persistStoreDiff(tx: TransactionClient, before: StoreData, after: StoreData): Promise<void> {
-  const users = entityDiff(before.users, after.users, (record) => record.id);
-  const sessions = entityDiff(before.sessions, after.sessions, (record) => record.token);
-  const passwordResetTokens = entityDiff(before.passwordResetTokens, after.passwordResetTokens, (record) => record.id);
+  const keys = storeEntityKeys;
+  const users = entityDiff(before.users, after.users, keys.users);
+  const sessions = entityDiff(before.sessions, after.sessions, keys.sessions);
+  const passwordResetTokens = entityDiff(
+    before.passwordResetTokens,
+    after.passwordResetTokens,
+    keys.passwordResetTokens
+  );
   const emailVerificationTokens = entityDiff(
     before.emailVerificationTokens,
     after.emailVerificationTokens,
-    (record) => record.id
+    keys.emailVerificationTokens
   );
-  const creditAccounts = entityDiff(before.creditAccounts, after.creditAccounts, (record) => record.userId);
-  const creditLedgerEntries = entityDiff(before.creditLedgerEntries, after.creditLedgerEntries, (record) => record.id);
-  const generationTasks = entityDiff(before.generationTasks, after.generationTasks, (record) => record.id);
-  const referenceImages = entityDiff(before.referenceImages, after.referenceImages, (record) => record.id);
-  const generatedImages = entityDiff(before.generatedImages, after.generatedImages, (record) => record.id);
-  const imageFavorites = entityDiff(
-    before.imageFavorites,
-    after.imageFavorites,
-    (record) => `${record.userId}:${record.imageId}`
+  const creditAccounts = entityDiff(before.creditAccounts, after.creditAccounts, keys.creditAccounts);
+  const creditLedgerEntries = entityDiff(
+    before.creditLedgerEntries,
+    after.creditLedgerEntries,
+    keys.creditLedgerEntries
   );
-  const imageProjects = entityDiff(before.imageProjects, after.imageProjects, (record) => record.id);
-  const plans = entityDiff(before.plans, after.plans, (record) => record.id);
-  const orders = entityDiff(before.orders, after.orders, (record) => record.id);
-  const paymentEvents = entityDiff(before.paymentEvents, after.paymentEvents, (record) => record.id);
-  const safetyEvents = entityDiff(before.safetyEvents, after.safetyEvents, (record) => record.id);
-  const safetyRules = entityDiff(before.safetyRules, after.safetyRules, (record) => record.id);
-  const safetyAppeals = entityDiff(before.safetyAppeals, after.safetyAppeals, (record) => record.id);
-  const adminAuditLogs = entityDiff(before.adminAuditLogs, after.adminAuditLogs, (record) => record.id);
+  const generationTasks = entityDiff(before.generationTasks, after.generationTasks, keys.generationTasks);
+  const referenceImages = entityDiff(before.referenceImages, after.referenceImages, keys.referenceImages);
+  const generatedImages = entityDiff(before.generatedImages, after.generatedImages, keys.generatedImages);
+  const imageFavorites = entityDiff(before.imageFavorites, after.imageFavorites, keys.imageFavorites);
+  const imageProjects = entityDiff(before.imageProjects, after.imageProjects, keys.imageProjects);
+  const plans = entityDiff(before.plans, after.plans, keys.plans);
+  const orders = entityDiff(before.orders, after.orders, keys.orders);
+  const paymentEvents = entityDiff(before.paymentEvents, after.paymentEvents, keys.paymentEvents);
+  const safetyEvents = entityDiff(before.safetyEvents, after.safetyEvents, keys.safetyEvents);
+  const safetyRules = entityDiff(before.safetyRules, after.safetyRules, keys.safetyRules);
+  const safetyAppeals = entityDiff(before.safetyAppeals, after.safetyAppeals, keys.safetyAppeals);
+  const adminAuditLogs = entityDiff(before.adminAuditLogs, after.adminAuditLogs, keys.adminAuditLogs);
   const operationalIncidents = entityDiff(
     before.operationalIncidents,
     after.operationalIncidents,
-    (record) => record.id
+    keys.operationalIncidents
   );
-  const alertNotifications = entityDiff(before.alertNotifications, after.alertNotifications, (record) => record.id);
+  const alertNotifications = entityDiff(before.alertNotifications, after.alertNotifications, keys.alertNotifications);
 
   await deleteRemoved(alertNotifications.removed, (records) =>
     tx.alertNotification.deleteMany({ where: { id: { in: records.map((record) => record.id) } } })

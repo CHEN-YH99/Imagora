@@ -27,9 +27,13 @@ export interface ApiRouteContext {
   ) => PublicGenerationTask & { refundedCredits: number };
   mustFindOwnTask: (data: StoreData, userId: string, taskId: string) => GenerationTask;
   mustFindTask: (data: StoreData, taskId: string) => GenerationTask;
-  mustFindOwnImage: (data: StoreData, userId: string, imageId: string) => GeneratedImage;
+  mustFindOwnImage: (data: Pick<StoreData, "generatedImages">, userId: string, imageId: string) => GeneratedImage;
   mustFindImage: (data: StoreData, imageId: string) => GeneratedImage;
   withoutImagePublicUrl: (image: GeneratedImage) => GeneratedImage;
   withSignedImageThumbnail: (image: GeneratedImage) => GeneratedImage;
-  withFavorite: (data: StoreData, userId: string, image: GeneratedImage) => GeneratedImage & { favorite: boolean };
+  withFavorite: (
+    data: Pick<StoreData, "imageFavorites">,
+    userId: string,
+    image: GeneratedImage
+  ) => GeneratedImage & { favorite: boolean };
 }
