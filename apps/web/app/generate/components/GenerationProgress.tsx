@@ -98,9 +98,7 @@ export const GenerationProcessingPlaceholder = memo(function GenerationProcessin
             <Sparkles className={isWideFrame ? "size-5" : "size-6"} aria-hidden="true" />
           </span>
           <div className={`min-w-0 ${isWideFrame ? "flex-1" : "mt-4 w-full"}`}>
-            <p className={`font-semibold text-white ${isWideFrame ? "text-xs leading-4" : "text-sm"}`}>
-              {label}
-            </p>
+            <p className={`font-semibold text-white ${isWideFrame ? "text-xs leading-4" : "text-sm"}`}>{label}</p>
             <p className="mt-1 text-[11px] leading-4 text-white/56">第 {index + 1} 张</p>
             <GenerationTaskProgress percentage={percentage} />
           </div>
@@ -119,5 +117,3 @@ function parseAspectRatioValue(value: string): number | null {
   }
   return width / height;
 }
-
-

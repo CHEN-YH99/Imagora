@@ -1,12 +1,11 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { aspectRatioOptions } from "@imagora/shared/image-models";
-import { ImageModelSelect } from "../../components/ImageModelSelect";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ChevronDown, Coins, Copy, Download, RefreshCw, Sparkles, Wand2 } from "lucide-react";
-import { AppFrame, EmptyState, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
-import { GeneratedImageLightbox, GeneratedImagePreviewButton } from "../../components/GeneratedImagePreview";
+import { Sparkles } from "lucide-react";
+import { AppFrame, InlineNotice, Panel, StatusPill } from "../../components/AppFrame";
+import { GeneratedImageLightbox } from "../../components/GeneratedImagePreview";
 import {
   ApiRequestError,
   apiFetch,
@@ -38,19 +37,19 @@ import {
   hasTerminalGenerationFailure,
   isTerminalTaskStatus,
   resolveGenerationViewState,
-  resolveGenerationProgress,
-  resolveImageProgressLabel,
   resolveProcessingPlaceholderCount
 } from "./generationState";
 import { useGenerationWorkspace } from "./hooks/useGenerationWorkspace";
 import { useImageModelCatalog } from "./hooks/useImageModelCatalog";
-import { maxEnhancedPromptLength, validateGenerationPromptLengths } from "./promptPresets";
+import { validateGenerationPromptLengths } from "./promptPresets";
+import { GenerationForm } from "./components/GenerationForm";
+import { GenerationResults } from "./components/GenerationResults";
+import { progressTransitionMs } from "./components/GenerationProgress";
 
 const DEFAULT_PROMPT = "半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节";
 const DEFAULT_ASPECT_RATIO = "1:1";
 const DEFAULT_QUANTITY = 2;
 const taskSyncPollIntervalMs = 2_000;
-const progressTransitionMs = 250;
 
 export default function GeneratePage() {
   return (
@@ -180,7 +179,6 @@ function GenerateExperience() {
   }, [isGenerationProcessing, task?.id, task?.status]);
 
   const processingAspectRatio = task ? `${task.width} / ${task.height}` : aspectRatio.replace(":", " / ");
-  const selectedAspectRatioValue = parseAspectRatioValue(aspectRatio.replace(":", "/")) ?? 1;
   const hasPrompt = prompt.trim().length > 0;
   const promptValidation = validateGenerationPromptLengths(prompt, "");
   const generationPromptError = promptValidation.prompt;
@@ -695,6 +693,22 @@ function GenerateExperience() {
     }
   }
 
+  // 事件回调读取最近一次已提交的状态，进度快照不会改变表单和结果操作的 props。
+  const handleSubmit = useCommittedCallback(submit);
+  const handleAppealSubmit = useCommittedCallback(handleAppeal);
+  const handleQuantityChange = useCommittedCallback(setQuantityFromInput);
+  const handleModelChange = useCommittedCallback(selectImageModel);
+  const handleDownload = useCommittedCallback(downloadImage);
+  const handleMetadataReuse = useCommittedCallback(applyGenerationMetadata);
+  const handleChannelChange = useCallback(
+    (channel: string) => {
+      setModel("");
+      selectChannel(channel);
+    },
+    [setModel, selectChannel]
+  );
+  const showHistory = useCallback(() => router.push("/history"), [router]);
+
   return (
     <AppFrame title="图片生成" subtitle="输入提示词，选择 API、模型和画面比例，提交前确认积分消耗。">
       <div className="grid gap-5 lg:grid-cols-[0.95fr_1.05fr]">
@@ -739,311 +753,59 @@ function GenerateExperience() {
           </>
         ) : (
           <>
-            <Panel>
-              <div className="space-y-5">
-                {/* 提示词 */}
-                <div>
-                  <div className="text-sm text-white/70">
-                    <label htmlFor="generation-prompt">提示词</label>
-                    <textarea
-                      id="generation-prompt"
-                      className="focus-ring mt-2 min-h-52 w-full resize-none rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                      value={prompt}
-                      onChange={(event) => setPrompt(event.target.value)}
-                      aria-label="提示词"
-                      aria-invalid={Boolean(promptValidation.prompt)}
-                      aria-describedby="generation-prompt-length"
-                    />
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-                    <p
-                      id="generation-prompt-length"
-                      className={`text-xs ${promptValidation.prompt ? "text-ember" : "text-white/45"}`}
-                    >
-                      {promptValidation.prompt ?? `${prompt.length} / ${maxEnhancedPromptLength} 个字符`}
-                    </p>
-                    <span
-                      className="generation-ratio-control"
-                      data-disabled={modelsLoading || !selectedModel?.aspectRatios.length}
-                    >
-                      <span className="generation-ratio-icon" aria-hidden="true">
-                        <span
-                          className="generation-ratio-frame"
-                          style={{
-                            transform: `scale(${Math.min(1, selectedAspectRatioValue)}, ${Math.min(1, 1 / selectedAspectRatioValue)})`
-                          }}
-                        />
-                      </span>
-                      <select
-                        className="focus-ring generation-ratio-select"
-                        value={aspectRatio}
-                        onChange={(event) => setAspectRatio(event.target.value)}
-                        aria-label="画面比例"
-                        disabled={modelsLoading || !selectedModel?.aspectRatios.length}
-                      >
-                        {aspectRatioOptions.map((item) => (
-                          <option
-                            key={item.value}
-                            value={item.value}
-                            disabled={!selectedModel?.aspectRatios.includes(item.value)}
-                          >
-                            {item.label}
-                            {selectedModel && !selectedModel.aspectRatios.includes(item.value) ? "（不可用）" : ""}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown className="generation-ratio-chevron" aria-hidden="true" />
-                    </span>
-                  </div>
-                </div>
+            <GenerationForm
+              prompt={prompt}
+              setPrompt={setPrompt}
+              aspectRatio={aspectRatio}
+              setAspectRatio={setAspectRatio}
+              quantity={quantity}
+              quantityInput={quantityInput}
+              setQuantityInput={setQuantityInput}
+              quote={quote}
+              account={account}
+              message={message}
+              messageTone={messageTone}
+              appealEventId={appealEventId}
+              showAppealForm={showAppealForm}
+              setShowAppealForm={setShowAppealForm}
+              appealReason={appealReason}
+              setAppealReason={setAppealReason}
+              appealStatus={appealStatus}
+              appealLoading={appealLoading}
+              loading={loading}
+              modelCatalog={modelCatalog}
+              selectedChannel={selectedChannel}
+              model={model}
+              modelsLoading={modelsLoading}
+              modelsError={modelsError}
+              modelSelectionError={modelSelectionError}
+              onChannelChange={handleChannelChange}
+              selectImageModel={handleModelChange}
+              refreshModels={refreshModels}
+              selectedModel={selectedModel}
+              generationPromptError={generationPromptError}
+              isGenerationProcessing={isGenerationProcessing}
+              setQuantityFromInput={handleQuantityChange}
+              handleAppeal={handleAppealSubmit}
+              submit={handleSubmit}
+              onHistory={showHistory}
+            />
 
-                <div>
-                  <ImageModelSelect
-                    models={modelCatalog.models}
-                    channels={modelCatalog.channels ?? []}
-                    channel={selectedChannel}
-                    onChannelChange={(channel) => {
-                      setModel("");
-                      selectChannel(channel);
-                    }}
-                    value={model}
-                    onChange={selectImageModel}
-                    loading={modelsLoading}
-                    error={modelsError}
-                    onRefresh={refreshModels}
-                    className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black px-4 py-3 text-white"
-                  />
-                  <span
-                    id="generation-model-help"
-                    className="mt-2 block text-xs text-white/55"
-                    role={modelSelectionError && !modelsLoading ? "alert" : undefined}
-                  >
-                    {modelSelectionError ?? "切换 API 后会更新可选模型，切换线路或模型会重新计算积分。"}
-                  </span>
-                </div>
-
-                <label className="block text-sm text-white/70">
-                  生成数量
-                  <input
-                    className="focus-ring mt-2 w-full rounded-2xl border border-white/12 bg-black/28 px-4 py-3 text-white"
-                    type="number"
-                    min={1}
-                    max={selectedModel?.maxQuantity ?? 4}
-                    value={quantityInput}
-                    onFocus={(event) => event.target.select()}
-                    onChange={(event) => setQuantityFromInput(event.target.value)}
-                    onBlur={() => setQuantityInput(String(quantity))}
-                  />
-                </label>
-
-                {/* 积分预估 */}
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/12 bg-black/24 p-4">
-                  <span className="inline-flex items-center gap-2 text-sm text-white/72">
-                    <Coins className="size-4 text-volt" aria-hidden="true" />
-                    预计消耗：{quote ? formatCredits(quote) : "登录后计算"}
-                  </span>
-                  <span className="text-sm text-white/72">
-                    当前余额：{account ? formatCredits(account.balance) : "未登录"}
-                  </span>
-                </div>
-
-                {message ? (
-                  <InlineNotice tone={messageTone}>
-                    {message}
-                    {messageTone === "danger" ? (
-                      <>
-                        {" "}
-                        <button className="underline underline-offset-4" onClick={() => void submit()} type="button">
-                          重试提交
-                        </button>
-                        {" 或 "}
-                        <button
-                          className="underline underline-offset-4"
-                          onClick={() => router.push("/history")}
-                          type="button"
-                        >
-                          去历史查看
-                        </button>
-                      </>
-                    ) : null}
-                  </InlineNotice>
-                ) : null}
-
-                {/* 申诉入口：仅在任务被内容拦截且存在对应安全事件时显示 */}
-                {appealEventId && !appealStatus ? (
-                  <div className="rounded-2xl border border-amber-500/30 bg-amber-500/8 p-4">
-                    <p className="mb-3 text-sm text-amber-300">如认为是误判，可提交申诉，管理员将在审核后回复。</p>
-                    {showAppealForm ? (
-                      <div className="space-y-3">
-                        <label className="block text-sm text-white/70">
-                          申诉理由（至少 10 字）
-                          <textarea
-                            className="focus-ring mt-2 min-h-24 w-full resize-none rounded-xl border border-white/12 bg-black/28 px-3 py-2 text-sm text-white"
-                            value={appealReason}
-                            onChange={(event) => setAppealReason(event.target.value)}
-                            placeholder="请说明为什么认为此次拦截是误判，或提供更多背景信息..."
-                            maxLength={1000}
-                          />
-                        </label>
-                        <div className="flex gap-2">
-                          <button
-                            className="focus-ring rounded-full bg-amber-500/80 px-4 py-2 text-sm font-semibold text-ink transition-colors hover:bg-amber-400 disabled:opacity-50"
-                            type="button"
-                            disabled={appealLoading || appealReason.trim().length < 10}
-                            onClick={() => void handleAppeal()}
-                          >
-                            {appealLoading ? "提交中..." : "提交申诉"}
-                          </button>
-                          <button
-                            className="focus-ring rounded-full border border-white/20 px-4 py-2 text-sm text-white/60 hover:text-white"
-                            type="button"
-                            onClick={() => setShowAppealForm(false)}
-                          >
-                            取消
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button
-                        className="focus-ring rounded-full bg-amber-500/20 px-4 py-2 text-sm text-amber-300 transition-colors hover:bg-amber-500/30"
-                        type="button"
-                        onClick={() => setShowAppealForm(true)}
-                      >
-                        发起申诉
-                      </button>
-                    )}
-                  </div>
-                ) : null}
-
-                {appealStatus ? (
-                  <div className="rounded-2xl border border-white/12 bg-white/4 p-4">
-                    <p className="text-sm text-white/70">
-                      申诉状态：
-                      <span
-                        className={`font-medium ${appealStatus.status === "APPROVED" ? "text-mint" : appealStatus.status === "REJECTED" ? "text-ember" : "text-amber-300"}`}
-                      >
-                        {appealStatus.status === "PENDING"
-                          ? "待审核"
-                          : appealStatus.status === "APPROVED"
-                            ? "已通过"
-                            : "已驳回"}
-                      </span>
-                      {appealStatus.adminNote ? `，备注：${appealStatus.adminNote}` : ""}
-                    </p>
-                  </div>
-                ) : null}
-
-                {generationPromptError ? <InlineNotice tone="danger">{generationPromptError}</InlineNotice> : null}
-
-                <button
-                  className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
-                  type="button"
-                  disabled={
-                    loading ||
-                    isGenerationProcessing ||
-                    !hasPrompt ||
-                    Boolean(generationPromptError) ||
-                    Boolean(modelSelectionError)
-                  }
-                  onClick={submit}
-                >
-                  <Wand2 className="size-4" aria-hidden="true" />
-                  {isGenerationProcessing ? "生成中..." : "提交生成"}
-                </button>
-              </div>
-            </Panel>
-
-            <Panel>
-              <div className="mb-5 flex items-center justify-between gap-3">
-                <h2 className="text-xl font-semibold">生成结果</h2>
-                <StatusPill>{resultStatus}</StatusPill>
-              </div>
-              {terminalGenerationFailureMessage ? (
-                <div className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-4">
-                  <p className="text-sm font-semibold text-ember">生成失败</p>
-                  <p className="mt-1 text-sm leading-6 text-ember/90">{terminalGenerationFailureMessage}</p>
-                </div>
-              ) : null}
-              <div className="grid gap-3 sm:grid-cols-2">
-                {showProcessingPlaceholders
-                  ? Array.from({ length: processingPlaceholderCount }).map((_, index) => (
-                      <GenerationProcessingPlaceholder
-                        key={`生成占位-${task?.id ?? "submitting"}-${index}`}
-                        index={index}
-                        processingAspectRatio={processingAspectRatio}
-                        task={task}
-                        progress={resolveGenerationProgress(task, images, quantity, index)}
-                      />
-                    ))
-                  : null}
-                {(showProcessingPlaceholders ? [] : images).map((image, index) => (
-                  <article
-                    key={image.id}
-                    className="relative overflow-hidden rounded-2xl border border-white/12 bg-black/18"
-                  >
-                    <GeneratedImagePreviewButton
-                      alt="生成图片结果"
-                      ariaLabel={`预览第 ${index + 1} 张生成图片`}
-                      className="rounded-none border-0 border-b border-white/10 bg-transparent hover:translate-y-0"
-                      image={image}
-                      onOpen={() => setSelectedPreviewImage(image)}
-                    />
-                    <button
-                      className="focus-ring group/download absolute right-3 top-3 z-10 inline-flex size-9 items-center justify-center rounded-full border border-white/16 bg-ink/70 text-white/80 backdrop-blur-md transition duration-200 motion-reduce:transform-none motion-reduce:transition-none hover:-translate-y-0.5 hover:scale-105 hover:border-mint/70 hover:bg-ink/85 hover:text-mint hover:shadow-glow"
-                      type="button"
-                      aria-label={`下载第 ${index + 1} 张生成图片`}
-                      title="下载图片"
-                      onClick={() => void downloadImage(image)}
-                    >
-                      <Download
-                        className="size-4 transition-transform duration-200 motion-reduce:transform-none group-hover/download:translate-y-0.5"
-                        aria-hidden="true"
-                      />
-                    </button>
-                    <div className="space-y-3 p-3">
-                      <dl className="grid gap-2 text-xs text-white/52 sm:grid-cols-2">
-                        <div>
-                          <dt>比例</dt>
-                          <dd className="mt-0.5 text-white/78">{image.generationMetadata.aspectRatio}</dd>
-                        </div>
-                        <div>
-                          <dt>模型</dt>
-                          <dd className="mt-0.5 truncate text-white/78">{image.generationMetadata.modelName}</dd>
-                        </div>
-                      </dl>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          className="focus-ring inline-flex items-center gap-1.5 rounded-full border border-white/12 px-3 py-2 text-xs text-white/70 transition-colors duration-200 hover:bg-white/10 hover:text-white"
-                          type="button"
-                          onClick={() => applyGenerationMetadata(image.generationMetadata, "reuse")}
-                        >
-                          <Copy className="size-3.5" aria-hidden="true" />
-                          复用参数
-                        </button>
-                        <button
-                          className="focus-ring inline-flex items-center gap-1.5 rounded-full border border-mint/36 px-3 py-2 text-xs text-mint transition-colors duration-200 hover:bg-mint/10"
-                          type="button"
-                          onClick={() => applyGenerationMetadata(image.generationMetadata, "variation")}
-                        >
-                          <RefreshCw className="size-3.5" aria-hidden="true" />
-                          生成变体
-                        </button>
-                      </div>
-                    </div>
-                  </article>
-                ))}
-                {!terminalGenerationFailureMessage && !isGenerationProcessing && images.length === 0 ? (
-                  <div className="sm:col-span-2">
-                    <EmptyState
-                      title="生成结果会显示在这里"
-                      description="填写提示词并提交生成后，图片会按固定比例展示，成功后可进入详情、下载或再次生成。"
-                      actionLabel="提交生成"
-                      onAction={() => void submit()}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            </Panel>
+            <GenerationResults
+              task={task}
+              images={images}
+              quantity={quantity}
+              resultStatus={resultStatus}
+              terminalGenerationFailureMessage={terminalGenerationFailureMessage}
+              isGenerationProcessing={isGenerationProcessing}
+              showProcessingPlaceholders={showProcessingPlaceholders}
+              processingPlaceholderCount={processingPlaceholderCount}
+              processingAspectRatio={processingAspectRatio}
+              onPreview={setSelectedPreviewImage}
+              downloadImage={handleDownload}
+              applyGenerationMetadata={handleMetadataReuse}
+              submit={handleSubmit}
+            />
           </>
         )}
       </div>
@@ -1066,121 +828,6 @@ function resolveInitialQuantity(value: string | null): number {
 
 function resolveInitialModel(value: string | null): string {
   return value ? resolveSelectableImageModel(value) : "";
-}
-
-function GenerationTaskProgress({ progress }: { progress: ReturnType<typeof resolveGenerationProgress> }) {
-  const [displayedPercentage, setDisplayedPercentage] = useState(0);
-  const displayedPercentageRef = useRef(0);
-  const targetPercentage = progress.percentage ?? 0;
-
-  useEffect(() => {
-    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const from = displayedPercentageRef.current;
-    const startedAt = performance.now();
-    let frame = 0;
-    const update = (value: number) => {
-      displayedPercentageRef.current = value;
-      setDisplayedPercentage(value);
-    };
-    const animate = (now: number) => {
-      const elapsed = reducedMotion.matches ? 1 : Math.min(1, (now - startedAt) / progressTransitionMs);
-      update(from + (targetPercentage - from) * elapsed);
-      if (elapsed < 1) frame = window.requestAnimationFrame(animate);
-    };
-    const handleMotionChange = () => {
-      if (!reducedMotion.matches) return;
-      window.cancelAnimationFrame(frame);
-      update(targetPercentage);
-    };
-    frame = window.requestAnimationFrame(animate);
-    reducedMotion.addEventListener("change", handleMotionChange);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      reducedMotion.removeEventListener("change", handleMotionChange);
-    };
-  }, [targetPercentage]);
-
-  return (
-    <div className="mt-2 w-full text-left">
-      <div className="flex items-center justify-end text-[10px] leading-4 text-white/64">
-        <span className="shrink-0 tabular-nums text-mint">
-          {progress.percentage === null ? "—" : `${Math.floor(displayedPercentage)}%`}
-        </span>
-      </div>
-      <div
-        role="progressbar"
-        aria-label="图片生成进度"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={progress.percentage ?? undefined}
-        aria-valuetext={progress.percentage === null ? "等待进度同步" : `${progress.percentage}%`}
-        className="mt-1 h-1 overflow-hidden rounded-full bg-white/10"
-      >
-        <span
-          className="block h-full w-full rounded-full bg-mint"
-          style={{ transform: `translateX(${displayedPercentage - 100}%)` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function GenerationProcessingPlaceholder({
-  index,
-  processingAspectRatio,
-  task,
-  progress
-}: {
-  index: number;
-  processingAspectRatio: string;
-  task: Task | null;
-  progress: ReturnType<typeof resolveGenerationProgress>;
-}) {
-  const aspectRatioValue = parseAspectRatioValue(processingAspectRatio);
-  const isWideFrame = (aspectRatioValue ?? 1) >= 1.5;
-
-  return (
-    <div
-      aria-label={`第 ${index + 1} 张图片正在生成`}
-      className="relative w-full overflow-hidden rounded-2xl border border-mint/24 bg-black/28 shadow-glow motion-reduce:transition-none"
-      role="status"
-      style={{ aspectRatio: processingAspectRatio }}
-    >
-      <span className="pointer-events-none absolute -inset-16 bg-[conic-gradient(from_130deg,transparent,rgba(88,240,182,0.42),rgba(37,216,255,0.28),transparent)] opacity-70 blur-2xl motion-safe:animate-spin motion-reduce:animate-none" />
-      <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_30%_24%,rgba(217,248,91,0.18),transparent_32%),radial-gradient(circle_at_72%_68%,rgba(37,216,255,0.16),transparent_38%)] motion-safe:animate-pulse motion-reduce:opacity-70" />
-      <span className="pointer-events-none absolute inset-3 rounded-[1.25rem] border border-white/10 bg-ink/72 backdrop-blur-md" />
-      <span className="pointer-events-none absolute inset-x-5 top-3 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent motion-safe:animate-pulse motion-reduce:opacity-60" />
-      <div className={`relative flex h-full items-center justify-center px-5 ${isWideFrame ? "py-3" : "text-center"}`}>
-        <div
-          className={`flex w-full ${isWideFrame ? "max-w-[17rem] items-center gap-3 text-left" : "max-w-48 flex-col items-center"}`}
-        >
-          <span
-            className={`relative inline-flex items-center justify-center rounded-full border border-mint/36 bg-mint/10 text-mint shadow-glow ${isWideFrame ? "size-9 shrink-0" : "size-14"}`}
-          >
-            <span className="absolute inset-0 rounded-full border border-mint/40 motion-safe:animate-ping motion-reduce:hidden" />
-            <Sparkles className={isWideFrame ? "size-5" : "size-6"} aria-hidden="true" />
-          </span>
-          <div className={`min-w-0 ${isWideFrame ? "flex-1" : "mt-4 w-full"}`}>
-            <p className={`font-semibold text-white ${isWideFrame ? "text-xs leading-4" : "text-sm"}`}>
-              {resolveImageProgressLabel(task, index)}
-            </p>
-            <p className="mt-1 text-[11px] leading-4 text-white/56">第 {index + 1} 张</p>
-            <GenerationTaskProgress progress={progress} />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function parseAspectRatioValue(value: string): number | null {
-  const [widthText, heightText] = value.split("/").map((segment) => segment.trim());
-  const width = Number(widthText);
-  const height = Number(heightText);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0) {
-    return null;
-  }
-  return width / height;
 }
 
 function generationFailureMessage(task: Task): string {
@@ -1253,4 +900,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function useCommittedCallback<Args extends unknown[], Result>(callback: (...args: Args) => Result) {
+  const callbackRef = useRef(callback);
+  useLayoutEffect(() => {
+    callbackRef.current = callback;
+  });
+  return useCallback((...args: Args): Result => callbackRef.current(...args), []);
 }

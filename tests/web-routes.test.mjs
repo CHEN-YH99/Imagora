@@ -40,6 +40,41 @@ async function readAdminSource() {
   return (await Promise.all(files.map((file) => readFile(join(root, file), "utf8")))).join("\n");
 }
 
+async function readHomeSource() {
+  const files = [
+    "apps/web/app/page.tsx",
+    "apps/web/app/home/HomeExperience.tsx",
+    "apps/web/app/home/HomeGenerator.tsx",
+    "apps/web/app/home/HomePromptInput.tsx",
+    "apps/web/app/home/HomeModelControls.tsx"
+  ];
+  const sources = await Promise.all(files.map((file) => readFile(join(root, file), "utf8")));
+  const [page, experience, generator] = sources;
+  assert.doesNotMatch(page, /["']use client["']/);
+  assert.match(page, /<HomeExperience\b/);
+  assert.match(experience, /<HomeGenerator\b/);
+  assert.match(generator, /<HomePromptInput\b/);
+  assert.match(generator, /<HomeModelControls\b/);
+  return sources.join("\n");
+}
+
+async function readGenerateSource() {
+  const files = [
+    "apps/web/app/generate/page.tsx",
+    "apps/web/app/generate/components/GenerationForm.tsx",
+    "apps/web/app/generate/components/GenerationModelSelection.tsx",
+    "apps/web/app/generate/components/GenerationResults.tsx",
+    "apps/web/app/generate/components/GenerationProgress.tsx"
+  ];
+  const sources = await Promise.all(files.map((file) => readFile(join(root, file), "utf8")));
+  const [page, form, , results] = sources;
+  assert.match(page, /<GenerationForm\b/);
+  assert.match(page, /<GenerationResults\b/);
+  assert.match(form, /<GenerationModelSelection\b/);
+  assert.match(results, /<GenerationProcessingPlaceholder\b/);
+  return sources.join("\n");
+}
+
 test("web exposes image detail workflow from history and favorites", async () => {
   const detailPage = await readFile(join(root, "apps/web/app/images/[imageId]/page.tsx"), "utf8");
   const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
@@ -185,8 +220,8 @@ test("web core pages expose recoverable empty states and confirm destructive act
   const appFrame = await readFile(join(root, "apps/web/components/AppFrame.tsx"), "utf8");
   const detailPage = await readFile(join(root, "apps/web/app/images/[imageId]/page.tsx"), "utf8");
   const favoritesPage = await readFile(join(root, "apps/web/app/favorites/page.tsx"), "utf8");
-  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
-  const homePage = await readFile(join(root, "apps/web/app/page.tsx"), "utf8");
+  const generatePage = await readGenerateSource();
+  const homePage = await readHomeSource();
   const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
   const ordersPage = await readFile(join(root, "apps/web/app/orders/page.tsx"), "utf8");
   const pricingPage = await readFile(join(root, "apps/web/app/pricing/page.tsx"), "utf8");
@@ -289,11 +324,11 @@ test("generate entry flows keep prompt drafts out of URLs", async () => {
   const generateDrafts = await readFile(join(root, "apps/web/lib/generateDrafts.ts"), "utf8");
   const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
   const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
-  const homePage = await readFile(join(root, "apps/web/app/page.tsx"), "utf8");
+  const homePage = await readHomeSource();
   const registerPage = await readFile(join(root, "apps/web/app/register/page.tsx"), "utf8");
 
   for (const page of [detailPage, generatePage, historyPage, homePage, registerPage]) {
-    assert.doesNotMatch(page, /prompt=/);
+    assert.doesNotMatch(page, /[?&]prompt=/);
     assert.doesNotMatch(page, /searchParams\.get\("prompt"\)/);
   }
 
@@ -310,7 +345,7 @@ test("generate entry flows keep prompt drafts out of URLs", async () => {
 test("generate workspace preserves image parameter reuse without preset controls", async () => {
   const detailPage = await readFile(join(root, "apps/web/app/images/[imageId]/page.tsx"), "utf8");
   const generateDrafts = await readFile(join(root, "apps/web/lib/generateDrafts.ts"), "utf8");
-  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const generatePage = await readGenerateSource();
   const historyPage = await readFile(join(root, "apps/web/app/history/page.tsx"), "utf8");
 
   assert.match(generatePage, /aria-label="画面比例"/);
@@ -484,7 +519,7 @@ test("generation failures reconcile refunds and surface refunded credit copy", a
 });
 
 test("generate page shows animated processing placeholders before results arrive", async () => {
-  const generatePage = await readFile(join(root, "apps/web/app/generate/page.tsx"), "utf8");
+  const generatePage = await readGenerateSource();
   const workspace = await readFile(join(root, "apps/web/app/generate/hooks/useGenerationWorkspace.ts"), "utf8");
   const draftsFile = await readFile(join(root, "apps/web/lib/generateDrafts.ts"), "utf8");
   const stateFile = await readFile(join(root, "apps/web/app/generate/generationState.ts"), "utf8");
@@ -602,7 +637,13 @@ test("favorites and history use server-side offset pagination without polling aw
     historyPage.indexOf("async function loadHistory")
   );
   assert.doesNotMatch(pollingSection, /loadHistory\(/);
-  assert.match(pollingSection, /activeTaskIds\.map/);
+  assert.match(pollingSection, /offset < activeTaskIds\.length; offset \+= 100/);
+  assert.match(pollingSection, /activeTaskIds\.slice\(offset, offset \+ 100\)/);
+  assert.match(
+    pollingSection,
+    /\/api\/generation\/tasks\/batch\?ids=\$\{ids\.map\(encodeURIComponent\)\.join\(","\)\}/
+  );
+  assert.doesNotMatch(pollingSection, /\/api\/generation\/tasks\/\$\{/);
 });
 
 test("p2 order and history polish avoids false promises and handles browser/API failures", async () => {

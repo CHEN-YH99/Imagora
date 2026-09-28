@@ -179,10 +179,10 @@ export function HomeExperience({ heroBackdrop, heroIntro, workflow, footer }: Pr
 
       {/* ── Hero ── */}
       <section id="top" className="hero-shell flex items-center px-4 pt-24">
-      {heroBackdrop}
+        {heroBackdrop}
 
         <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col items-center py-16 text-center sm:py-20">
-      {heroIntro}
+          {heroIntro}
 
           {/* Hero CTA */}
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
@@ -424,7 +424,6 @@ export function HomeExperience({ heroBackdrop, heroIntro, workflow, footer }: Pr
       </section>
 
       {footer}
-
     </main>
   );
 }

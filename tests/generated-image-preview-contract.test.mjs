@@ -13,7 +13,7 @@ const previewConsumerFiles = [
 ];
 const listPreviewConsumerFiles = [
   "apps/web/app/favorites/page.tsx",
-  "apps/web/app/generate/page.tsx",
+  "apps/web/app/generate/components/GenerationResults.tsx",
   "apps/web/app/history/page.tsx"
 ];
 const previewWithDetailLinkFiles = ["apps/web/app/favorites/page.tsx", "apps/web/app/history/page.tsx"];
@@ -85,7 +85,13 @@ test("gallery surfaces use the shared preview button", async () => {
   for (const file of listPreviewConsumerFiles) {
     const content = await readFile(file, "utf8");
     assert.match(content, /GeneratedImagePreviewButton/);
-    assert.match(content, /setSelectedPreviewImage\(image\)/);
+    if (file.endsWith("GenerationResults.tsx")) {
+      const page = await readFile("apps/web/app/generate/page.tsx", "utf8");
+      assert.match(content, /onOpen=\{\(\) => onPreview\(image\)\}/);
+      assert.match(page, /<GenerationResults\b[\s\S]*onPreview=\{setSelectedPreviewImage\}/);
+    } else {
+      assert.match(content, /setSelectedPreviewImage\(image\)/);
+    }
   }
 });
 

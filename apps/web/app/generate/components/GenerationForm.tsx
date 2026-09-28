@@ -11,16 +11,35 @@ import { GenerationModelSelection } from "./GenerationModelSelection";
 
 type GenerationFormProps = Pick<
   GenerationWorkspace,
-  "prompt" | "setPrompt" | "aspectRatio" | "setAspectRatio" | "quantity" | "quantityInput" | "setQuantityInput" | "quote" | "account" | "message" | "messageTone" | "appealEventId" | "showAppealForm" | "setShowAppealForm" | "appealReason" | "setAppealReason" | "appealStatus" | "appealLoading" | "loading"
-> & ComponentProps<typeof GenerationModelSelection> & {
-  selectedModel: ImageModelOption | undefined;
-  generationPromptError: string | null;
-  isGenerationProcessing: boolean;
-  setQuantityFromInput(value: string): void;
-  handleAppeal(): Promise<void>;
-  submit(): Promise<void>;
-  onHistory(): void;
-};
+  | "prompt"
+  | "setPrompt"
+  | "aspectRatio"
+  | "setAspectRatio"
+  | "quantity"
+  | "quantityInput"
+  | "setQuantityInput"
+  | "quote"
+  | "account"
+  | "message"
+  | "messageTone"
+  | "appealEventId"
+  | "showAppealForm"
+  | "setShowAppealForm"
+  | "appealReason"
+  | "setAppealReason"
+  | "appealStatus"
+  | "appealLoading"
+  | "loading"
+> &
+  ComponentProps<typeof GenerationModelSelection> & {
+    selectedModel: ImageModelOption | undefined;
+    generationPromptError: string | null;
+    isGenerationProcessing: boolean;
+    setQuantityFromInput(value: string): void;
+    handleAppeal(): Promise<void>;
+    submit(): Promise<void>;
+    onHistory(): void;
+  };
 
 // 表单只接收编辑值、提示和任务是否忙碌；进度快照变化不会穿过这个边界。
 export const GenerationForm = memo(function GenerationForm({
@@ -154,9 +173,7 @@ export const GenerationForm = memo(function GenerationForm({
             <Coins className="size-4 text-volt" aria-hidden="true" />
             预计消耗：{quote ? formatCredits(quote) : "登录后计算"}
           </span>
-          <span className="text-sm text-white/72">
-            当前余额：{account ? formatCredits(account.balance) : "未登录"}
-          </span>
+          <span className="text-sm text-white/72">当前余额：{account ? formatCredits(account.balance) : "未登录"}</span>
         </div>
 
         {message ? (
@@ -169,11 +186,7 @@ export const GenerationForm = memo(function GenerationForm({
                   重试提交
                 </button>
                 {" 或 "}
-                <button
-                  className="underline underline-offset-4"
-                  onClick={() => onHistory()}
-                  type="button"
-                >
+                <button className="underline underline-offset-4" onClick={() => onHistory()} type="button">
                   去历史查看
                 </button>
               </>
@@ -276,6 +289,3 @@ function parseAspectRatioValue(value: string): number | null {
   }
   return width / height;
 }
-
-
-
