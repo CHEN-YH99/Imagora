@@ -23,6 +23,7 @@ type MockState = {
   generationTaskPolls: number;
   historyTaskDetailPolls: number;
   historyTaskListRequests: number;
+  historyBatchRequests: string[][];
   images: GeneratedImage[];
   projects: ImageProject[];
   orders: Order[];
@@ -867,7 +868,7 @@ test("生成中切到历史页后会继续同步任务直到显示结果", async
 
   await expect(page.getByAltText("历史生成图片")).toHaveCount(1, { timeout: 10_000 });
   await expect(page.getByText("已完成").first()).toBeVisible();
-  expect(state.generationTaskPolls).toBeGreaterThanOrEqual(3);
+  expect(state.historyBatchRequests.length).toBeGreaterThanOrEqual(2);
 });
 
 test("历史、收藏、下载、删除和再次生成链路可回归", async ({ page }) => {
@@ -916,9 +917,132 @@ test("收藏与历史任务可以加载后续页，活动任务轮询不会清�
   await page.getByRole("button", { name: /加载更多任务/ }).click();
   await expect(page.getByText("分页历史任务 52", { exact: true })).toBeVisible();
   const listRequestsAfterLoadingMore = state.historyTaskListRequests;
-  await expect.poll(() => state.generationTaskPolls, { timeout: 5000 }).toBeGreaterThan(1);
+  await expect.poll(() => state.historyBatchRequests.length, { timeout: 5000 }).toBeGreaterThan(1);
   await expect(page.getByText("分页历史任务 52", { exact: true })).toBeVisible();
   expect(state.historyTaskListRequests).toBe(listRequestsAfterLoadingMore);
+});
+
+test("历史页切换项目会取消旧筛选请求并保留最新资产", async ({ page }) => {
+  const state = await setupApiMocks(page);
+  state.projects = ["a", "b"].map((suffix) => ({
+    id: "project-" + suffix,
+    userId: creatorUser.id,
+    name: "项目 " + suffix.toUpperCase(),
+    description: "",
+    coverImageId: null,
+    coverThumbnailUrl: null,
+    imageCount: 1,
+    createdAt: now,
+    updatedAt: now
+  }));
+  state.images = ["a", "b"].map((suffix) => ({
+    ...createGeneratedImage("project-image-" + suffix, "task-history"),
+    projectId: "project-" + suffix
+  }));
+  const pending = deferred();
+  let pendingStarted = false;
+  let pendingFinished = false;
+  await page.route("**/api/images?*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("projectId") !== "project-a") return route.fallback();
+    pendingStarted = true;
+    await pending.promise;
+    await fulfillData(route, {
+      images: [state.images[0]],
+      pageInfo: { offset: 0, limit: 50, total: 1, hasMore: false }
+    }).catch(() => undefined);
+    pendingFinished = true;
+  });
+
+  await page.goto("/history");
+  await expect(page.getByRole("link", { name: "详情", exact: true })).toHaveCount(2);
+  await page.getByRole("button", { name: "项目 A · 1", exact: true }).click();
+  await expect.poll(() => pendingStarted).toBe(true);
+  const canceled = page.waitForEvent("requestfailed", {
+    predicate: (request) => new URL(request.url()).searchParams.get("projectId") === "project-a"
+  });
+  await page.getByRole("button", { name: "项目 B · 1", exact: true }).click();
+  await canceled;
+  await expect(page.getByRole("link", { name: "详情", exact: true })).toHaveAttribute(
+    "href",
+    "/images/project-image-b"
+  );
+  pending.resolve();
+  await expect.poll(() => pendingFinished).toBe(true);
+  await expect(page.getByRole("link", { name: "详情", exact: true })).toHaveAttribute(
+    "href",
+    "/images/project-image-b"
+  );
+  await expect(page.getByText("生成历史加载失败，请稍后重试。")).toHaveCount(0);
+});
+
+test("历史页慢轮询完成后才安排下一轮请求", async ({ page }) => {
+  const state = await setupApiMocks(page);
+  state.tasks = [createTask("task-slow", "慢轮询测试任务", "RUNNING")];
+  state.images = [];
+  const pending = deferred();
+  let requests = 0;
+  await page.route("**/api/generation/tasks/batch?*", async (route) => {
+    requests += 1;
+    if (requests === 1) await pending.promise;
+    await fulfillData(route, { tasks: state.tasks, images: [] });
+  });
+  await page.clock.install();
+  await page.goto("/history");
+  await expect.poll(() => requests).toBe(1);
+  await page.clock.fastForward(6000);
+  expect(requests).toBe(1);
+
+  pending.resolve();
+  await expect.poll(() => requests, { timeout: 5000 }).toBe(2);
+});
+
+test("历史页后台暂停轮询并在回到前台时立即恢复", async ({ page }) => {
+  const state = await setupApiMocks(page);
+  state.tasks = [createTask("task-visibility", "后台暂停测试任务", "RUNNING")];
+  state.images = [];
+  const pending = deferred();
+  let requests = 0;
+  await page.route("**/api/generation/tasks/batch?*", async (route) => {
+    requests += 1;
+    if (requests === 1) await pending.promise;
+    await fulfillData(route, { tasks: state.tasks, images: [] }).catch(() => undefined);
+  });
+  await page.clock.install();
+  await page.goto("/history");
+  await expect.poll(() => requests).toBe(1);
+  const canceled = page.waitForEvent("requestfailed", {
+    predicate: (request) => new URL(request.url()).pathname === "/api/generation/tasks/batch"
+  });
+  await setPageHidden(page, true);
+  await canceled;
+  pending.resolve();
+  await page.clock.fastForward(10_000);
+  expect(requests).toBe(1);
+  await setPageHidden(page, false);
+  await expect.poll(() => requests, { timeout: 1500 }).toBe(2);
+  await expect(page.getByText("后台暂停测试任务").first()).toBeVisible();
+});
+
+test("历史页多页活动任务按最多 100 个 ID 分批刷新", async ({ page }) => {
+  const state = await setupApiMocks(page);
+  state.tasks = Array.from({ length: 152 }, (_, index) =>
+    createTask("batch-task-" + (index + 1), "批量活动任务 " + (index + 1), "RUNNING")
+  );
+  state.images = [];
+
+  await page.goto("/history");
+  await page.getByRole("button", { name: /加载更多任务/ }).click();
+  await expect(page.getByText("批量活动任务 100", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /加载更多任务/ }).click();
+  await expect(page.getByText("批量活动任务 150", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /加载更多任务/ }).click();
+  await expect(page.getByText("批量活动任务 152", { exact: true })).toBeVisible();
+  await expect.poll(() => state.historyBatchRequests.some((ids) => ids.includes("batch-task-152"))).toBe(true);
+  expect(state.historyBatchRequests.every((ids) => ids.length > 0 && ids.length <= 100)).toBe(true);
+  expect(state.historyBatchRequests.some((ids) => ids.length === 100)).toBe(true);
+  expect(new Set(state.historyBatchRequests.flat()).size).toBe(152);
+  expect(state.historyTaskListRequests).toBe(4);
 });
 
 test("历史页图片支持 hover 预览大图并显示实际比例", async ({ page }) => {
@@ -1044,6 +1168,25 @@ test("核心页面在 375、768、1440 视口保持可访问且无页面级横�
   }
 });
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+async function setPageHidden(page: Page, hidden: boolean) {
+  await page.evaluate((value) => {
+    Object.defineProperty(document, "hidden", { configurable: true, value });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: value ? "hidden" : "visible"
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+}
+
 async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<MockState> {
   const state = createMockState();
   const generationOutcome = options.generationOutcome ?? "success";
@@ -1156,6 +1299,28 @@ async function setupApiMocks(page: Page, options: MockOptions = {}): Promise<Moc
           total: state.tasks.length,
           hasMore: offset + tasks.length < state.tasks.length
         }
+      });
+      return;
+    }
+    if (method === "GET" && path === "/api/generation/tasks/batch") {
+      const ids = (url.searchParams.get("ids") ?? "").split(",").filter(Boolean);
+      state.historyBatchRequests.push(ids);
+      if (generationOutcome === "historyCompletesAfterNavigation" && ids.includes("task-e2e")) {
+        state.historyTaskDetailPolls += 1;
+        const task = createTask(
+          "task-e2e",
+          "电影感茶杯广告图，薄荷色轮廓光",
+          state.historyTaskDetailPolls > 2 ? "SUCCEEDED" : "RUNNING"
+        );
+        state.tasks = state.tasks.map((item) => (item.id === task.id ? task : item));
+        if (task.status === "SUCCEEDED" && !state.images.some((image) => image.taskId === task.id)) {
+          state.images = [createGeneratedImage("image-e2e", task.id), ...state.images];
+        }
+      }
+      const tasks = state.tasks.filter((task) => ids.includes(task.id));
+      await fulfillData(route, {
+        tasks,
+        images: state.images.filter((image) => tasks.some((task) => task.id === image.taskId))
       });
       return;
     }
@@ -1540,6 +1705,7 @@ function createMockState(): MockState {
     generationTaskPolls: 0,
     historyTaskDetailPolls: 0,
     historyTaskListRequests: 0,
+    historyBatchRequests: [],
     images: [createGeneratedImage("image-history", "task-history"), createGeneratedImage("image-e2e", "task-e2e")],
     projects: [],
     orders: [

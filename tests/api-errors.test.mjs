@@ -45,3 +45,50 @@ test("API client preserves validation details and explains prompt length failure
     stdio: "pipe"
   });
 });
+
+test("API client propagates external cancellation before fetch, during fetch and after a late body", () => {
+  const script = String.raw`
+    import assert from "node:assert/strict";
+    import { apiFetch } from "./apps/web/lib/api/client.ts";
+    const reason = new Error("project switched");
+    const cancelled = new AbortController();
+    cancelled.abort(reason);
+    let fetches = 0;
+    globalThis.fetch = async () => { fetches++; throw new Error("must not fetch"); };
+    await assert.rejects(apiFetch("/api/images", { signal: cancelled.signal }), error => error === reason);
+    assert.equal(fetches, 0);
+
+    const active = new AbortController();
+    let forwardedSignal, removed = 0;
+    const removeListener = active.signal.removeEventListener.bind(active.signal);
+    active.signal.removeEventListener = (...args) => { removed++; return removeListener(...args); };
+    globalThis.fetch = (_url, options) => new Promise((_resolve, reject) => {
+      forwardedSignal = options.signal;
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    });
+    const pending = apiFetch("/api/images", { signal: active.signal });
+    active.abort(reason);
+    await assert.rejects(pending, error => error === reason);
+    assert.equal(forwardedSignal.aborted, true);
+    assert.equal(removed, 1);
+
+    const late = new AbortController();
+    let resolveBody, notifyBody;
+    const bodyStarted = new Promise(resolve => { notifyBody = resolve; });
+    globalThis.fetch = async () => ({
+      ok: true, status: 200,
+      text: () => { notifyBody(); return new Promise(resolve => { resolveBody = resolve; }); }
+    });
+    const response = apiFetch("/api/images", { signal: late.signal });
+    await bodyStarted;
+    late.abort(reason);
+    resolveBody(JSON.stringify({ data: { images: ["stale image"] } }));
+    await assert.rejects(response, error => error === reason);
+    globalThis.fetch = async () => new Response(JSON.stringify({ data: { images: ["current image"] } }));
+    assert.deepEqual(await apiFetch("/api/images"), { images: ["current image"] });
+  `;
+  execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    stdio: "pipe"
+  });
+});
