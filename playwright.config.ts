@@ -23,7 +23,7 @@ export default defineConfig({
     : {
         command: "node infra/scripts/e2e-web-server.mjs",
         url: baseURL,
-        reuseExistingServer: true,
+        reuseExistingServer: false,
         timeout: 120_000
       }
 });

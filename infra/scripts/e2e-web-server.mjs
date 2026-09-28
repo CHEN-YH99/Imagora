@@ -1,19 +1,19 @@
 import { spawn } from "node:child_process";
 import { access } from "node:fs/promises";
+import { createServer } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const webDir = resolve(root, "apps/web");
 const nextCli = await resolveNextCli();
-const preflight = resolve(root, "infra/scripts/dev-preflight.mjs");
 const baseUrl = new URL(process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:3100");
 const port = baseUrl.port || defaultPort(baseUrl.protocol);
 const buildId = resolve(webDir, ".next", "BUILD_ID");
 
+await assertPortAvailable();
 await access(nextCli);
 await access(buildId);
-await runPreflight();
 
 const nextProcess = spawn(process.execPath, [nextCli, "start", "-p", port, "-H", baseUrl.hostname], {
   cwd: webDir,
@@ -21,8 +21,15 @@ const nextProcess = spawn(process.execPath, [nextCli, "start", "-p", port, "-H",
     ...process.env,
     BROWSER: "none"
   },
-  stdio: "inherit",
+  stdio: ["ignore", "pipe", "inherit"],
   windowsHide: true
+});
+
+let startupOutput = "";
+nextProcess.stdout.on("data", (chunk) => {
+  process.stdout.write(chunk);
+  startupOutput = (startupOutput + chunk.toString()).slice(-4096);
+  if (/Ready in/.test(startupOutput)) process.send?.({ type: "ready" });
 });
 
 let stopping = false;
@@ -47,19 +54,17 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => stop(signal));
 }
 
-async function runPreflight() {
-  const preflightProcess = spawn(process.execPath, [preflight, port], {
-    cwd: webDir,
-    env: process.env,
-    stdio: "inherit",
-    windowsHide: true
-  });
-  const code = await new Promise((resolveCode, reject) => {
-    preflightProcess.once("error", reject);
-    preflightProcess.once("exit", (exitCode) => resolveCode(exitCode ?? 0));
-  });
-  if (code !== 0) {
-    process.exit(code);
+async function assertPortAvailable() {
+  const probe = createServer();
+  try {
+    await new Promise((resolveReady, reject) => {
+      probe.once("error", reject);
+      probe.listen({ host: baseUrl.hostname, port: Number(port), exclusive: true }, resolveReady);
+    });
+  } catch (error) {
+    throw new Error(`E2E port ${port} is unavailable; existing services were left running.`, { cause: error });
+  } finally {
+    if (probe.listening) await new Promise((resolveClosed) => probe.close(resolveClosed));
   }
 }
 

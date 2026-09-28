@@ -16,10 +16,14 @@ const server = spawn(process.execPath, [serverScript], {
     ...process.env,
     PLAYWRIGHT_BASE_URL: baseUrl
   },
-  stdio: "inherit",
+  stdio: ["ignore", "inherit", "inherit", "ipc"],
   windowsHide: true
 });
 
+let serverReady = false;
+server.on("message", (message) => {
+  if (message?.type === "ready") serverReady = true;
+});
 let serverExited = false;
 let stoppingServer = false;
 server.once("exit", (code) => {
@@ -44,6 +48,10 @@ async function waitForServer() {
   while (Date.now() - startedAt < timeoutMs) {
     if (serverExited) {
       throw new Error("E2E web server exited before it became ready.");
+    }
+    if (!serverReady) {
+      await delay(50);
+      continue;
     }
     try {
       const response = await fetch(baseUrl);
@@ -96,29 +104,8 @@ async function stopServer() {
 }
 
 async function defaultBaseUrl() {
-  const defaultUrl = "http://127.0.0.1:3100";
-  if (await isPortFree(3100, "127.0.0.1")) {
-    return defaultUrl;
-  }
   const port = await findAvailablePort("127.0.0.1");
   return `http://127.0.0.1:${port}`;
-}
-
-async function isPortFree(port, host) {
-  const server = createServer();
-  try {
-    await new Promise((resolveOpen, rejectOpen) => {
-      server.once("error", rejectOpen);
-      server.listen(port, host, resolveOpen);
-    });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    if (server.listening) {
-      await new Promise((resolveClose) => server.close(resolveClose));
-    }
-  }
 }
 
 async function findAvailablePort(host) {
