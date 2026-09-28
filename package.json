@@ -45,9 +45,6 @@
     "esbuild": "0.28.1",
     "postcss": "8.5.28",
     "deepmerge-ts": "8.0.2",
-    "next": {
-      "postcss": "8.5.28"
-    },
     "tsx": {
       "esbuild": "0.28.1"
     }
@@ -58,7 +55,9 @@
     "esbuild": "0.28.1",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^9.1.2",
+    "next": "16.3.6",
     "prettier": "^3.8.4",
+    "prisma": "6.19.3",
     "typescript-eslint": "^8.61.0"
   },
   "dependencies": {
