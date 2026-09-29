@@ -1223,6 +1223,7 @@ export class PrismaStore implements Store {
     }
     const taskIds = data.generationTasks.map((task) => task.id);
     const referenceImageIds = scopedReferenceImageIds(scope, data.generationTasks);
+    const referenceContent = scope.referenceImages?.content;
     const userIds = scope.creditAccounts?.userIds ?? [];
     const openTaskIds = scope.operationalIncidents?.openTaskIds ?? [];
     const [creditAccounts, creditLedgerEntries, referenceImages, safetyRules, operationalIncidents] = await Promise.all(
@@ -1240,7 +1241,16 @@ export class PrismaStore implements Store {
           : typeof scope.creditLedgerEntries === "object" && scope.creditLedgerEntries.userIds.length
             ? tx.creditLedgerEntry.findMany({ where: { userId: { in: scope.creditLedgerEntries.userIds } } })
             : [],
-        referenceImageIds.length ? tx.referenceImage.findMany({ where: { id: { in: referenceImageIds } } }) : [],
+        referenceImageIds.length || referenceContent
+          ? tx.referenceImage.findMany({
+              where: {
+                OR: [
+                  ...(referenceImageIds.length ? [{ id: { in: referenceImageIds } }] : []),
+                  ...(referenceContent ? [{ userId: referenceContent.userId, contentHash: referenceContent.hash }] : [])
+                ]
+              }
+            })
+          : [],
         scope.safetyRules === "active" ? tx.safetyRule.findMany({ where: { status: "ACTIVE" } }) : [],
         openTaskIds.length
           ? tx.operationalIncident.findMany({ where: { status: "OPEN", taskId: { in: openTaskIds } } })

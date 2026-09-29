@@ -42,7 +42,7 @@
 | `DATA_STORE` | `apps/api/src/production-config.ts:48`<br>`apps/worker/src/main.ts:739`<br>`packages/database/src/index.ts:165` |
 | `DATABASE_URL` | `packages/database/scripts/prisma-cli.mjs:13` |
 | `DEPLOY_ENV_FILE` | `infra/scripts/deploy-local-prod.mjs:6` |
-| `DISABLE_PRISMA_DEV_FALLBACK` | `packages/database/src/index.ts:1876` |
+| `DISABLE_PRISMA_DEV_FALLBACK` | `packages/database/src/index.ts:1886` |
 | `DOWNLOAD_URL_TTL_MINUTES` | `apps/api/src/routes/images.ts:62`<br>`apps/api/src/routes/images.ts:137` |
 | `EMAIL_VERIFICATION_TOKEN_TTL_HOURS` | `apps/api/src/routes/auth.ts:126`<br>`apps/api/src/routes/auth.ts:290`<br>`apps/api/src/routes/auth.ts:539` |
 | `EXPOSE_CAPTCHA_ANSWER_FOR_TESTS` | `apps/api/src/captcha-runtime.ts:194` |
@@ -65,9 +65,9 @@
 | `IMAGE_MODEL_DISCOVERY_CHANNEL` | `packages/ai-providers/src/model-discovery.ts:202` |
 | `IMAGE_MODELS` | `apps/api/src/generation-runtime.ts:105` |
 | `IMAGE_PROVIDER_DEFAULT` | `infra/scripts/release-drill.mjs:222`<br>`packages/ai-providers/src/model-discovery.ts:207` |
-| `IMAGORA_BOOTSTRAP_ADMIN_EMAIL` | `infra/scripts/load-smoke.mjs:142`<br>`infra/scripts/smoke-test.mjs:11`<br>`packages/database/src/index.ts:1516` |
-| `IMAGORA_BOOTSTRAP_ADMIN_PASSWORD` | `infra/scripts/load-smoke.mjs:144`<br>`infra/scripts/smoke-test.mjs:13`<br>`packages/database/src/index.ts:1517` |
-| `IMAGORA_SEED_DEMO_DATA` | `packages/database/src/index.ts:1865` |
+| `IMAGORA_BOOTSTRAP_ADMIN_EMAIL` | `infra/scripts/load-smoke.mjs:142`<br>`infra/scripts/smoke-test.mjs:11`<br>`packages/database/src/index.ts:1526` |
+| `IMAGORA_BOOTSTRAP_ADMIN_PASSWORD` | `infra/scripts/load-smoke.mjs:144`<br>`infra/scripts/smoke-test.mjs:13`<br>`packages/database/src/index.ts:1527` |
+| `IMAGORA_SEED_DEMO_DATA` | `packages/database/src/index.ts:1875` |
 | `IMAGORA_STORE_PATH` | `apps/api/src/image-model-discovery.ts:7`<br>`infra/scripts/backup-json-store.mjs:5`<br>`infra/scripts/reconcile-credits.mjs:14`<br>`infra/scripts/restore-json-store.mjs:12`<br>`packages/database/src/index.ts:183` |
 | `INCIDENT_RETENTION_MAX` | `apps/api/src/observability.ts:122`<br>`apps/worker/src/main.ts:566` |
 | `LOAD_ADMIN_EMAIL` | `infra/scripts/load-smoke.mjs:142` |
@@ -95,7 +95,7 @@
 | `MOCK_RECONCILE_PAID_ORDERS` | `packages/payments/src/index.ts:132` |
 | `NEXT_PUBLIC_API_BASE_URL` | `apps/web/lib/api/client.ts:60` |
 | `NEXT_PUBLIC_PAYMENT_PROVIDER` | `apps/web/app/pricing/page.tsx:17` |
-| `NODE_ENV` | `apps/api/src/auth-runtime.ts:95`<br>`apps/api/src/auth-runtime.ts:111`<br>`apps/api/src/auth-runtime.ts:133`<br>`apps/api/src/captcha-runtime.ts:194`<br>`apps/api/src/captcha-runtime.ts:221`<br>`apps/api/src/captcha-runtime.ts:249`<br>`apps/api/src/main.ts:147`<br>`apps/api/src/main.ts:1290`<br>`apps/api/src/runtime-state.ts:368`<br>`apps/web/next.config.mjs:15`<br>`apps/worker/src/main.ts:34`<br>`packages/ai-providers/src/model-discovery.ts:210`<br>`packages/database/src/index.ts:1869`<br>`packages/database/src/index.ts:1873`<br>`packages/storage/src/index.ts:142` |
+| `NODE_ENV` | `apps/api/src/auth-runtime.ts:95`<br>`apps/api/src/auth-runtime.ts:111`<br>`apps/api/src/auth-runtime.ts:133`<br>`apps/api/src/captcha-runtime.ts:194`<br>`apps/api/src/captcha-runtime.ts:221`<br>`apps/api/src/captcha-runtime.ts:249`<br>`apps/api/src/main.ts:147`<br>`apps/api/src/main.ts:1290`<br>`apps/api/src/runtime-state.ts:368`<br>`apps/web/next.config.mjs:15`<br>`apps/worker/src/main.ts:34`<br>`packages/ai-providers/src/model-discovery.ts:210`<br>`packages/database/src/index.ts:1879`<br>`packages/database/src/index.ts:1883`<br>`packages/storage/src/index.ts:142` |
 | `OPENAI_IMAGE_MODEL` | `packages/ai-providers/src/index.ts:983` |
 | `OPENAI_MAX_RETRIES` | `infra/scripts/verify-image-model-ratios.mjs:47`<br>`packages/ai-providers/src/index.ts:778` |
 | `OPENAI_RETRY_BASE_MS` | `packages/ai-providers/src/index.ts:779` |
@@ -176,7 +176,7 @@
 | `UPLOAD_MAX_BASE64_CHARS` | `apps/api/src/main.ts:411`<br>`apps/api/src/schemas.ts:161` |
 | `UPLOAD_MAX_BYTES` | `apps/api/src/image-upload.ts:22` |
 | `UPLOAD_MAX_DIMENSION` | `apps/api/src/image-upload.ts:42` |
-| `UPLOAD_REFERENCE_TTL_DAYS` | `apps/api/src/routes/generation.ts:315` |
+| `UPLOAD_REFERENCE_TTL_DAYS` | `apps/api/src/routes/generation.ts:378` |
 | `WEB_BASE_URL` | `infra/scripts/smoke-test.mjs:10` |
 | `WEB_ORIGIN` | `apps/api/src/main.ts:1313`<br>`apps/api/src/routes/auth.ts:157`<br>`apps/api/src/routes/auth.ts:304`<br>`apps/api/src/routes/auth.ts:428`<br>`apps/api/src/routes/auth.ts:550`<br>`infra/scripts/load-smoke.mjs:137` |
 | `WECHAT_PAY_API_VERSION` | `packages/payments/src/index.ts:450` |

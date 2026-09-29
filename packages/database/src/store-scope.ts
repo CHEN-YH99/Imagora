@@ -10,7 +10,7 @@ export interface StoreScope {
   generationTasks?: { userId?: string; ids?: string[]; clientRequestIds?: string[] } | { nextPending: true };
   /** loadedTasks：已加载任务的全部 TASK 流水（扣费、退款），并允许追加。 */
   creditLedgerEntries?: "loadedTasks" | "append" | { userIds: string[] };
-  referenceImages?: { ids?: string[]; loadedTasks?: boolean };
+  referenceImages?: { ids?: string[]; loadedTasks?: boolean; content?: { userId: string; hash: string } };
   safetyRules?: "active";
   operationalIncidents?: { openTaskIds: string[] };
   safetyEvents?: "append";
@@ -94,7 +94,12 @@ export function projectStoreScope(data: StoreData, scope: StoreScope): StoreData
     const ledgerUserIds = new Set(scope.creditLedgerEntries.userIds);
     projected.creditLedgerEntries = data.creditLedgerEntries.filter((entry) => ledgerUserIds.has(entry.userId));
   }
-  projected.referenceImages = data.referenceImages.filter((image) => referenceImageIds.has(image.id));
+  const referenceContent = scope.referenceImages?.content;
+  projected.referenceImages = data.referenceImages.filter(
+    (image) =>
+      referenceImageIds.has(image.id) ||
+      (referenceContent && image.userId === referenceContent.userId && image.contentHash === referenceContent.hash)
+  );
   if (scope.safetyRules === "active") {
     projected.safetyRules = data.safetyRules.filter((rule) => rule.status === "ACTIVE");
   }

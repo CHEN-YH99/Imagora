@@ -6,6 +6,7 @@ const apiErrorCodeMap: Record<string, string> = {
   CONTENT_BLOCKED: "内容未通过安全规则，请调整提示词或参考图后重试。",
   CONTENT_REVIEW_REQUIRED: "内容已提交人工复核，暂时无法生成。如认为是误判，可在下方发起申诉。",
   FEATURE_DISABLED: "该功能当前暂不可用，请稍后再试。",
+  GENERATION_CHANGED: "生成内容或审核规则已更新，请重新提交生成。",
   FORBIDDEN: "当前账号没有权限执行此操作。",
   INSUFFICIENT_CREDITS: "积分余额不足，请充值后再提交生成。",
   INTERNAL_ERROR: "服务暂时异常，请稍后重试。",

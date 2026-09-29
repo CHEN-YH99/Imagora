@@ -53,12 +53,12 @@
 | GET `/api/files/*` | `apps/api/src/routes/system.ts:30` |
 | GET `/api/generation/models` | `apps/api/src/routes/generation.ts:70` |
 | POST `/api/generation/quote` | `apps/api/src/routes/generation.ts:80` |
-| GET `/api/generation/tasks` | `apps/api/src/routes/generation.ts:337` |
-| POST `/api/generation/tasks` | `apps/api/src/routes/generation.ts:261` |
-| GET `/api/generation/tasks/:taskId` | `apps/api/src/routes/generation.ts:371` |
-| GET `/api/generation/tasks/:taskId/events` | `apps/api/src/routes/generation.ts:381` |
-| POST `/api/generation/tasks/:taskId/retry` | `apps/api/src/routes/generation.ts:425` |
-| GET `/api/generation/tasks/batch` | `apps/api/src/routes/generation.ts:354` |
+| GET `/api/generation/tasks` | `apps/api/src/routes/generation.ts:404` |
+| POST `/api/generation/tasks` | `apps/api/src/routes/generation.ts:291` |
+| GET `/api/generation/tasks/:taskId` | `apps/api/src/routes/generation.ts:438` |
+| GET `/api/generation/tasks/:taskId/events` | `apps/api/src/routes/generation.ts:448` |
+| POST `/api/generation/tasks/:taskId/retry` | `apps/api/src/routes/generation.ts:492` |
+| GET `/api/generation/tasks/batch` | `apps/api/src/routes/generation.ts:421` |
 | GET `/api/image-projects` | `apps/api/src/routes/image-projects.ts:22` |
 | POST `/api/image-projects` | `apps/api/src/routes/image-projects.ts:28` |
 | DELETE `/api/image-projects/:projectId` | `apps/api/src/routes/image-projects.ts:77` |
@@ -79,7 +79,7 @@
 | GET `/api/plans` | `apps/api/src/routes/orders.ts:53` |
 | GET `/api/safety-appeals` | `apps/api/src/routes/admin.ts:653` |
 | POST `/api/safety-appeals` | `apps/api/src/routes/admin.ts:623` |
-| POST `/api/uploads/reference-images` | `apps/api/src/routes/generation.ts:263` |
+| POST `/api/uploads/reference-images` | `apps/api/src/routes/generation.ts:293` |
 | GET `/api/users/me` | `apps/api/src/routes/auth.ts:566` |
 | PATCH `/api/users/me` | `apps/api/src/routes/auth.ts:571` |
 | GET `/api/users/me/credit-ledger` | `apps/api/src/routes/auth.ts:590` |

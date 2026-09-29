@@ -107,6 +107,20 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     });
   }
 
+  function generationSafetyInput(data: StoreData, input: z.infer<typeof generationInputSchema>) {
+    return {
+      text: [input.prompt, input.negativePrompt ?? ""].join("\n"),
+      blockedTerms: data.safetyRules
+        .filter((rule) => rule.status === "ACTIVE" && rule.action === "BLOCK")
+        .map((rule) => rule.term)
+        .sort(),
+      reviewTerms: data.safetyRules
+        .filter((rule) => rule.status === "ACTIVE" && rule.action === "REVIEW")
+        .map((rule) => rule.term)
+        .sort()
+    };
+  }
+
   async function submitGeneration(request: FastifyRequest, reply: FastifyReply, retry = false) {
     assertFeatureEnabled("generation");
     const { user } = await requireSession(request);
@@ -140,7 +154,24 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
       safetyRules: "active",
       safetyEvents: "append"
     } satisfies StoreScope;
-    const result = await store.updateScoped(scope, async (data) => {
+    // 短事务只取审核快照；第三方审核在释放写锁后执行。
+    const prepared = await store.updateScoped(scope, (data) => {
+      const input =
+        submission.kind === "retry"
+          ? retryGenerationInput(data, user.id, submission.taskId, submission.clientRequestId)
+          : submission.input;
+      const duplicate = data.generationTasks.some(
+        (task) => task.userId === user.id && task.clientRequestId === input.clientRequestId
+      );
+      if (duplicate) return { input, safetyInput: null };
+      resolveRequestedGeneration(input);
+      if (input.referenceImageId) mustFindOwnReferenceImage(data, user.id, input.referenceImageId);
+      return { input, safetyInput: generationSafetyInput(data, input) };
+    });
+    const safety = prepared.safetyInput ? await safetyProvider.checkText(prepared.safetyInput) : null;
+
+    const result = await store.updateScoped(scope, (data) => {
+      assertFeatureEnabled("generation");
       const input =
         submission.kind === "retry"
           ? retryGenerationInput(data, user.id, submission.taskId, submission.clientRequestId)
@@ -166,15 +197,14 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
       const referenceImage = input.referenceImageId
         ? mustFindOwnReferenceImage(data, user.id, input.referenceImageId)
         : null;
-      const safety = await safetyProvider.checkText({
-        text: [input.prompt, input.negativePrompt ?? ""].join("\n"),
-        blockedTerms: data.safetyRules
-          .filter((rule) => rule.status === "ACTIVE" && rule.action === "BLOCK")
-          .map((rule) => rule.term),
-        reviewTerms: data.safetyRules
-          .filter((rule) => rule.status === "ACTIVE" && rule.action === "REVIEW")
-          .map((rule) => rule.term)
-      });
+      // 审核期间规则或重试参数发生变化时，旧审核不能用于扣费；客户端可用原去重键重新提交。
+      if (
+        !safety ||
+        JSON.stringify(input) !== JSON.stringify(prepared.input) ||
+        JSON.stringify(generationSafetyInput(data, input)) !== JSON.stringify(prepared.safetyInput)
+      ) {
+        throw new AppError("GENERATION_CHANGED", "Generation input or safety rules changed; please retry", 409);
+      }
       if (safety.status === "BLOCKED" || safety.status === "REVIEW_REQUIRED") {
         // 注意：store.update 在回调抛异常时会回滚，不落库。安全事件必须靠“正常返回”提交，
         // 再在事务外抛 AppError，否则待复核/拦截记录会随回滚丢失，人工复核队列永远为空。
@@ -267,9 +297,9 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
     const upload = inspectReferenceUpload(input);
     const safety = await safetyProvider.checkImage({ mimeType: upload.mimeType, bytes: upload.contentBase64 });
 
-    const result = await store.update(async (data) => {
-      if (safety.status === "BLOCKED" || safety.status === "REVIEW_REQUIRED") {
-        // 同 /api/generation/tasks：安全事件必须靠正常返回提交，抛异常会回滚导致记录丢失
+    if (safety.status === "BLOCKED" || safety.status === "REVIEW_REQUIRED") {
+      // 先正常提交安全事件，再在事务外返回拒绝。
+      await store.updateScoped({ safetyEvents: "append" }, (data) => {
         data.safetyEvents.push({
           id: randomUUID(),
           userId: user.id,
@@ -281,57 +311,94 @@ export function registerGenerationRoutes(app: ApiRouteApp, context: ApiRouteCont
           provider: safety.provider,
           createdAt: new Date().toISOString()
         });
-        return { blocked: true as const, safety };
-      }
-
-      const existing = data.referenceImages.find(
-        (image) => image.userId === user.id && image.contentHash === upload.contentHash && !image.deletedAt
-      );
-      if (existing) {
-        return { blocked: false as const, referenceImage: existing, duplicate: true, created: false };
-      }
-
-      const now = new Date().toISOString();
-      const id = randomUUID();
-      const stored = await storage.putObject({
-        key: `reference/${user.id}/${id}.${extensionForMime(upload.mimeType)}`,
-        body: upload.contentBase64,
-        bodyEncoding: "base64",
-        mimeType: upload.mimeType
       });
-      const referenceImage: ReferenceImage = {
-        id,
-        userId: user.id,
-        storageKey: stored.key,
-        publicUrl: stored.publicUrl,
-        originalFileName: input.fileName,
-        mimeType: upload.mimeType,
-        fileSize: upload.fileSize,
-        width: upload.width,
-        height: upload.height,
-        contentHash: upload.contentHash,
-        safetyStatus: "PASSED",
-        createdAt: now,
-        expiresAt: addDays(now, envNumber("UPLOAD_REFERENCE_TTL_DAYS", 1)),
-        deletedAt: null
-      };
-      data.referenceImages.push(referenceImage);
-      return { blocked: false as const, referenceImage, duplicate: false, created: true };
-    });
-    if (result.blocked) {
-      // 安全事件已在事务里落库,这里才抛错拦截。参考图 REVIEW 同样拦截,因为花钱的是后续生成而非上传本身。
-      const review = result.safety.status === "REVIEW_REQUIRED";
+      const review = safety.status === "REVIEW_REQUIRED";
       throw new AppError(
         review ? "CONTENT_REVIEW_REQUIRED" : "CONTENT_BLOCKED",
         review ? "Reference image requires manual safety review" : "Reference image was blocked by safety rules",
         400,
-        { ...result.safety }
+        { ...safety }
       );
     }
-    if (result.created) {
-      reply.status(201);
+
+    const scope = {
+      referenceImages: { content: { userId: user.id, hash: upload.contentHash } }
+    } satisfies StoreScope;
+    const findReusable = (data: StoreData) =>
+      data.referenceImages.find(
+        (image) =>
+          image.userId === user.id &&
+          image.contentHash === upload.contentHash &&
+          !image.deletedAt &&
+          image.safetyStatus === "PASSED" &&
+          Date.parse(image.expiresAt) > Date.now()
+      );
+    const existing = await store.updateScoped(scope, (data) => {
+      assertFeatureEnabled("uploads");
+      return findReusable(data);
+    });
+    if (existing) return envelope(request, { referenceImage: existing, duplicate: true });
+
+    const id = randomUUID();
+    const key = `reference/${user.id}/${id}.${extensionForMime(upload.mimeType)}`;
+    const discardUpload = async (storageKey: string) => {
+      try {
+        await storage.deleteObject(storageKey);
+      } catch (error) {
+        request.log.error({ err: error, storageKey }, "reference upload compensation failed");
+      }
+    };
+    // 每个请求使用独立对象键；并发去重的落败请求只清理自己的对象。
+    const stored = await storage
+      .putObject({ key, body: upload.contentBase64, bodyEncoding: "base64", mimeType: upload.mimeType })
+      .catch(async (error: unknown) => {
+        await discardUpload(key);
+        throw error;
+      });
+    let result: { referenceImage: ReferenceImage; created: boolean };
+    try {
+      result = await store.updateScoped(scope, (data) => {
+        assertFeatureEnabled("uploads");
+        const duplicate = findReusable(data);
+        if (duplicate) return { referenceImage: duplicate, created: false };
+        const now = new Date().toISOString();
+        const referenceImage: ReferenceImage = {
+          id,
+          userId: user.id,
+          storageKey: stored.key,
+          publicUrl: stored.publicUrl,
+          originalFileName: input.fileName,
+          mimeType: upload.mimeType,
+          fileSize: upload.fileSize,
+          width: upload.width,
+          height: upload.height,
+          contentHash: upload.contentHash,
+          safetyStatus: "PASSED",
+          createdAt: now,
+          expiresAt: addDays(now, envNumber("UPLOAD_REFERENCE_TTL_DAYS", 1)),
+          deletedAt: null
+        };
+        data.referenceImages.push(referenceImage);
+        return { referenceImage, created: true };
+      });
+    } catch (error) {
+      // 提交结果可能因连接中断而不确定。确认无记录后才清理，避免删除已提交的图片。
+      try {
+        const persisted = await store.updateScoped({ referenceImages: { ids: [id] } }, (data) =>
+          data.referenceImages.some((image) => image.id === id && image.storageKey === stored.key)
+        );
+        if (!persisted) await discardUpload(stored.key);
+      } catch (verificationError) {
+        request.log.error(
+          { err: verificationError, storageKey: stored.key },
+          "reference upload commit could not be verified; object retained"
+        );
+      }
+      throw error;
     }
-    return envelope(request, { referenceImage: result.referenceImage, duplicate: result.duplicate });
+    if (!result.created) await discardUpload(stored.key);
+    if (result.created) reply.status(201);
+    return envelope(request, { referenceImage: result.referenceImage, duplicate: !result.created });
   });
 
   app.get("/api/generation/tasks", async (request) => {
