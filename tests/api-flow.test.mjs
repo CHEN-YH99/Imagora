@@ -3834,3 +3834,91 @@ function createFakeOpenAiServer(responses, modelDirectory) {
     }
   };
 }
+
+test("generation moderation releases the write lock and rejects changed rules, balances and retry inputs", async (t) => {
+  for (const scenario of ["rules", "balance", "input", "unrelated"]) {
+    await t.test(scenario, async (t) => {
+      let entered;
+      let release;
+      const started = new Promise((resolve) => {
+        entered = resolve;
+      });
+      const resumed = new Promise((resolve) => {
+        release = resolve;
+      });
+      const server = createHttpServer(async (request, response) => {
+        for await (const _chunk of request) {
+          /* drain the moderation payload */
+        }
+        entered();
+        await resumed;
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ status: "PASSED", reasonCode: "OK", reasonMessage: "passed", provider: "test" }));
+      });
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      t.after(async () => {
+        release();
+        server.closeAllConnections();
+        await new Promise((resolve) => server.close(resolve));
+      });
+      const endpoint = "http://127.0.0.1:" + server.address().port;
+      const fixture = await createRetryFixture(t, {
+        SAFETY_PROVIDER: "http",
+        SAFETY_TEXT_ENDPOINT: endpoint,
+        SAFETY_IMAGE_ENDPOINT: endpoint,
+        SAFETY_PROVIDER_TIMEOUT_MS: "10000"
+      });
+      const source = await fixture.seedFailed();
+      const before = await readStore(fixture.storePath);
+      const pending = fixture.retry(source.id, {});
+      let timer;
+      try {
+        await Promise.race([
+          started,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("moderation did not start")), 3000);
+          })
+        ]);
+        clearTimeout(timer);
+        const write = updateStoreJson(fixture.storePath, (data) => {
+          if (scenario === "rules")
+            data.safetyRules.push({
+              id: randomUUID(),
+              term: source.prompt,
+              action: "BLOCK",
+              status: "ACTIVE",
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            });
+          if (scenario === "balance") data.creditAccounts.find((item) => item.userId === fixture.userId).balance = 0;
+          if (scenario === "input")
+            data.generationTasks.find((item) => item.id === source.id).prompt = "Changed while moderating";
+          if (scenario === "unrelated")
+            data.users.find((item) => item.id === fixture.userId).nickname = "Unrelated write";
+        });
+        await Promise.race([
+          write,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("moderation retained the store lock")), 2500);
+          })
+        ]);
+      } finally {
+        clearTimeout(timer);
+        release();
+      }
+      const response = await pending;
+      if (scenario === "unrelated") {
+        assert.equal(response.status, 201);
+      } else {
+        assert.equal(response.status, scenario === "balance" ? 402 : 409);
+        assert.equal(
+          response.payload.error.code,
+          scenario === "balance" ? "INSUFFICIENT_CREDITS" : "GENERATION_CHANGED"
+        );
+        const after = await readStore(fixture.storePath);
+        assert.equal(after.generationTasks.length, before.generationTasks.length);
+        assert.equal(after.creditLedgerEntries.length, before.creditLedgerEntries.length);
+      }
+    });
+  }
+});

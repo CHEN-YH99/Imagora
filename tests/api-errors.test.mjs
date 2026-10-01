@@ -29,6 +29,7 @@ test("API client preserves validation details and explains prompt length failure
     }
     assert.equal(formatApiErrorMessage("INTERNAL_ERROR", "private value", 500, details), "服务暂时异常，请稍后重试。");
     assert.equal(formatApiErrorMessage("UNKNOWN", "private value", 400), "请求失败，请稍后重试。（400）");
+    assert.equal(formatApiErrorMessage("GENERATION_CHANGED", "private value", 409), "生成内容或审核规则已更新，请重新提交生成。");
 
     globalThis.fetch = async () => new Response(JSON.stringify({
       error: { code: "VALIDATION_ERROR", message: "Invalid request payload", details }

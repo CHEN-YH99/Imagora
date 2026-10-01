@@ -1069,3 +1069,36 @@ test("slow or failed progress writes never block reporting and final flush persi
   assert.equal(writes[1].progress.savedImages, 2);
   assert.equal(writes[1].progress.events.length, 3);
 });
+
+test("Prisma reference upload lookup scopes matching content to its owner and supports commit verification by ID", async () => {
+  const queries = [];
+  const client = {
+    async $transaction(run) {
+      return run(client);
+    },
+    async $executeRawUnsafe() {},
+    user: {
+      async count() {
+        return 1;
+      }
+    },
+    referenceImage: {
+      async findMany(query) {
+        queries.push(query);
+        return [];
+      }
+    }
+  };
+  const store = new PrismaStore(client);
+  await store.updateScoped({ referenceImages: { content: { userId: "owner-a", hash: "content-hash" } } }, (data) => {
+    assert.deepEqual(data.referenceImages, []);
+    assert.throws(() => data.users, /scope/i);
+  });
+  await store.updateScoped({ referenceImages: { ids: ["uploaded-id"] } }, (data) => {
+    assert.deepEqual(data.referenceImages, []);
+  });
+  assert.deepEqual(queries, [
+    { where: { OR: [{ userId: "owner-a", contentHash: "content-hash" }] } },
+    { where: { OR: [{ id: { in: ["uploaded-id"] } }] } }
+  ]);
+});
