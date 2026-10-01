@@ -35,7 +35,10 @@ export function useImageModelCatalog(initialChannel?: string | null) {
   }>({ requestKey: initialChannel ?? "", catalog: { models: [], defaultModel: null }, loading: true, error: null });
   const [preferredModel, setPreferredModel] = useState("");
   const [refreshVersion, setRefreshVersion] = useState(0);
-  const refresh = useCallback(() => setRefreshVersion((value) => value + 1), []);
+  const refresh = useCallback(() => {
+    setState((previous) => ({ ...previous, loading: true, error: null }));
+    setRefreshVersion((value) => value + 1);
+  }, []);
   const selectedChannel = requestedChannel || state.catalog.channel || "";
 
   const selectionRef = useRef(selectedChannel);

@@ -1,108 +1,148 @@
 "use client";
 
-import { memo, useEffect, useRef, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { memo, useEffect, useState } from "react";
+import { Check, Circle, Clock3, LoaderCircle, Sparkles } from "lucide-react";
+import type { GeneratedImage, Task } from "../../../lib/api";
+import {
+  isTerminalTaskStatus,
+  resolveGenerationElapsedSeconds,
+  resolveGenerationProgress,
+  resolveImageProgressLabel,
+  resolveImageProgressStages
+} from "../generationState";
 
-export const progressTransitionMs = 250;
-
-const GenerationTaskProgress = memo(function GenerationTaskProgress({ percentage }: { percentage: number | null }) {
-  const [displayedPercentage, setDisplayedPercentage] = useState(0);
-  const displayedPercentageRef = useRef(0);
-  const targetPercentage = percentage ?? 0;
-
+export const GenerationTaskActivity = memo(function GenerationTaskActivity({
+  task,
+  images,
+  quantity
+}: {
+  task: Task | null;
+  images: GeneratedImage[];
+  quantity: number;
+}) {
+  const [now, setNow] = useState<number | null>(null);
+  const active = Boolean(task && !isTerminalTaskStatus(task.status));
   useEffect(() => {
-    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const from = displayedPercentageRef.current;
-    const startedAt = performance.now();
-    let frame = 0;
-    const update = (value: number) => {
-      displayedPercentageRef.current = value;
-      setDisplayedPercentage(value);
-    };
-    const animate = (now: number) => {
-      const elapsed = reducedMotion.matches ? 1 : Math.min(1, (now - startedAt) / progressTransitionMs);
-      update(from + (targetPercentage - from) * elapsed);
-      if (elapsed < 1) frame = window.requestAnimationFrame(animate);
-    };
-    const handleMotionChange = () => {
-      if (!reducedMotion.matches) return;
-      window.cancelAnimationFrame(frame);
-      update(targetPercentage);
-    };
-    frame = window.requestAnimationFrame(animate);
-    reducedMotion.addEventListener("change", handleMotionChange);
+    const update = () => setNow(Date.now());
+    update();
+    if (!active) return;
+    const interval = window.setInterval(update, 1000);
+    document.addEventListener("visibilitychange", update);
     return () => {
-      window.cancelAnimationFrame(frame);
-      reducedMotion.removeEventListener("change", handleMotionChange);
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", update);
     };
-  }, [targetPercentage]);
+  }, [task?.id, active]);
 
+  const progress = resolveGenerationProgress(task, images, quantity);
+  const seconds = now === null ? null : resolveGenerationElapsedSeconds(task, now);
+  const duration =
+    seconds === null
+      ? null
+      : `${Math.floor(seconds / 60)
+          .toString()
+          .padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
   return (
-    <div className="mt-2 w-full text-left">
-      <div className="flex items-center justify-end text-[10px] leading-4 text-white/64">
-        <span className="shrink-0 tabular-nums text-mint">
-          {percentage === null ? "—" : `${Math.floor(displayedPercentage)}%`}
-        </span>
+    <section aria-label="任务进度" className="mb-4 space-y-2 border-b border-white/10 pb-4 text-xs leading-5">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+        <p className="font-medium text-mint" role="status">
+          {progress.label}
+        </p>
+        {duration ? (
+          <span
+            aria-label="任务已用时间"
+            aria-live="off"
+            className="inline-flex items-center gap-1.5 tabular-nums text-white/60"
+          >
+            <Clock3 className="size-3.5" aria-hidden="true" />
+            {task?.status === "PENDING" ? "已等待" : "已用时"} {duration}
+          </span>
+        ) : null}
       </div>
-      <div
-        role="progressbar"
-        aria-label="图片生成进度"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={percentage ?? undefined}
-        aria-valuetext={percentage === null ? "等待进度同步" : `${percentage}%`}
-        className="mt-1 h-1 overflow-hidden rounded-full bg-white/10"
-      >
-        <span
-          className="block h-full w-full rounded-full bg-mint"
-          style={{ transform: `translateX(${displayedPercentage - 100}%)` }}
-        />
-      </div>
-    </div>
+      <p className="text-white/60">{progress.detail}</p>
+      {active ? (
+        <p aria-live="polite" aria-atomic="true" className="flex flex-wrap gap-x-4 gap-y-1 tabular-nums text-white/75">
+          <span>
+            {progress.generatedImages === null
+              ? "接收数量待同步"
+              : `已接收 ${progress.generatedImages} / ${progress.totalImages} 张`}
+          </span>
+          {progress.savedImages !== null ? (
+            <span>
+              已保存 {progress.savedImages} / {progress.totalImages} 张
+            </span>
+          ) : null}
+        </p>
+      ) : null}
+    </section>
   );
 });
+
+const stageStateLabels = { pending: "未开始", active: "进行中", complete: "已完成", unknown: "待同步" };
 
 export const GenerationProcessingPlaceholder = memo(function GenerationProcessingPlaceholder({
   index,
   processingAspectRatio,
-  label,
-  percentage
+  task
 }: {
   index: number;
   processingAspectRatio: string;
-  label: string;
-  percentage: number | null;
+  task: Task | null;
 }) {
   const aspectRatioValue = parseAspectRatioValue(processingAspectRatio);
   const isWideFrame = (aspectRatioValue ?? 1) >= 1.5;
+  const label = resolveImageProgressLabel(task, index);
+  const stages = resolveImageProgressStages(task, index);
+  const waiting = stages.every((stage) => stage.state === "pending");
+  const processing = stages.some((stage) => stage.state === "active");
+  const Icon = waiting ? Clock3 : Sparkles;
 
   return (
     <div
       aria-label={`第 ${index + 1} 张图片正在生成`}
-      className="relative w-full overflow-hidden rounded-2xl border border-mint/24 bg-black/28 shadow-glow motion-reduce:transition-none"
+      className="generation-processing-card relative flex w-full items-center justify-center overflow-hidden rounded-lg"
+      data-processing={processing ? "active" : waiting ? "waiting" : "settling"}
       role="status"
       style={{ aspectRatio: processingAspectRatio }}
     >
-      <span className="pointer-events-none absolute -inset-16 bg-[conic-gradient(from_130deg,transparent,rgba(88,240,182,0.42),rgba(37,216,255,0.28),transparent)] opacity-70 blur-2xl motion-safe:animate-spin motion-reduce:animate-none" />
-      <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_30%_24%,rgba(217,248,91,0.18),transparent_32%),radial-gradient(circle_at_72%_68%,rgba(37,216,255,0.16),transparent_38%)] motion-safe:animate-pulse motion-reduce:opacity-70" />
-      <span className="pointer-events-none absolute inset-3 rounded-[1.25rem] border border-white/10 bg-ink/72 backdrop-blur-md" />
-      <span className="pointer-events-none absolute inset-x-5 top-3 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent motion-safe:animate-pulse motion-reduce:opacity-60" />
-      <div className={`relative flex h-full items-center justify-center px-5 ${isWideFrame ? "py-3" : "text-center"}`}>
-        <div
-          className={`flex w-full ${isWideFrame ? "max-w-[17rem] items-center gap-3 text-left" : "max-w-48 flex-col items-center"}`}
-        >
-          <span
-            className={`relative inline-flex items-center justify-center rounded-full border border-mint/36 bg-mint/10 text-mint shadow-glow ${isWideFrame ? "size-9 shrink-0" : "size-14"}`}
-          >
-            <span className="absolute inset-0 rounded-full border border-mint/40 motion-safe:animate-ping motion-reduce:hidden" />
-            <Sparkles className={isWideFrame ? "size-5" : "size-6"} aria-hidden="true" />
+      <span className="generation-processing-scan" aria-hidden="true" />
+      <div className={`relative z-10 w-full max-w-64 px-3 ${isWideFrame ? "py-2" : "py-5"}`}>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="generation-processing-emblem" aria-hidden="true">
+            <Icon className="relative z-10 size-[18px]" />
           </span>
-          <div className={`min-w-0 ${isWideFrame ? "flex-1" : "mt-4 w-full"}`}>
-            <p className={`font-semibold text-white ${isWideFrame ? "text-xs leading-4" : "text-sm"}`}>{label}</p>
-            <p className="mt-1 text-[11px] leading-4 text-white/56">第 {index + 1} 张</p>
-            <GenerationTaskProgress percentage={percentage} />
+          <div className="min-w-0">
+            <p className="text-[10px] leading-4 text-white/55">第 {index + 1} 张</p>
+            <p className="break-words text-xs font-medium leading-5 text-white">{label}</p>
           </div>
         </div>
+        <ol aria-label="图片处理阶段" className={`grid grid-cols-4 gap-1.5 ${isWideFrame ? "mt-2" : "mt-4"}`}>
+          {stages.map(({ label: stageLabel, state }) => {
+            const StageIcon = state === "complete" ? Check : state === "active" ? LoaderCircle : Circle;
+            const description = `${stageLabel}：${stageStateLabels[state]}`;
+            return (
+              <li
+                key={stageLabel}
+                aria-label={description}
+                title={description}
+                aria-current={state === "active" ? "step" : undefined}
+                data-state={state}
+                className="generation-stage min-w-0 text-[10px] leading-4"
+              >
+                <span className="generation-stage-track" aria-hidden="true">
+                  <span className="generation-stage-sheen" />
+                </span>
+                <span className="mt-1.5 flex items-center justify-center gap-1">
+                  <StageIcon
+                    className={`size-3 shrink-0 ${state === "active" ? "motion-safe:animate-spin" : ""}`}
+                    aria-hidden="true"
+                  />
+                  {stageLabel}
+                </span>
+              </li>
+            );
+          })}
+        </ol>
       </div>
     </div>
   );

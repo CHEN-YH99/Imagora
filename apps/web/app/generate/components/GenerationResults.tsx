@@ -5,8 +5,7 @@ import { Copy, Download, RefreshCw } from "lucide-react";
 import { EmptyState, Panel, StatusPill } from "../../../components/AppFrame";
 import { GeneratedImagePreviewButton } from "../../../components/GeneratedImagePreview";
 import type { GeneratedImage, GenerationMetadata, Task } from "../../../lib/api";
-import { resolveGenerationProgress, resolveImageProgressLabel } from "../generationState";
-import { GenerationProcessingPlaceholder } from "./GenerationProgress";
+import { GenerationProcessingPlaceholder, GenerationTaskActivity } from "./GenerationProgress";
 
 type Props = {
   task: Task | null;
@@ -15,7 +14,6 @@ type Props = {
   resultStatus: string;
   terminalGenerationFailureMessage: string;
   isGenerationProcessing: boolean;
-  showProcessingPlaceholders: boolean;
   processingPlaceholderCount: number;
   processingAspectRatio: string;
   onPreview(image: GeneratedImage): void;
@@ -31,7 +29,6 @@ export const GenerationResults = memo(function GenerationResults({
   resultStatus,
   terminalGenerationFailureMessage,
   isGenerationProcessing,
-  showProcessingPlaceholders,
   processingPlaceholderCount,
   processingAspectRatio,
   onPreview,
@@ -45,6 +42,9 @@ export const GenerationResults = memo(function GenerationResults({
         <h2 className="text-xl font-semibold">生成结果</h2>
         <StatusPill>{resultStatus}</StatusPill>
       </div>
+      {isGenerationProcessing || task?.status === "SUCCEEDED" ? (
+        <GenerationTaskActivity task={task} images={images} quantity={quantity} />
+      ) : null}
       {terminalGenerationFailureMessage ? (
         <div className="mb-4 rounded-2xl border border-ember/40 bg-ember/10 p-4">
           <p className="text-sm font-semibold text-ember">生成失败</p>
@@ -52,18 +52,17 @@ export const GenerationResults = memo(function GenerationResults({
         </div>
       ) : null}
       <div className="grid gap-3 sm:grid-cols-2">
-        {showProcessingPlaceholders
+        {isGenerationProcessing
           ? Array.from({ length: processingPlaceholderCount }).map((_, index) => (
               <GenerationProcessingPlaceholder
                 key={`生成占位-${task?.id ?? "submitting"}-${index}`}
                 index={index}
                 processingAspectRatio={processingAspectRatio}
-                label={resolveImageProgressLabel(task, index)}
-                percentage={resolveGenerationProgress(task, images, quantity, index).percentage}
+                task={task}
               />
             ))
           : null}
-        {(showProcessingPlaceholders ? [] : images).map((image, index) => (
+        {(isGenerationProcessing ? [] : images).map((image, index) => (
           <article key={image.id} className="relative overflow-hidden rounded-2xl border border-white/12 bg-black/18">
             <GeneratedImagePreviewButton
               alt="生成图片结果"

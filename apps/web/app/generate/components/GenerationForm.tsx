@@ -81,6 +81,17 @@ export const GenerationForm = memo(function GenerationForm({
 }: GenerationFormProps) {
   const selectedAspectRatioValue = parseAspectRatioValue(aspectRatio.replace(":", "/")) ?? 1;
   const hasPrompt = prompt.trim().length > 0;
+  const submitDisabled =
+    loading || isGenerationProcessing || !hasPrompt || Boolean(generationPromptError) || Boolean(modelSelectionError);
+  const quotePlaceholder = !account
+    ? "登录后计算"
+    : modelSelectionError
+      ? "请先选择可用模型和画面比例"
+      : generationPromptError
+        ? "请先调整提示词"
+        : !hasPrompt
+          ? "输入提示词后计算"
+          : "等待报价";
 
   return (
     <Panel>
@@ -119,7 +130,7 @@ export const GenerationForm = memo(function GenerationForm({
                 />
               </span>
               <select
-                className="focus-ring generation-ratio-select"
+                className="focus-ring image-ratio-select generation-ratio-select"
                 value={aspectRatio}
                 onChange={(event) => setAspectRatio(event.target.value)}
                 aria-label="画面比例"
@@ -171,7 +182,7 @@ export const GenerationForm = memo(function GenerationForm({
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/12 bg-black/24 p-4">
           <span className="inline-flex items-center gap-2 text-sm text-white/72">
             <Coins className="size-4 text-volt" aria-hidden="true" />
-            预计消耗：{quote ? formatCredits(quote) : "登录后计算"}
+            预计消耗：{quote ? formatCredits(quote) : quotePlaceholder}
           </span>
           <span className="text-sm text-white/72">当前余额：{account ? formatCredits(account.balance) : "未登录"}</span>
         </div>
@@ -182,10 +193,21 @@ export const GenerationForm = memo(function GenerationForm({
             {messageTone === "danger" ? (
               <>
                 {" "}
-                <button className="underline underline-offset-4" onClick={() => void submit()} type="button">
-                  重试提交
-                </button>
-                {" 或 "}
+                {modelSelectionError ? (
+                  <button
+                    className="underline underline-offset-4 disabled:cursor-wait disabled:opacity-60"
+                    onClick={refreshModels}
+                    disabled={modelsLoading}
+                    type="button"
+                  >
+                    {modelsLoading ? "正在更新模型信息…" : "更新模型信息"}
+                  </button>
+                ) : !submitDisabled ? (
+                  <button className="underline underline-offset-4" onClick={() => void submit()} type="button">
+                    重试提交
+                  </button>
+                ) : null}
+                {modelSelectionError || !submitDisabled ? " 或 " : " "}
                 <button className="underline underline-offset-4" onClick={() => onHistory()} type="button">
                   去历史查看
                 </button>
@@ -261,14 +283,15 @@ export const GenerationForm = memo(function GenerationForm({
         {generationPromptError ? <InlineNotice tone="danger">{generationPromptError}</InlineNotice> : null}
 
         <button
-          className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:opacity-60"
+          className="focus-ring inline-flex w-full items-center justify-center gap-2 rounded-full bg-mint px-5 py-3 font-semibold text-ink transition-colors duration-200 hover:bg-volt disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/45 disabled:hover:bg-white/10"
           type="button"
-          disabled={
-            loading ||
-            isGenerationProcessing ||
-            !hasPrompt ||
-            Boolean(generationPromptError) ||
-            Boolean(modelSelectionError)
+          disabled={submitDisabled}
+          aria-describedby={
+            modelSelectionError
+              ? "generation-model-help"
+              : generationPromptError
+                ? "generation-prompt-length"
+                : undefined
           }
           onClick={submit}
         >

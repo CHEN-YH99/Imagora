@@ -32,7 +32,7 @@ export function HomeModelControls({
         className="focus-ring w-full rounded-2xl border border-white/12 bg-black/40 px-3 py-2 text-white"
       />
       <select
-        className="focus-ring w-full rounded-2xl border border-white/12 bg-black/40 px-3 py-2 text-white"
+        className="focus-ring image-ratio-select w-full rounded-2xl border border-white/12 bg-black/40 px-3 py-2 text-white"
         value={aspectRatio}
         onChange={(e) => setAspectRatio(e.target.value)}
         aria-label="选择比例"

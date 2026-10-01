@@ -293,113 +293,129 @@ test("模型选择同步报价、能力限制和实际任务模型", async ({ pa
   await expect(selector).toHaveValue("xai:grok-imagine-image");
 });
 
-test("每个模型版本与 API 线路只激活自身可用比例，切换后清除无效选择", async ({ page }) => {
+test("所有模型与 API 线路开放全部比例，切换模型保留选择", async ({ page }) => {
+  test.setTimeout(90_000);
   await setupApiMocks(page);
   const definitions = [
-    { id: "openai:gpt-image-2", label: "GPT Image 2", aspectRatios: [...aspectRatios] },
-    {
-      id: "image:nano-banana-2",
-      label: "Nano Banana 2",
-      aspectRatios: aspectRatios.filter((ratio) => !["1:2", "2:1"].includes(ratio))
-    },
-    {
-      id: "image:nano-banana-2-lite",
-      label: "Nano Banana 2 Lite",
-      aspectRatios: aspectRatios.filter((ratio) => !["1:2", "2:1"].includes(ratio))
-    },
-    {
-      id: "image:nano-banana-pro",
-      label: "Nano Banana Pro",
-      aspectRatios: aspectRatios.filter((ratio) => !["1:2", "2:1"].includes(ratio))
-    },
-    {
-      id: "xai:grok-imagine-image-2.0",
-      label: "Grok 2.0",
-      aspectRatios: aspectRatios.filter((ratio) => !["4:5", "5:4"].includes(ratio))
-    },
-    {
-      id: "xai:grok-imagine-image-pro",
-      label: "Grok Pro",
-      aspectRatios: aspectRatios.filter((ratio) => !["4:5", "5:4"].includes(ratio))
-    },
-    { id: "openai:gpt-image-2-4k", label: "GPT Image 2 4K", aspectRatios: ["1:1", "2:3"] },
-    { id: "image:unknown", label: "尚未确认型号", aspectRatios: [] }
+    { id: "openai:gpt-image-2", label: "GPT Image 2" },
+    { id: "openai:gpt-image-2-4k", label: "GPT Image 2 4K" },
+    { id: "openai:gpt-image-2.5", label: "GPT Image 2.5" },
+    { id: "openai:gpt-image-2.5-4k", label: "GPT Image 2.5 4K" },
+    { id: "xai:grok-imagine-image-2.0", label: "Grok 2.0" },
+    { id: "xai:grok-imagine-image-pro", label: "Grok Pro" },
+    { id: "image:nano-banana-2", label: "Nano Banana 2" },
+    { id: "image:nano-banana-2-lite", label: "Nano Banana 2 Lite" },
+    { id: "image:nano-banana-pro", label: "Nano Banana Pro" },
+    { id: "image:future-image-model", label: "新发现的生图模型" }
   ];
   await page.route("**/api/generation/models*", async (route) => {
     const channel = new URL(route.request().url()).searchParams.get("channel") || "main";
-    const models = channel === "backup" ? [{ ...definitions[0], aspectRatios: ["1:1", "16:9"] }] : definitions;
     await fulfillData(route, {
       channel,
       defaultChannel: "main",
-      defaultModel: models[0].id,
+      defaultModel: definitions[0].id,
       channels: [
         { id: "main", label: "主线路 API" },
         { id: "backup", label: "备用 API" }
       ],
-      models: models.map((model) => ({ ...model, qualities: ["standard"], maxQuantity: 4 }))
+      models: definitions.map((model) => ({
+        ...model,
+        qualities: ["standard"],
+        maxQuantity: 4,
+        aspectRatios: [...aspectRatios],
+        aspectRatioSource: "configured"
+      }))
     });
   });
-  const invalidRequests: unknown[] = [];
+  const submissions: Array<{ model: string; aspectRatio: string; channel: string }> = [];
   page.on("request", (request) => {
-    if (request.method() !== "POST" || !/\/api\/generation\/(quote|tasks)$/.test(new URL(request.url()).pathname))
-      return;
-    const body = request.postDataJSON();
-    const allowed =
-      body.channel === "backup"
-        ? ["1:1", "16:9"]
-        : (definitions.find((model) => model.id === body.model)?.aspectRatios ?? []);
-    if (!allowed.includes(body.aspectRatio)) invalidRequests.push(body);
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/generation/tasks")
+      submissions.push(request.postDataJSON());
   });
   for (const pathname of ["/", "/generate"]) {
     await page.goto(pathname);
     const selector = page.getByRole("combobox", { name: pathname === "/" ? "选择模型" : "模型", exact: true });
     const ratio = page.getByRole("combobox", { name: pathname === "/" ? "选择比例" : "画面比例", exact: true });
-    for (const model of definitions) {
-      const previousRatio = await ratio.inputValue();
-      await selector.selectOption(model.id);
-      await expect
-        .poll(() =>
-          ratio
-            .locator("option:enabled")
-            .evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))
-        )
-        .toEqual(model.aspectRatios);
-      if (model.aspectRatios.length) {
-        await expect(ratio).toBeEnabled();
+    const api = page.getByRole("group", { name: "API 线路", exact: true });
+    for (const channel of ["主线路", "备用线路1"]) {
+      await api.getByRole("button", { name: channel, exact: true }).click();
+      await expect(ratio).toBeEnabled();
+      await ratio.selectOption("4:5");
+      for (const model of definitions) {
+        await selector.selectOption(model.id);
+        await expect(ratio).toHaveValue("4:5");
         await expect
-          .poll(() => ratio.inputValue())
-          .toBe(model.aspectRatios.includes(previousRatio) ? previousRatio : model.aspectRatios[0]);
-        await ratio.selectOption(model.aspectRatios.at(-1)!);
-      } else {
-        await expect(ratio).toBeDisabled();
-        if (pathname === "/generate")
-          await expect(page.getByRole("button", { name: "提交生成" }).first()).toBeDisabled();
+          .poll(() =>
+            ratio
+              .locator("option:enabled")
+              .evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))
+          )
+          .toEqual([...aspectRatios]);
+        await expect(ratio.locator("option:disabled")).toHaveCount(0);
+        for (const value of aspectRatios) {
+          await ratio.selectOption(value);
+          await expect(ratio).toHaveValue(value);
+        }
+        await ratio.selectOption("4:5");
       }
     }
-    await selector.selectOption("openai:gpt-image-2");
-    await ratio.selectOption("4:5");
-    await selector.selectOption("xai:grok-imagine-image-2.0");
-    await expect(ratio).toHaveValue("1:1");
   }
-  const selector = page.getByRole("combobox", { name: "模型", exact: true });
-  const ratio = page.getByRole("combobox", { name: "画面比例", exact: true });
-  await selector.selectOption("openai:gpt-image-2");
-  await ratio.selectOption("4:5");
-  await page
-    .getByRole("group", { name: "API 线路", exact: true })
-    .getByRole("button", { name: "备用线路1", exact: true })
-    .click();
-  await expect(selector).toHaveValue("openai:gpt-image-2");
-  await expect(ratio).toHaveValue("1:1");
-  await expect
-    .poll(() =>
-      ratio
-        .locator("option:enabled")
-        .evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value))
-    )
-    .toEqual(["1:1", "16:9"]);
-  expect(invalidRequests).toEqual([]);
+  await page.getByRole("button", { name: "提交生成", exact: true }).first().click();
+  await expect.poll(() => submissions.length).toBe(1);
+  expect(submissions[0]).toMatchObject({ model: "image:future-image-model", aspectRatio: "4:5", channel: "backup" });
 });
+
+for (const pathname of ["/", "/generate"]) {
+  for (const width of [375, 1440]) {
+    test(`比例下拉无白色边框且支持鼠标键盘 ${pathname} ${width}px`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 });
+      await setupApiMocks(page);
+      await page.goto(pathname);
+      const ratio = page.getByRole("combobox", { name: pathname === "/" ? "选择比例" : "画面比例", exact: true });
+      await expect(ratio).toBeEnabled();
+      await ratio.selectOption("1:1");
+      await ratio.click();
+      await expect.poll(() => ratio.evaluate((element) => element.matches(":open"))).toBe(true);
+      const picker = await ratio.evaluate((element) => {
+        const style = getComputedStyle(element, "::picker(select)");
+        return {
+          appearance: style.appearance,
+          background: style.backgroundColor,
+          borders: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth],
+          outline: style.outlineWidth
+        };
+      });
+      expect(picker).toEqual({
+        appearance: "base-select",
+        background: "rgb(16, 17, 22)",
+        borders: ["0px", "0px", "0px", "0px"],
+        outline: "0px"
+      });
+      await expect(ratio.locator("option:enabled")).toHaveCount(12);
+      const firstOption = ratio.locator('option[value="1:1"]');
+      const bounds = await firstOption.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+      expect(bounds!.y).toBeGreaterThanOrEqual(0);
+      expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(900);
+      await page.screenshot({ path: testInfo.outputPath("ratio-picker.png") });
+      await ratio.locator('option[value="3:4"]').click();
+      await expect(ratio).toHaveValue("3:4");
+      await expect.poll(() => ratio.evaluate((element) => element.matches(":open"))).toBe(false);
+      await ratio.focus();
+      await page.keyboard.press("Space");
+      await expect.poll(() => ratio.evaluate((element) => element.matches(":open"))).toBe(true);
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("Enter");
+      await expect(ratio).toHaveValue("4:3");
+      await ratio.click();
+      await page.keyboard.press("Escape");
+      await expect.poll(() => ratio.evaluate((element) => element.matches(":open"))).toBe(false);
+      await expect(ratio).toHaveValue("4:3");
+    });
+  }
+}
 
 function selectedChannelCatalog(channel: string, unavailable = false) {
   const baseModel = {
@@ -648,7 +664,7 @@ test("生成接口校验失败展示具体长度限制", async ({ page }) => {
   await expect(page.getByRole("alert").filter({ hasText: "提示词最多支持 7000 个字符，请精简后重试。" })).toBeVisible();
 });
 
-test("生成进度按真实步骤推送，每张独立推进，等待不虚增，断线与刷新可恢复", async ({ page }) => {
+test("生成进度显示真实阶段和耗时，不推算百分比，断线与刷新可恢复", async ({ page }) => {
   await setupApiMocks(page);
   // 冻结轮询时钟后主动派发服务端事件，验证界面确实消费推送。
   await page.addInitScript(() => {
@@ -669,6 +685,7 @@ test("生成进度按真实步骤推送，每张独立推进，等待不虚增�
   });
   let snapshot = {
     ...createTask("task-real-progress", "真实步骤进度验证", "RUNNING"),
+    startedAt: "2026-09-25T12:00:00.000Z",
     quantity: 4,
     progress: {
       stage: "GENERATING",
@@ -694,68 +711,62 @@ test("生成进度按真实步骤推送，每张独立推进，等待不虚增�
   await page.clock.pauseAt(new Date("2026-09-25T12:00:01Z"));
   await page.goto("/generate?taskId=task-real-progress");
   const card = page.getByRole("status", { name: "第 1 张图片正在生成" });
-  const bar = card.getByRole("progressbar", { name: "图片生成进度" });
-  const percentage = card.getByText(/^\d+%$/);
-  const readPercentage = async () => Number.parseInt(await percentage.innerText());
+  const stages = card.getByRole("list", { name: "图片处理阶段" });
+  const activity = page.getByRole("region", { name: "任务进度" });
+  const elapsed = activity.getByLabel("任务已用时间");
   const second = page.getByRole("status", { name: "第 2 张图片正在生成" });
-  await expect(page.getByRole("progressbar")).toHaveCount(4);
-  await expect(bar).toHaveAttribute("aria-valuenow", "20");
-  await expect(second.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "0");
-  await page.clock.runFor(300);
-  await expect(percentage).toHaveText("20%");
-  await expect(card.getByText(/步骤进度/)).toHaveCount(0);
+  await expect(page.getByRole("list", { name: "图片处理阶段" })).toHaveCount(4);
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  await expect(card.getByText(/^\d+%$/)).toHaveCount(0);
+  await expect(stages.getByRole("listitem", { name: "生成：进行中" })).toHaveAttribute("aria-current", "step");
+  await expect(second.getByText("等待生成", { exact: true })).toBeVisible();
+  await expect(elapsed).toContainText("00:01");
+  await expect(activity).toContainText("已接收 0 / 4 张");
   await page.clock.fastForward(30_000);
-  await expect(bar).toHaveAttribute("aria-valuenow", "20");
+  await expect(stages.getByRole("listitem", { name: "生成：进行中" })).toBeVisible();
+  await expect(elapsed).toContainText("00:31");
+  await expect(activity).toContainText("已接收 0 / 4 张");
   snapshot = {
     ...snapshot,
-    progress: { ...snapshot.progress, imageSteps: [2, 1, 0, 0], sequence: 2, generatedImages: 1 },
+    progress: { ...snapshot.progress, imageSteps: [2, 0, 0, 0], sequence: 2, stage: "RECEIVING" },
+    updatedAt: "2026-09-24T12:00:00.500Z"
+  };
+  await push();
+  await expect(card.getByText("接收图片中", { exact: true })).toBeVisible();
+  await expect(stages.getByRole("listitem", { name: "接收：进行中" })).toBeVisible();
+  await expect(activity).toContainText("已接收 0 / 4 张");
+  snapshot = {
+    ...snapshot,
+    progress: { ...snapshot.progress, stage: "GENERATING", imageSteps: [2, 1, 0, 0], sequence: 3, generatedImages: 1 },
     updatedAt: "2026-09-24T12:00:01.000Z"
   };
   const readsBeforePush = reads;
   await push();
-  await expect(bar).toHaveAttribute("aria-valuenow", "40");
+  await expect(stages.getByRole("listitem", { name: "接收：已完成" })).toBeVisible();
   expect(reads).toBe(readsBeforePush);
-  await expect(percentage).toHaveText("20%");
-  await page.clock.runFor(100);
-  const intermediate = await readPercentage();
-  expect(intermediate).toBeGreaterThan(20);
-  expect(intermediate).toBeLessThan(40);
-  const filledPercentage = await bar.evaluate((element) => {
-    const track = element.getBoundingClientRect();
-    const fill = element.firstElementChild!.getBoundingClientRect();
-    return ((fill.right - track.left) / track.width) * 100;
-  });
-  expect(filledPercentage).toBeGreaterThanOrEqual(intermediate - 0.1);
-  expect(filledPercentage).toBeLessThan(intermediate + 1.1);
-  await page.clock.runFor(200);
-  await expect(percentage).toHaveText("40%");
-  await expect(card.getByText(/步骤进度/)).toHaveCount(0);
   await expect(card.getByText("已返回，待审核", { exact: true })).toBeVisible();
-  await expect(second).toContainText("请求模型中");
-  await expect(second.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "20");
+  await expect(second).toContainText("等待模型返回");
+  await expect(activity).toContainText("已接收 1 / 4 张");
+  await expect(stages.getByRole("listitem", { name: "审核：未开始" })).toBeVisible();
+  const beforeReload = await elapsed.innerText();
   await page.reload();
-  await expect(bar).toHaveAttribute("aria-valuenow", "40");
-  await page.clock.runFor(300);
-  await expect(percentage).toHaveText("40%");
+  await expect(stages.getByRole("listitem", { name: "接收：已完成" })).toBeVisible();
+  await expect(elapsed).toHaveText(beforeReload);
   snapshot = {
     ...snapshot,
-    progress: { ...snapshot.progress, imageSteps: [3, 2, 2, 2], sequence: 3, stage: "REVIEWING", generatedImages: 4 },
+    progress: { ...snapshot.progress, imageSteps: [3, 2, 2, 2], sequence: 4, stage: "REVIEWING", generatedImages: 4 },
     updatedAt: "2026-09-24T12:00:02.000Z"
   };
   await push();
   await expect(card.getByText("图片审核中", { exact: true })).toBeVisible();
-  await expect(bar).toHaveAttribute("aria-valuetext", "60%");
-  await expect(bar).toHaveAttribute("aria-valuenow", "60");
-  await page.clock.runFor(100);
-  const beforeInterruption = await readPercentage();
-  expect(beforeInterruption).toBeGreaterThan(40);
-  expect(beforeInterruption).toBeLessThan(60);
+  await expect(stages.getByRole("listitem", { name: "审核：进行中" })).toBeVisible();
+  await expect(activity).toContainText("已接收 4 / 4 张");
   snapshot = {
     ...snapshot,
     progress: {
       ...snapshot.progress,
       imageSteps: [4, 3, 3, 3],
-      sequence: 4,
+      sequence: 5,
       stage: "SAVING",
       reviewedImages: 4,
       savedImages: 1
@@ -764,31 +775,30 @@ test("生成进度按真实步骤推送，每张独立推进，等待不虚增�
   };
   await push();
   await expect(card.getByText("已保存，确认结果中", { exact: true })).toBeVisible();
-  await expect(bar).toHaveAttribute("aria-valuenow", "80");
-  expect(await readPercentage()).toBe(beforeInterruption);
-  await page.clock.runFor(100);
-  expect(await readPercentage()).toBeGreaterThan(beforeInterruption);
-  expect(await readPercentage()).toBeLessThan(80);
-  // 切换系统偏好时立即结束运动，数字仍与服务端进度一致。
+  await expect(stages.getByRole("listitem", { name: "保存：已完成" })).toBeVisible();
+  await expect(activity).toContainText("已保存 1 / 4 张");
+  // 减少动态效果不会影响真实阶段或计时。
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.clock.runFor(32);
-  await expect(percentage).toHaveText("80%");
+  await expect(card.locator(".generation-processing-scan")).toHaveCSS("animation-name", "none");
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await expect(page.getByAltText("生成图片结果")).toHaveCount(0);
   // 不再推送，超出心跳期限后只读轮询接回失败结果。
   snapshot = { ...snapshot, status: "FAILED", failureMessage: "测试保存失败", updatedAt: "2026-09-24T12:00:04.000Z" };
   await page.clock.runFor(22_100);
   await expect(page.getByRole("alert").filter({ hasText: "测试保存失败" })).toBeVisible();
-  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  await expect(page.getByRole("list", { name: "图片处理阶段" })).toHaveCount(0);
   await expect(page.getByAltText("生成图片结果")).toHaveCount(0);
 
   // 重新进入进行中的任务，验证成功交接和刷新已完成结果。
   snapshot = { ...snapshot, status: "RUNNING", failureMessage: null, updatedAt: "2026-09-24T12:00:05.000Z" };
   await page.reload();
-  await expect(bar).toHaveAttribute("aria-valuenow", "80");
-  await page.clock.runFor(300);
-  await expect(percentage).toHaveText("80%");
-  const completedTask = { ...snapshot, status: "SUCCEEDED", updatedAt: "2026-09-24T12:00:06.000Z" };
+  await expect(stages.getByRole("listitem", { name: "保存：已完成" })).toBeVisible();
+  const completedTask = {
+    ...snapshot,
+    status: "SUCCEEDED",
+    completedAt: "2026-09-25T12:00:50.000Z",
+    updatedAt: "2026-09-24T12:00:06.000Z"
+  };
   const completedImages = [createGeneratedImage("image-progress-completed", completedTask.id)];
   await page.route("**/api/generation/tasks/task-real-progress", (route) =>
     fulfillData(route, { task: completedTask, images: completedImages })
@@ -799,18 +809,123 @@ test("生成进度按真实步骤推送，每张独立推进，等待不虚增�
     },
     { task: completedTask, images: completedImages }
   );
-  await expect(bar).toHaveAttribute("aria-valuenow", "100");
-  await page.clock.runFor(100);
-  expect(await readPercentage()).toBeGreaterThan(80);
-  expect(await readPercentage()).toBeLessThan(100);
-  await page.clock.runFor(170);
-  await expect(percentage).toHaveText("100%");
-  await page.clock.runFor(100);
-  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  // 时钟保持暂停，结果仍立即出现，不补播百分比或延迟交付。
+  await expect(page.getByRole("list", { name: "图片处理阶段" })).toHaveCount(0);
   await expect(page.getByAltText("生成图片结果")).toHaveCount(1);
+  await expect(activity).toContainText("已交付 1 / 4 张图片");
+  await expect(elapsed).toContainText("00:50");
+  await page.clock.fastForward(30_000);
+  await expect(elapsed).toContainText("00:50");
   await page.reload();
   await expect(page.getByAltText("生成图片结果")).toHaveCount(1);
   await expect(page.getByRole("progressbar")).toHaveCount(0);
+});
+
+test("真实阶段反馈在手机和宽幅图片中完整显示", async ({ page }, testInfo) => {
+  await setupApiMocks(page);
+  const task = {
+    ...createTask("task-stage-layout", "宽幅真实阶段反馈", "RUNNING"),
+    quantity: 4,
+    width: 2100,
+    height: 900,
+    aspectRatio: "21:9",
+    startedAt: new Date().toISOString(),
+    progress: {
+      stage: "GENERATING",
+      imageSteps: [2, 1, 0, 0],
+      sequence: 1,
+      generatedImages: 1,
+      reviewedImages: 0,
+      savedImages: 0,
+      updatedAt: new Date().toISOString()
+    }
+  };
+  await page.route("**/api/generation/tasks/task-stage-layout", (route) => fulfillData(route, { task, images: [] }));
+  await page.goto("/generate?taskId=task-stage-layout");
+  for (const width of [375, 768, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    const cards = page.getByRole("status", { name: /第 \d+ 张图片正在生成/ });
+    await expect(cards).toHaveCount(4);
+    await expect(page.getByRole("region", { name: "任务进度" })).toContainText("已接收 1 / 4 张");
+    for (const card of await cards.all()) {
+      const fits = await card.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return (
+          element.scrollWidth <= element.clientWidth &&
+          element.scrollHeight <= element.clientHeight &&
+          [...element.querySelectorAll("p, li")].every((child) => {
+            const rect = child.getBoundingClientRect();
+            return (
+              rect.left >= bounds.left &&
+              rect.right <= bounds.right &&
+              rect.top >= bounds.top &&
+              rect.bottom <= bounds.bottom &&
+              child.scrollWidth <= child.clientWidth
+            );
+          })
+        );
+      });
+      expect(fits).toBe(true);
+    }
+    await expect(page.getByRole("progressbar")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath(`generation-stages-${width}.png`), fullPage: true });
+  }
+});
+
+test("生成卡片和阶段光带同步流光，等待阶段静止且支持减少动态效果", async ({ page }, testInfo) => {
+  await setupApiMocks(page);
+  const task = {
+    ...createTask("task-stage-motion", "生成卡片流光反馈", "RUNNING"),
+    quantity: 4,
+    startedAt: new Date().toISOString(),
+    progress: {
+      stage: "GENERATING",
+      imageSteps: [2, 1, 0, 0],
+      sequence: 1,
+      generatedImages: 1,
+      reviewedImages: 0,
+      savedImages: 0,
+      updatedAt: new Date().toISOString()
+    }
+  };
+  await page.route("**/api/generation/tasks/task-stage-motion", (route) => fulfillData(route, { task, images: [] }));
+  await page.clock.install();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/generate?taskId=task-stage-motion");
+  const active = page.getByRole("status", { name: "第 2 张图片正在生成" });
+  const waiting = page.getByRole("status", { name: "第 3 张图片正在生成" });
+  const received = page.getByRole("status", { name: "第 1 张图片正在生成" });
+  const cardLight = active.locator(".generation-processing-scan");
+  const stageLight = active.getByRole("listitem", { name: "生成：进行中" }).locator(".generation-stage-sheen");
+  await expect(cardLight).toHaveCSS("animation-name", "generation-light-sweep");
+  await expect(stageLight).toHaveCSS("animation-name", "generation-light-sweep");
+  await expect(cardLight).toHaveCSS("animation-duration", "3.2s");
+  await expect(stageLight).toHaveCSS("animation-duration", "3.2s");
+  await expect(waiting.locator(".generation-processing-scan")).toHaveCSS("animation-name", "none");
+  await expect(received.locator(".generation-stage-sheen").first()).toHaveCSS("animation-name", "none");
+  await active.evaluate((element) => {
+    for (const animation of element.getAnimations({ subtree: true })) {
+      animation.pause();
+      animation.currentTime = 700;
+    }
+  });
+  const before = await stageLight.evaluate((element) => getComputedStyle(element).transform);
+  const bounds = await active.boundingBox();
+  await page.screenshot({ path: testInfo.outputPath("generation-motion-start.png"), fullPage: true });
+  await active.evaluate((element) => {
+    for (const animation of element.getAnimations({ subtree: true })) animation.currentTime = 1700;
+  });
+  const after = await stageLight.evaluate((element) => getComputedStyle(element).transform);
+  expect(after).not.toBe(before);
+  expect(await active.boundingBox()).toEqual(bounds);
+  await expect(active.getByRole("listitem", { name: "生成：进行中" })).toBeVisible();
+  await expect(page.getByRole("progressbar")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("generation-motion-later.png"), fullPage: true });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(cardLight).toHaveCSS("animation-name", "none");
+  await expect(stageLight).toHaveCSS("animation-name", "none");
+  await expect(active.getByRole("listitem", { name: "生成：进行中" })).toHaveAttribute("aria-current", "step");
+  await page.screenshot({ path: testInfo.outputPath("generation-motion-reduced.png"), fullPage: true });
 });
 
 test("生成任务覆盖创建、轮询、成功和失败状态", async ({ page }) => {
@@ -1859,3 +1974,112 @@ async function fulfillError(route: Route, message: string, status = 404): Promis
     body: JSON.stringify({ error: { code: "NOT_FOUND", message } })
   });
 }
+
+test("未确认比例显示禁用原因，刷新能力后恢复报价与提交", async ({ page }, testInfo) => {
+  await setupApiMocks(page);
+  let supported = false;
+  let holdRefresh = false;
+  let releaseRefresh!: () => void;
+  const refreshGate = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  await page.route("**/api/generation/models*", async (route) => {
+    if (holdRefresh) await refreshGate;
+    await fulfillData(route, {
+      channel: "main",
+      defaultChannel: "main",
+      defaultModel: "openai:gpt-image-2.5",
+      channels: [{ id: "main", label: "主线路 API" }],
+      models: [
+        {
+          id: "openai:gpt-image-2.5",
+          label: "gpt-image-2.5",
+          qualities: ["standard"],
+          aspectRatios: supported ? ["3:4"] : [],
+          maxQuantity: 4
+        }
+      ]
+    });
+  });
+  const submissions: Array<{ model?: string; aspectRatio?: string }> = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/generation/tasks")
+      submissions.push(request.postDataJSON());
+  });
+  await page.goto("/generate?model=openai%3Agpt-image-2.5&aspectRatio=3%3A4");
+  await page.getByRole("textbox", { name: "提示词", exact: true }).fill("窗边白色桌面上的蓝色茶杯");
+  const submit = page.getByRole("button", { name: "提交生成", exact: true }).first();
+  await expect(submit).toBeDisabled();
+  await expect(submit).toHaveAccessibleDescription("该型号的可用画面比例尚未确认，请选择其他模型。");
+  await expect(page.getByText("预计消耗：请先选择可用模型和画面比例")).toBeVisible();
+  await expect(page.getByRole("button", { name: "重试提交", exact: true })).toHaveCount(0);
+  expect(submissions).toHaveLength(0);
+  await page.setViewportSize({ width: 375, height: 900 });
+  await page.screenshot({ path: testInfo.outputPath("blocked-model-375.png"), fullPage: true });
+  holdRefresh = true;
+  await page.getByRole("button", { name: "刷新模型列表", exact: true }).click();
+  await expect(page.getByRole("button", { name: "正在刷新模型列表…" })).toBeDisabled();
+  await expect(submit).toBeDisabled();
+  supported = true;
+  releaseRefresh();
+  await expect(submit).toBeEnabled();
+  await expect(page.getByRole("combobox", { name: "画面比例", exact: true })).toHaveValue("3:4");
+  await expect(page.getByText(/预计消耗：\d+ 积分/)).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("supported-model-375.png"), fullPage: true });
+  await submit.click();
+  await expect.poll(() => submissions.length).toBe(1);
+  expect(submissions[0]).toMatchObject({ model: "openai:gpt-image-2.5", aspectRatio: "3:4" });
+});
+
+test("重试提交会重新发送请求，模型能力失效时改为更新模型信息", async ({ page }) => {
+  await setupApiMocks(page);
+  let supported = true;
+  await page.route("**/api/generation/models*", (route) =>
+    fulfillData(route, {
+      channel: "main",
+      defaultChannel: "main",
+      defaultModel: "openai:gpt-image-2.5",
+      channels: [{ id: "main", label: "主线路 API" }],
+      models: [
+        {
+          id: "openai:gpt-image-2.5",
+          label: "gpt-image-2.5",
+          qualities: ["standard"],
+          aspectRatios: supported ? ["3:4"] : [],
+          maxQuantity: 4
+        }
+      ]
+    })
+  );
+  let submissions = 0;
+  await page.route("**/api/generation/tasks", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    submissions += 1;
+    await fulfillError(route, "生成请求暂时失败，请重试。", 503);
+  });
+  await page.goto("/generate?model=openai%3Agpt-image-2.5&aspectRatio=3%3A4");
+  await page.getByRole("textbox", { name: "提示词", exact: true }).fill("窗边白色桌面上的蓝色茶杯");
+  const submit = page.getByRole("button", { name: "提交生成", exact: true }).first();
+  await submit.click();
+  const retry = page.getByRole("button", { name: "重试提交", exact: true });
+  await expect(retry).toBeVisible();
+  await retry.evaluate((button: HTMLButtonElement) => {
+    button.click();
+    button.click();
+  });
+  await expect.poll(() => submissions).toBe(2);
+  await expect(retry).toBeVisible();
+  supported = false;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(submit).toBeDisabled();
+  await expect(retry).toHaveCount(0);
+  const update = page.getByRole("button", { name: "更新模型信息", exact: true });
+  await expect(update).toBeVisible();
+  supported = true;
+  await update.click();
+  await expect(submit).toBeEnabled();
+  await expect(page.getByText("生成请求暂时失败，请重试。", { exact: false })).toHaveCount(0);
+  expect(submissions).toBe(2);
+  await submit.click();
+  await expect.poll(() => submissions).toBe(3);
+});

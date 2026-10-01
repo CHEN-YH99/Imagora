@@ -93,6 +93,178 @@ button {
   color: #ffffff;
 }
 
+.generation-processing-card {
+  --generation-cyan: #25d8ff;
+  --generation-motion-duration: 3.2s;
+  isolation: isolate;
+  border: 1px solid color-mix(in srgb, var(--mint) 16%, transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--mint) 4%, #101116), #0d1014);
+}
+
+.generation-processing-card::before {
+  position: absolute;
+  inset: 0;
+  border: 1px solid color-mix(in srgb, var(--mint) 46%, transparent);
+  border-radius: inherit;
+  box-shadow: inset 0 0 24px color-mix(in srgb, var(--mint) 7%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  content: "";
+  transition: opacity 200ms ease;
+}
+
+.generation-processing-card[data-processing="active"] {
+  border-color: color-mix(in srgb, var(--generation-cyan) 34%, transparent);
+  box-shadow: 0 0 24px color-mix(in srgb, var(--mint) 5%, transparent);
+}
+
+.generation-processing-scan {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    110deg,
+    transparent 32%,
+    color-mix(in srgb, var(--mint) 8%, transparent) 47%,
+    color-mix(in srgb, var(--generation-cyan) 10%, transparent) 53%,
+    transparent 68%
+  );
+  opacity: 0;
+  transform: translateX(-100%);
+}
+
+.generation-processing-emblem {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid color-mix(in srgb, var(--mint) 18%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--mint) 5%, transparent);
+  color: var(--mint);
+}
+
+.generation-processing-emblem::before {
+  position: absolute;
+  inset: -1px;
+  border: 1px solid color-mix(in srgb, var(--generation-cyan) 60%, transparent);
+  border-radius: inherit;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--mint) 18%, transparent),
+    color-mix(in srgb, var(--generation-cyan) 8%, transparent)
+  );
+  box-shadow: 0 0 14px color-mix(in srgb, var(--mint) 16%, transparent);
+  opacity: 0;
+  content: "";
+}
+
+.generation-processing-card[data-processing="waiting"] .generation-processing-emblem {
+  color: color-mix(in srgb, var(--mint) 45%, #929a9c);
+}
+
+.generation-stage {
+  color: #929a9c;
+  transition: color 200ms ease;
+}
+
+.generation-stage[data-state="active"] {
+  color: var(--generation-cyan);
+}
+
+.generation-stage[data-state="complete"] {
+  color: var(--mint);
+}
+
+.generation-stage-track {
+  position: relative;
+  display: block;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 7%);
+  box-shadow: inset 0 1px 1px rgb(0 0 0 / 25%);
+}
+
+.generation-stage-track::before {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--mint), var(--generation-cyan));
+  opacity: 0;
+  content: "";
+  transition: opacity 200ms ease;
+}
+
+.generation-stage[data-state="active"] .generation-stage-track::before {
+  opacity: 0.3;
+}
+
+.generation-stage[data-state="complete"] .generation-stage-track::before {
+  opacity: 0.9;
+}
+
+.generation-stage-sheen {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 12%,
+    var(--mint) 40%,
+    #e4fff5 50%,
+    var(--generation-cyan) 60%,
+    transparent 88%
+  );
+  opacity: 0;
+  transform: translateX(-100%);
+}
+
+@keyframes generation-light-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes generation-light-breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.75;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .generation-processing-card[data-processing="active"] .generation-processing-scan,
+  .generation-stage[data-state="active"] .generation-stage-sheen {
+    opacity: 1;
+    animation: generation-light-sweep var(--generation-motion-duration) linear infinite;
+  }
+
+  .generation-processing-card[data-processing="active"]::before,
+  .generation-processing-card[data-processing="active"] .generation-processing-emblem::before {
+    animation: generation-light-breathe var(--generation-motion-duration) ease-in-out infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .generation-processing-card[data-processing="active"]::before,
+  .generation-processing-card[data-processing="active"] .generation-processing-emblem::before {
+    opacity: 0.5;
+  }
+
+  .generation-stage[data-state="active"] .generation-stage-track::before {
+    opacity: 0.65;
+  }
+}
+
 .generation-ratio-control {
   position: relative;
   flex-shrink: 0;
@@ -141,6 +313,64 @@ button {
 
 .generation-ratio-select option:disabled {
   color: var(--muted);
+}
+
+/* 自定义原生 select 弹层，避免 Windows 下拉面板露出白色系统背景。 */
+.image-ratio-select {
+  color-scheme: dark;
+}
+
+@supports (appearance: base-select) {
+  .image-ratio-select,
+  .image-ratio-select::picker(select) {
+    appearance: base-select;
+  }
+
+  .image-ratio-select::picker(select) {
+    min-inline-size: 13rem;
+    max-inline-size: calc(100vw - 2rem);
+    max-block-size: min(26rem, 70vh);
+    margin-block: 0.375rem;
+    padding: 0.375rem;
+    overflow-y: auto;
+    border: 0;
+    border-radius: 0.875rem;
+    outline: 0;
+    background: #101116;
+    color: var(--text);
+    box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
+    scrollbar-width: thin;
+    scrollbar-color: #41464c #101116;
+  }
+
+  .image-ratio-select option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-block-size: 2rem;
+    padding: 0.375rem 0.625rem;
+    border: 0;
+    border-radius: 0.5rem;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .image-ratio-select option:checked,
+  .image-ratio-select option:focus-visible,
+  .image-ratio-select option:hover {
+    background: color-mix(in srgb, var(--mint) 16%, #101116);
+    color: var(--mint);
+  }
+
+  .image-ratio-select option::checkmark {
+    color: var(--mint);
+  }
+  .generation-ratio-select::picker-icon {
+    display: none;
+  }
 }
 
 .generation-ratio-icon {

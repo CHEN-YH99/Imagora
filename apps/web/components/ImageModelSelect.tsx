@@ -92,8 +92,13 @@ export function ImageModelSelect({
           {error}
         </p>
       ) : null}
-      <button type="button" onClick={onRefresh} className="focus-ring rounded text-xs text-white/55 hover:text-white">
-        刷新模型列表
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={loading}
+        className="focus-ring rounded text-xs text-white/55 hover:text-white disabled:cursor-wait disabled:opacity-60"
+      >
+        {loading ? "正在刷新模型列表…" : "刷新模型列表"}
       </button>
     </div>
   );

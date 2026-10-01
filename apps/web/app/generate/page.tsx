@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { aspectRatioOptions } from "@imagora/shared/image-models";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Sparkles } from "lucide-react";
@@ -44,7 +44,6 @@ import { useImageModelCatalog } from "./hooks/useImageModelCatalog";
 import { validateGenerationPromptLengths } from "./promptPresets";
 import { GenerationForm } from "./components/GenerationForm";
 import { GenerationResults } from "./components/GenerationResults";
-import { progressTransitionMs } from "./components/GenerationProgress";
 
 const DEFAULT_PROMPT = "半透明智能相机的电影感产品摄影，薄荷色轮廓光，黑色台面，高细节";
 const DEFAULT_ASPECT_RATIO = "1:1";
@@ -160,23 +159,6 @@ function GenerateExperience() {
   const taskSyncSequenceRef = useRef(0);
   const generationViewState = resolveGenerationViewState({ loading, restoringTaskView, task, images });
   const isGenerationProcessing = generationViewState === "submitting" || generationViewState === "processing";
-  const [finishingTaskId, setFinishingTaskId] = useState<string | null>(null);
-  const showProcessingPlaceholders =
-    isGenerationProcessing || (task?.status === "SUCCEEDED" && finishingTaskId === task.id);
-
-  useEffect(() => {
-    if (isGenerationProcessing) {
-      setFinishingTaskId(task?.id ?? null);
-      return;
-    }
-    if (task?.status !== "SUCCEEDED") {
-      setFinishingTaskId(null);
-      return;
-    }
-    // 已在本页显示的进度先走到 100%，再交接给结果；恢复已完成任务时直接显示图片。
-    const timeout = window.setTimeout(() => setFinishingTaskId(null), progressTransitionMs + 50);
-    return () => window.clearTimeout(timeout);
-  }, [isGenerationProcessing, task?.id, task?.status]);
 
   const processingAspectRatio = task ? `${task.width} / ${task.height}` : aspectRatio.replace(":", " / ");
   const hasPrompt = prompt.trim().length > 0;
@@ -586,6 +568,7 @@ function GenerateExperience() {
   function selectImageModel(modelId: string) {
     const nextModel = modelCatalog.models.find((option) => option.id === modelId);
     if (!nextModel) return;
+    setMessage("");
     setModel(nextModel.id);
     rememberModel(nextModel.id);
     if (nextModel.aspectRatios.length && !nextModel.aspectRatios.includes(aspectRatio)) {
@@ -628,6 +611,7 @@ function GenerateExperience() {
   }
 
   async function submit() {
+    if (submittingGenerationRef.current || loading || isGenerationProcessing) return;
     const validationError = validateForm();
     if (validationError) {
       setMessage(validationError);
@@ -695,6 +679,10 @@ function GenerateExperience() {
 
   // 事件回调读取最近一次已提交的状态，进度快照不会改变表单和结果操作的 props。
   const handleSubmit = useCommittedCallback(submit);
+  const handleRefreshModels = useCallback(() => {
+    setMessage("");
+    refreshModels();
+  }, [setMessage, refreshModels]);
   const handleAppealSubmit = useCommittedCallback(handleAppeal);
   const handleQuantityChange = useCommittedCallback(setQuantityFromInput);
   const handleModelChange = useCommittedCallback(selectImageModel);
@@ -702,10 +690,11 @@ function GenerateExperience() {
   const handleMetadataReuse = useCommittedCallback(applyGenerationMetadata);
   const handleChannelChange = useCallback(
     (channel: string) => {
+      setMessage("");
       setModel("");
       selectChannel(channel);
     },
-    [setModel, selectChannel]
+    [setMessage, setModel, selectChannel]
   );
   const showHistory = useCallback(() => router.push("/history"), [router]);
 
@@ -781,7 +770,7 @@ function GenerateExperience() {
               modelSelectionError={modelSelectionError}
               onChannelChange={handleChannelChange}
               selectImageModel={handleModelChange}
-              refreshModels={refreshModels}
+              refreshModels={handleRefreshModels}
               selectedModel={selectedModel}
               generationPromptError={generationPromptError}
               isGenerationProcessing={isGenerationProcessing}
@@ -798,7 +787,6 @@ function GenerateExperience() {
               resultStatus={resultStatus}
               terminalGenerationFailureMessage={terminalGenerationFailureMessage}
               isGenerationProcessing={isGenerationProcessing}
-              showProcessingPlaceholders={showProcessingPlaceholders}
               processingPlaceholderCount={processingPlaceholderCount}
               processingAspectRatio={processingAspectRatio}
               onPreview={setSelectedPreviewImage}
