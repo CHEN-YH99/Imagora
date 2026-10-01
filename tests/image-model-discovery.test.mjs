@@ -491,7 +491,7 @@ test("新增比例传入真实请求尺寸，4K 正确缩放且无预设不附�
   }
 });
 
-test("每个精确版本采用自己的比例，未知版本不会继承 GPT 模板", async (t) => {
+test("已列出及新发现的模型统一开放全部预设比例，不继承旧配置限制", async (t) => {
   configure(t, {
     IMAGE_MODELS: JSON.stringify(
       overrides.map((model) => ({
@@ -506,28 +506,24 @@ test("每个精确版本采用自己的比例，未知版本不会继承 GPT 模
   await service.refresh();
   const models = readImageModelConfigs();
   const find = (name) => models.find((model) => model.upstreamModel === name);
-  assert.deepEqual(find("gpt-image-2").aspectRatios, ["1:1", "3:4", "4:3", "9:16", "16:9"]);
+  assert.deepEqual(find("gpt-image-2").aspectRatios, [...aspectRatios]);
   for (const name of ["Nano Banana 2", "Nano Banana 2 Lite", "Nano Banana Pro"]) {
-    assert.deepEqual(
-      find(name).aspectRatios,
-      aspectRatios.filter((ratio) => !["1:2", "2:1"].includes(ratio))
-    );
-    assert.equal(find(name).aspectRatioSource, "documented");
+    assert.deepEqual(find(name).aspectRatios, [...aspectRatios]);
+    assert.equal(find(name).aspectRatioSource, "configured");
   }
   for (const name of ["grok-imagine-image-2.0", "grok-imagine-image-pro"]) {
-    assert.deepEqual(
-      find(name).aspectRatios,
-      aspectRatios.filter((ratio) => !["4:5", "5:4"].includes(ratio))
-    );
+    assert.deepEqual(find(name).aspectRatios, [...aspectRatios]);
   }
   for (const name of ["gpt-image-99", "Nano Banana Future"]) {
-    assert.deepEqual(find(name).aspectRatios, []);
-    assert.equal(find(name).aspectRatioSource, "unverified");
-    assert.throws(() => quoteImageGeneration({ ...input, model: find(name).modelId }), /尚未确认/);
+    assert.deepEqual(find(name).aspectRatios, [...aspectRatios]);
+    assert.equal(find(name).aspectRatioSource, "configured");
+    for (const aspectRatio of aspectRatios) {
+      assert.ok(quoteImageGeneration({ ...input, model: find(name).modelId, aspectRatio }).creditCost > 0);
+    }
   }
 });
 
-test("上游比例按线路保留，空列表不放开，非法能力不能覆盖上次目录", async (t) => {
+test("上游比例元数据继续校验，但各线路统一使用全部预设比例", async (t) => {
   configure(t);
   let invalid = false;
   const service = discovery(t, {
@@ -547,12 +543,12 @@ test("上游比例按线路保留，空列表不放开，非法能力不能覆�
       })
   });
   await service.refresh();
-  assert.deepEqual(service.catalog("primary").models[0].aspectRatios, ["1:1", "4:5"]);
-  assert.deepEqual(service.catalog("backup").models[0].aspectRatios, ["1:1"]);
-  assert.equal(service.catalog("primary").models[0].aspectRatioSource, "upstream");
+  assert.deepEqual(service.catalog("primary").models[0].aspectRatios, [...aspectRatios]);
+  assert.deepEqual(service.catalog("backup").models[0].aspectRatios, [...aspectRatios]);
+  assert.equal(service.catalog("primary").models[0].aspectRatioSource, "configured");
   invalid = true;
   await service.refresh();
-  assert.deepEqual(service.catalog("primary").models[0].aspectRatios, ["1:1", "4:5"]);
+  assert.deepEqual(service.catalog("primary").models[0].aspectRatios, [...aspectRatios]);
   assert.match(service.status().channels[0].error, /比例/);
   assert.deepEqual(
     parseImageModelDirectory({
@@ -578,7 +574,7 @@ test("上游比例按线路保留，空列表不放开，非法能力不能覆�
   );
 });
 
-test("同型号故障切换跳过不支持该比例的备用线路，任务快照保留限制", async (t) => {
+test("同型号故障切换保留各线路及全部预设比例", async (t) => {
   configure(t);
   const service = discovery(t, {
     fetch: async (url) =>
@@ -594,7 +590,7 @@ test("同型号故障切换跳过不支持该比例的备用线路，任务快�
   });
   await service.refresh();
   const snapshot = service.snapshot("primary", "openai:gpt-image-2");
-  assert.deepEqual(snapshot.channels.find((channel) => channel.name === "backup").aspectRatios, ["1:1"]);
+  assert.deepEqual(snapshot.channels.find((channel) => channel.name === "backup").aspectRatios, [...aspectRatios]);
   const savedFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url) => {
@@ -609,7 +605,7 @@ test("同型号故障切换跳过不支持该比例的备用线路，任务快�
   await assert.rejects(
     provider.generateImage({ ...input, model: "openai:gpt-image-2", modelSnapshot: snapshot, aspectRatio: "16:9" })
   );
-  assert.deepEqual(calls, ["primary.example"]);
+  assert.deepEqual(calls, ["primary.example", "old-grok.example", "backup.example"]);
   calls.length = 0;
   await assert.rejects(provider.generateImage({ ...input, model: "openai:gpt-image-2", modelSnapshot: snapshot }));
   assert.deepEqual(calls, ["primary.example", "old-grok.example", "backup.example"]);
@@ -622,5 +618,54 @@ test("已知 gpt-image-2-4k 即使上游未声明比例也开放全部支持比�
   });
   await service.refresh();
   assert.deepEqual(service.catalog().models[0].aspectRatios, [...aspectRatios]);
-  assert.equal(service.catalog().models[0].aspectRatioSource, "documented");
+  assert.equal(service.catalog().models[0].aspectRatioSource, "configured");
+});
+
+test("所有生图模型的全部比例均可报价，并传入正确的上游参数", async (t) => {
+  configure(t);
+  const allIds = [...ids, "gpt-image-2.5", "gpt-image-2.5-4k", "future-image-model"];
+  const service = discovery(t, { fetch: async () => response(directory(allIds)) });
+  await service.refresh();
+  const models = service.catalog().models;
+  assert.equal(models.length, allIds.length);
+  const savedFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (_url, init) => {
+    calls.push(JSON.parse(init.body));
+    return response({ data: [{ b64_json: imageBytes }] });
+  };
+  t.after(() => {
+    globalThis.fetch = savedFetch;
+  });
+  const provider = new OpenAiImageGenerationProvider({ healthStore: createChannelHealthStore({ provider: "memory" }) });
+  t.after(() => provider.close());
+  for (const model of models) {
+    assert.deepEqual(model.aspectRatios, [...aspectRatios]);
+    const snapshot = service.snapshot("primary", model.id);
+    assert.ok(
+      snapshot.channels.every((channel) => JSON.stringify(channel.aspectRatios) === JSON.stringify(aspectRatios))
+    );
+    for (const aspectRatio of aspectRatios) {
+      const request = { ...input, model: model.id, modelSnapshot: snapshot, aspectRatio };
+      const quote = quoteImageGeneration(request);
+      await provider.generateImage({ ...request, width: quote.width, height: quote.height });
+      const body = calls.at(-1);
+      assert.equal(body.model, snapshot.model.upstreamModel);
+      assert.equal(body.n, 1);
+      if (snapshot.model.apiFormat === "grok-image") {
+        assert.equal(body.aspect_ratio, aspectRatio);
+        assert.equal(body.size, undefined);
+      } else {
+        assert.equal(body.size, quote.width + "x" + quote.height);
+      }
+      if (model.resolution === "4k") {
+        assert.equal(Math.max(quote.width, quote.height), 4096);
+        assert.equal(quote.width % 16, 0);
+        assert.equal(quote.height % 16, 0);
+      } else {
+        assert.deepEqual({ width: quote.width, height: quote.height }, aspectRatioDimensions[aspectRatio]);
+      }
+    }
+  }
+  assert.equal(calls.length, models.length * aspectRatios.length);
 });

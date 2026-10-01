@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { aspectRatios as ratios } from "../packages/shared/dist/image-models.js";
 import {
   ImageModelDiscovery,
   OpenAiImageGenerationProvider,
@@ -538,19 +539,20 @@ test("generic OpenAI-compatible image models use the minimal image request contr
   );
 });
 
-test("已知旧版本只开放原生三种尺寸，显式范围不能扩大官方能力", async () => {
+test("静态兼容型号也开放全部预设比例，旧比例配置不再缩小列表", async () => {
   const base = { ...models[0], id: "openai:gpt-image-1", upstreamModel: "gpt-image-1" };
   await withConfig(
     () => {
-      assert.deepEqual(getImageModelCatalog().models[0].aspectRatios, ["1:1", "2:3", "3:2"]);
-      assert.throws(() => quoteImageGeneration({ ...input, model: base.id, aspectRatio: "16:9" }), /比例/);
+      assert.deepEqual(getImageModelCatalog().models[0].aspectRatios, [...ratios]);
+      for (const aspectRatio of ratios)
+        assert.ok(quoteImageGeneration({ ...input, model: base.id, aspectRatio }).creditCost > 0);
       assert.equal(quoteImageGeneration({ ...input, model: base.id, aspectRatio: "3:2" }).size, "1536x1024");
     },
     { IMAGE_MODELS: JSON.stringify([base]) }
   );
   await withConfig(
     () => {
-      assert.deepEqual(getImageModelCatalog().models[0].aspectRatios, ["1:1"]);
+      assert.deepEqual(getImageModelCatalog().models[0].aspectRatios, [...ratios]);
     },
     { IMAGE_MODELS: JSON.stringify([{ ...base, aspectRatios: ["1:1", "16:9"] }]) }
   );

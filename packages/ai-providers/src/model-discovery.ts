@@ -128,12 +128,7 @@ export function buildDiscoveredImageModels(
     const template = override ?? (group === "Grok" ? grokBase : base);
     const apiFormat =
       override?.apiFormat ?? (group === "GPT Image" ? "gpt-image" : group === "Grok" ? "grok-image" : "openai-images");
-    const capabilityModel = override?.upstreamModel ?? entry.id;
-    const ratioCapabilities = resolveImageAspectRatios(capabilityModel, {
-      declared: entry.supported_aspect_ratios,
-      configured: override?.aspectRatioAllowlist,
-      channel: override?.channels?.find((binding) => binding.name === primary.name)?.aspectRatios
-    });
+    const ratioCapabilities = resolveImageAspectRatios();
     const bindings = [
       {
         name: primary.name,
@@ -149,11 +144,7 @@ export function buildDiscoveredImageModels(
           // 管理员的明确同型号映射，或备用目录中精确相同的型号，才能成为候选线路。
           const target = explicit?.upstreamModel ?? override?.upstreamModel ?? entry.id;
           const directoryEntry = directories.get(channel.name)?.find((model) => model.id === target);
-          const capability = resolveImageAspectRatios(capabilityModel, {
-            declared: directoryEntry?.supported_aspect_ratios,
-            configured: override?.aspectRatioAllowlist,
-            channel: explicit?.aspectRatios
-          });
+          const capability = resolveImageAspectRatios();
           if (explicit) return [{ ...explicit, upstreamModel: target, aspectRatios: capability.aspectRatios }];
           if (directoryEntry) {
             return [
@@ -171,7 +162,6 @@ export function buildDiscoveredImageModels(
     return {
       ...structuredClone(template),
       ...ratioCapabilities,
-      aspectRatioAllowlist: override?.aspectRatioAllowlist,
       modelId: override?.modelId ?? internalId(entry.id),
       upstreamModel: entry.id,
       label: override?.label ?? entry.id,
@@ -266,12 +256,7 @@ export class ImageModelDiscovery {
           ? []
           : configured.map((model) => ({
               ...model,
-              ...(model.provider === "mock"
-                ? {}
-                : resolveImageAspectRatios(model.upstreamModel, {
-                    configured: model.aspectRatioAllowlist,
-                    channel: model.channels?.find((binding) => binding.name === channel.name)?.aspectRatios
-                  }))
+              ...(model.provider === "mock" ? {} : resolveImageAspectRatios())
             }));
     const routable = models.filter(
       (model) =>

@@ -36,7 +36,7 @@ const defaultOpenAiModel: ProviderModelConfig = {
   apiFormat: "gpt-image",
   qualities,
   aspectRatios,
-  aspectRatioSource: "documented",
+  aspectRatioSource: "configured",
   maxQuantity: 4,
   qualityMultiplier: { draft: 0.75, standard: 1, high: 1.7 },
   sizeMultiplier: { "1024x1024": 1, "1024x1536": 1.22, "1536x1024": 1.22 },
@@ -180,11 +180,11 @@ function normalizeModel(value: unknown, index: number): ProviderModelConfig {
     const name = readText(binding.name, bindingPrefix + ".name", 64);
     if (channelNames.has(name)) throw new Error(prefix + ".channels contains a duplicate binding");
     channelNames.add(name);
+    if (binding.aspectRatios !== undefined)
+      readOptions(binding.aspectRatios, aspectRatios, bindingPrefix + ".aspectRatios");
     return {
       name,
-      ...(binding.aspectRatios === undefined
-        ? {}
-        : { aspectRatios: readOptions(binding.aspectRatios, aspectRatios, bindingPrefix + ".aspectRatios") }),
+      aspectRatios: [...aspectRatios],
       ...(binding.upstreamModel === undefined
         ? {}
         : {
@@ -199,11 +199,8 @@ function normalizeModel(value: unknown, index: number): ProviderModelConfig {
   });
   const supportedQualities = apiFormat === "gpt-image" ? qualities : ["standard" as const];
   const allowedQualities = readOptions(entry.qualities, supportedQualities, prefix + ".qualities");
-  const ratioAllowlist =
-    entry.aspectRatios === undefined
-      ? undefined
-      : readOptions(entry.aspectRatios, aspectRatios, prefix + ".aspectRatios");
-  const ratioCapabilities = resolveImageAspectRatios(upstreamModel, { configured: ratioAllowlist });
+  if (entry.aspectRatios !== undefined) readOptions(entry.aspectRatios, aspectRatios, prefix + ".aspectRatios");
+  const ratioCapabilities = resolveImageAspectRatios();
   const maxQuantity = entry.maxQuantity === undefined ? 4 : readNumber(entry.maxQuantity, prefix + ".maxQuantity");
   if (!Number.isInteger(maxQuantity) || maxQuantity > 4) throw new Error(prefix + ".maxQuantity must be 1 to 4");
   return {
@@ -217,7 +214,6 @@ function normalizeModel(value: unknown, index: number): ProviderModelConfig {
     channels,
     qualities: allowedQualities,
     ...ratioCapabilities,
-    ...(ratioAllowlist ? { aspectRatioAllowlist: ratioAllowlist } : {}),
     maxQuantity,
     quantityMultiplier: readNumber(entry.creditsPerImage, prefix + ".creditsPerImage"),
     costCentsPerImage: readNumber(entry.costCentsPerImage, prefix + ".costCentsPerImage", true),
@@ -289,67 +285,9 @@ function readMultipliers<Key extends string>(
   return result;
 }
 
-/** 仅精确匹配已核对的型号/官方别名；不能让新版本继承计费模板的能力。 */
-export function documentedImageAspectRatios(upstreamModel: string): AspectRatio[] | undefined {
-  const id = upstreamModel.trim().toLowerCase().replace(/[ _]+/g, "-");
-  // https://developers.openai.com/api/docs/guides/image-generation#earlier-gpt-image-models
-  if (["gpt-image-2", "gpt-image-2-2026-04-21"].includes(id)) return [...aspectRatios];
-  // 当前网关确认 gpt-image-2-4k 走 GPT Image 同协议，并开放同一套比例。
-  if (id === "gpt-image-2-4k") return [...aspectRatios];
-  if (["gpt-image-1", "gpt-image-1-mini", "gpt-image-1.5"].includes(id)) return ["1:1", "2:3", "3:2"];
-  // https://ai.google.dev/gemini-api/docs/image-generation#aspect_ratios_and_image_size
-  if (
-    [
-      "nano-banana",
-      "nano-banana-2",
-      "nano-banana-2-lite",
-      "nano-banana-pro",
-      "gemini-2.5-flash-image",
-      "gemini-3.1-flash-image",
-      "gemini-3.1-flash-image-preview",
-      "gemini-3.1-flash-lite-image",
-      "gemini-3-pro-image",
-      "gemini-3-pro-image-preview"
-    ].includes(id)
-  )
-    return aspectRatios.filter((ratio) => ratio !== "1:2" && ratio !== "2:1");
-  // https://docs.x.ai/developers/model-capabilities/images/generation#aspect-ratio
-  if (
-    [
-      "grok-imagine-image",
-      "grok-imagine-image-2.0",
-      "grok-imagine-image-pro",
-      "grok-imagine-image-quality",
-      "grok-imagine-image-quality-20260403",
-      "grok-imagine-image-quality-latest"
-    ].includes(id)
-  )
-    return aspectRatios.filter((ratio) => ratio !== "4:5" && ratio !== "5:4");
-  // 其他第三方型号不能仅通过名称推断支持范围。
-  return undefined;
-}
-
-export function resolveImageAspectRatios(
-  upstreamModel: string,
-  options: { declared?: AspectRatio[]; configured?: AspectRatio[]; channel?: AspectRatio[] } = {}
-): Pick<ProviderModelConfig, "aspectRatios" | "aspectRatioSource"> {
-  const documented = documentedImageAspectRatios(upstreamModel);
-  const supported = options.declared ?? documented ?? options.channel ?? options.configured ?? [];
-  return {
-    aspectRatios: aspectRatios.filter(
-      (ratio) =>
-        supported.includes(ratio) &&
-        (!options.configured || options.configured.includes(ratio)) &&
-        (!options.channel || options.channel.includes(ratio))
-    ),
-    aspectRatioSource: options.declared
-      ? "upstream"
-      : documented
-        ? "documented"
-        : options.channel || options.configured
-          ? "configured"
-          : "unverified"
-  };
+/** 2026-10-01 产品确认：所有生图模型统一支持界面列出的全部预设比例。 */
+export function resolveImageAspectRatios(): Pick<ProviderModelConfig, "aspectRatios" | "aspectRatioSource"> {
+  return { aspectRatios: [...aspectRatios], aspectRatioSource: "configured" };
 }
 
 export function isGpt4kModel(upstreamModel: string): boolean {

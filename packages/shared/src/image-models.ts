@@ -67,7 +67,7 @@ export interface ProviderModelConfig {
   channels?: ImageModelChannel[];
   qualities: Quality[];
   aspectRatios: AspectRatio[];
-  /** 显式部署限制，不能被自动发现或文档默认值扩大。 */
+  /** 兼容历史任务快照；新模型目录统一使用全部预设比例。 */
   aspectRatioAllowlist?: AspectRatio[];
   aspectRatioSource?: ImageAspectRatioSource;
   maxQuantity: number;
