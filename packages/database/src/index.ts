@@ -11,8 +11,8 @@ import type {
   SafetyRule as SafetyRuleRow,
   OperationalIncident as IncidentRow
 } from "../generated/client/index.js";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { lstat, mkdir, open, readdir, readFile, rename, unlink } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Prisma, PrismaClient } from "../generated/client/index.js";
@@ -174,11 +174,17 @@ export function createStore(): Store {
   return new DevelopmentFallbackStore(prismaStore, new JsonStore());
 }
 
+const JSON_STORE_FILE_RETRY_DELAYS_MS = [25, 50, 100, 200, 400] as const;
+const JSON_STORE_TEMP_MIN_AGE_MS = 60 * 60 * 1000;
+const JSON_STORE_TEMP_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const JSON_STORE_TEMP_CLEANUP_BATCH_SIZE = 32;
+
 export class JsonStore implements Store {
   readonly filePath: string;
   private updateChain: Promise<void> = Promise.resolve();
   private streamCache?: { version: string; data: StoreData };
   private snapshotRead?: { version: string; promise: Promise<StoreData> };
+  private nextTemporaryCleanupAt = 0;
 
   constructor(filePath = resolveStorePath(process.env.IMAGORA_STORE_PATH)) {
     this.filePath = filePath;
@@ -479,14 +485,83 @@ export class JsonStore implements Store {
 
   private async writeUnlocked(data: StoreData): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
-    const temporaryPath = `${this.filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-    await rename(temporaryPath, this.filePath);
+    const content = JSON.stringify(data, null, 2) + "\n";
+    const temporaryPath = this.filePath + "." + process.pid + "." + Date.now() + "." + randomUUID() + ".tmp";
+    // 独占创建成功后才拥有此临时文件，不能删除碰巧已存在的文件。
+    const handle = await open(temporaryPath, "wx");
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.close();
+      // 每次只重试替换同一份快照，不重跑业务变更，也不删除正式数据库。
+      await retryTransientFileOperation(() => rename(temporaryPath, this.filePath));
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      try {
+        await retryTransientFileOperation(async () => {
+          try {
+            await unlink(temporaryPath);
+          } catch (cleanupError) {
+            if (!isNodeError(cleanupError, "ENOENT")) throw cleanupError;
+          }
+        });
+      } catch (cleanupError) {
+        warnTemporaryCleanupFailure(temporaryPath, cleanupError);
+      }
+      throw error;
+    }
+    // 回收失败不能把已经提交成功的业务写入误报为失败。
+    await this.cleanupStaleTemporaryFiles();
+  }
+
+  private async cleanupStaleTemporaryFiles(): Promise<void> {
+    const now = Date.now();
+    if (now < this.nextTemporaryCleanupAt) return;
+    this.nextTemporaryCleanupAt = now + JSON_STORE_TEMP_CLEANUP_INTERVAL_MS;
+    try {
+      // 正式数据库不可读时保留崩溃快照，供恢复使用；调用者始终持有该库的写锁。
+      await this.readUnlocked();
+      const directory = dirname(this.filePath);
+      const prefix = basename(this.filePath) + ".";
+      const cutoff = now - JSON_STORE_TEMP_MIN_AGE_MS;
+      let attempted = 0;
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.startsWith(prefix)) continue;
+        const match = /^([1-9]\d*)\.(\d+)\.[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.tmp$/i.exec(
+          entry.name.slice(prefix.length)
+        );
+        if (!match) continue;
+        const ownerPid = Number(match[1]);
+        const createdAt = Number(match[2]);
+        if (
+          !Number.isSafeInteger(ownerPid) ||
+          ownerPid > 0x7fffffff ||
+          !Number.isSafeInteger(createdAt) ||
+          createdAt <= 0 ||
+          createdAt > cutoff ||
+          !isProcessDefinitelyExited(ownerPid)
+        )
+          continue;
+        const temporaryPath = join(directory, entry.name);
+        try {
+          const metadata = await lstat(temporaryPath);
+          if (!metadata.isFile() || metadata.mtimeMs > cutoff) continue;
+          attempted += 1;
+          // 每个旧文件只尝试一次，避免占用写锁等待整批重试。
+          await unlink(temporaryPath);
+        } catch (error) {
+          if (!isNodeError(error, "ENOENT")) warnTemporaryCleanupFailure(temporaryPath, error);
+        }
+        if (attempted >= JSON_STORE_TEMP_CLEANUP_BATCH_SIZE) break;
+      }
+    } catch (error) {
+      warnTemporaryCleanupFailure(this.filePath, error);
+    }
   }
 
   private async ensureInitialized(): Promise<void> {
     await withFileLock(this.filePath, async () => {
       await this.ensureInitializedUnlocked();
+      await this.cleanupStaleTemporaryFiles();
     });
   }
 
@@ -1898,6 +1973,38 @@ function isPrismaUnavailableError(error: unknown): boolean {
     code === "P1001" ||
     /Can't reach database server|ECONNREFUSED|ETIMEDOUT|ENOTFOUND/i.test(message)
   );
+}
+
+async function retryTransientFileOperation(operation: () => Promise<void>): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await operation();
+      return;
+    } catch (error) {
+      const delay = JSON_STORE_FILE_RETRY_DELAYS_MS[attempt];
+      const transient = ["EPERM", "EBUSY", "EACCES"].some((code) => isNodeError(error, code));
+      if (!transient || delay === undefined) throw error;
+      await sleep(delay);
+    }
+  }
+}
+
+function isProcessDefinitelyExited(pid: number): boolean {
+  if (pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    // 权限不足不代表进程已退出，不能据此删除其文件。
+    return isNodeError(error, "ESRCH");
+  }
+}
+
+function warnTemporaryCleanupFailure(filePath: string, error: unknown): void {
+  process.emitWarning("Could not clean JSON store temporary file: " + filePath, {
+    code: "JSON_STORE_TEMP_CLEANUP_FAILED",
+    detail: error instanceof Error ? error.message : String(error)
+  });
 }
 
 async function withFileLock<T>(filePath: string, action: () => Promise<T>): Promise<T> {

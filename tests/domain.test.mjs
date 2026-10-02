@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHmac, randomUUID } from "node:crypto";
+import fileSystem, { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import {
   assertProductionOpenAiGenerationConfig,
@@ -897,6 +898,235 @@ test("seed users have verifiable password hashes", async () => {
 
   await rm(dir, { recursive: true, force: true });
 });
+
+test("json store retries transient replacement errors using the same temporary snapshot", async (t) => {
+  const fixture = await jsonWriteFixture(t);
+  const originalRename = fileSystem.rename;
+  const temporaryPaths = new Set();
+  let attempts = 0;
+  let mutations = 0;
+  mockStoreFileSystem(t, "rename", async (source, destination) => {
+    temporaryPaths.add(source);
+    assert.equal(await fileSystem.readFile(fixture.filePath, "utf8"), fixture.original);
+    if (++attempts <= 2) throw fileError(attempts === 1 ? "EPERM" : "EBUSY");
+    return originalRename(source, destination);
+  });
+  await fixture.store.update((data) => {
+    mutations += 1;
+    data.plans[0].name = "retried successfully";
+  });
+  assert.equal(mutations, 1);
+  assert.equal(attempts, 3);
+  assert.equal(temporaryPaths.size, 1);
+  assert.equal((await fixture.store.read()).plans[0].name, "retried successfully");
+  assert.deepEqual(await fileSystem.readdir(fixture.directory), ["store.json"]);
+});
+
+test("json store removes failed snapshots and preserves the committed database", async (t) => {
+  for (const [code, expectedAttempts] of [
+    ["EPERM", 6],
+    ["EINVAL", 1]
+  ]) {
+    await t.test(code, async (t) => {
+      const fixture = await jsonWriteFixture(t);
+      const failure = fileError(code);
+      let attempts = 0;
+      mockStoreFileSystem(t, "rename", async () => {
+        attempts += 1;
+        throw failure;
+      });
+      const unrelated = join(fixture.directory, "another-store.json.123.1.unrelated.tmp");
+      await fileSystem.writeFile(unrelated, "retain unrelated file");
+      await assert.rejects(
+        fixture.store.update((data) => {
+          data.plans[0].name = "must not commit";
+        }),
+        (error) => error === failure
+      );
+      assert.equal(attempts, expectedAttempts);
+      assert.equal(await fileSystem.readFile(fixture.filePath, "utf8"), fixture.original);
+      assert.deepEqual((await fileSystem.readdir(fixture.directory)).sort(), [
+        "another-store.json.123.1.unrelated.tmp",
+        "store.json"
+      ]);
+    });
+  }
+});
+
+test("json store cleans a partially written snapshot when the disk write fails", async (t) => {
+  const fixture = await jsonWriteFixture(t);
+  const originalOpen = fileSystem.open;
+  const failure = fileError("ENOSPC");
+  mockStoreFileSystem(t, "open", async (file, ...options) => {
+    const handle = await originalOpen(file, ...options);
+    if (String(file).endsWith(".tmp")) {
+      const write = handle.writeFile.bind(handle);
+      handle.writeFile = async () => {
+        await write("{partial");
+        throw failure;
+      };
+    }
+    return handle;
+  });
+  await assert.rejects(fixture.store.write(createInitialData()), (error) => error === failure);
+  assert.equal(await fileSystem.readFile(fixture.filePath, "utf8"), fixture.original);
+  assert.deepEqual(await fileSystem.readdir(fixture.directory), ["store.json"]);
+});
+
+test("json store never removes a temporary path it failed to create exclusively", async (t) => {
+  const fixture = await jsonWriteFixture(t);
+  const originalOpen = fileSystem.open;
+  let collisionPath;
+  mockStoreFileSystem(t, "open", async (file, ...options) => {
+    if (String(file).endsWith(".tmp")) {
+      assert.equal(options[0], "wx");
+      collisionPath = file;
+      await fileSystem.writeFile(file, "existing owner");
+    }
+    return originalOpen(file, ...options);
+  });
+  await assert.rejects(fixture.store.write(createInitialData()), { code: "EEXIST" });
+  assert.equal(await fileSystem.readFile(collisionPath, "utf8"), "existing owner");
+  assert.equal(await fileSystem.readFile(fixture.filePath, "utf8"), fixture.original);
+});
+
+test("json store reports cleanup failure without hiding the original save error", async (t) => {
+  const fixture = await jsonWriteFixture(t);
+  const failure = fileError("EINVAL");
+  const originalUnlink = fileSystem.unlink;
+  mockStoreFileSystem(t, "rename", async () => {
+    throw failure;
+  });
+  mockStoreFileSystem(t, "unlink", async (file) => {
+    if (String(file).endsWith(".tmp")) throw fileError("EACCES");
+    return originalUnlink(file);
+  });
+  const warnings = t.mock.method(process, "emitWarning", () => {});
+  await assert.rejects(fixture.store.write(createInitialData()), (error) => error === failure);
+  assert.equal(await fileSystem.readFile(fixture.filePath, "utf8"), fixture.original);
+  assert.equal(warnings.mock.callCount(), 1);
+  assert.equal(warnings.mock.calls[0].arguments[1].code, "JSON_STORE_TEMP_CLEANUP_FAILED");
+});
+
+test("json store reclaims only old abandoned snapshots in bounded periodic batches", async (t) => {
+  const fixture = await jsonWriteFixture(t);
+  const now = Date.now();
+  const old = now - 2 * 60 * 60 * 1000;
+  const deadPid = process.pid + 100000;
+  const unknownPid = deadPid + 1;
+  const activePid = deadPid + 2;
+  t.mock.method(process, "kill", (pid, signal) => {
+    assert.equal(signal, 0);
+    if (pid === deadPid) throw fileError("ESRCH");
+    if (pid === unknownPid) throw fileError("EPERM");
+    assert.equal(pid, activePid);
+    return true;
+  });
+  const createTemporary = async (pid, timestamp, modifiedAt = timestamp, storeName = "store.json") => {
+    const file = join(fixture.directory, storeName + "." + pid + "." + timestamp + "." + randomUUID() + ".tmp");
+    await fileSystem.writeFile(file, "abandoned snapshot");
+    await fileSystem.utimes(file, new Date(modifiedAt), new Date(modifiedAt));
+    return file;
+  };
+  const abandoned = [];
+  for (let index = 0; index < 34; index += 1) abandoned.push(await createTemporary(deadPid, old));
+  const retained = [
+    await createTemporary(process.pid, old),
+    await createTemporary(activePid, old),
+    await createTemporary(unknownPid, old),
+    await createTemporary(deadPid, now),
+    await createTemporary(deadPid, old, now),
+    await createTemporary(deadPid, old, old, "other.json")
+  ];
+  const malformed = join(fixture.directory, "store.json." + deadPid + "." + old + ".not-a-uuid.tmp");
+  await fileSystem.writeFile(malformed, "abandoned snapshot");
+  await fileSystem.utimes(malformed, new Date(old), new Date(old));
+  retained.push(malformed);
+  await fixture.store.initialize();
+  assert.equal((await fileSystem.readdir(fixture.directory)).length, retained.length + 2 + 1);
+  await fixture.store.initialize();
+  assert.equal((await fileSystem.readdir(fixture.directory)).length, retained.length + 2 + 1);
+  t.mock.method(Date, "now", () => now + 5 * 60 * 1000 + 5000);
+  await fixture.store.update(() => {});
+  for (const file of abandoned) await assert.rejects(fileSystem.access(file), { code: "ENOENT" });
+  for (const file of retained) assert.equal(await fileSystem.readFile(file, "utf8"), "abandoned snapshot");
+  assert.equal(await fileSystem.readFile(fixture.filePath, "utf8"), fixture.original);
+});
+
+test("json store retries temporary cleanup when a failed snapshot is briefly locked", async (t) => {
+  const fixture = await jsonWriteFixture(t);
+  const failure = fileError("EINVAL");
+  const originalUnlink = fileSystem.unlink;
+  let attempts = 0;
+  mockStoreFileSystem(t, "rename", async () => {
+    throw failure;
+  });
+  mockStoreFileSystem(t, "unlink", async (file) => {
+    if (String(file).endsWith(".tmp") && ++attempts <= 2) throw fileError("EBUSY");
+    return originalUnlink(file);
+  });
+  await assert.rejects(fixture.store.write(createInitialData()), (error) => error === failure);
+  assert.equal(attempts, 3);
+  assert.equal(await fileSystem.readFile(fixture.filePath, "utf8"), fixture.original);
+  assert.deepEqual(await fileSystem.readdir(fixture.directory), ["store.json"]);
+});
+
+test("json store housekeeping failures do not reject a committed update", async (t) => {
+  const fixture = await jsonWriteFixture(t);
+  mockStoreFileSystem(t, "readdir", async () => {
+    throw fileError("EACCES");
+  });
+  const warnings = t.mock.method(process, "emitWarning", () => {});
+  const result = await fixture.store.update((data) => {
+    data.plans[0].name = "committed despite cleanup failure";
+    return "saved";
+  });
+  assert.equal(result, "saved");
+  assert.equal((await fixture.store.read()).plans[0].name, "committed despite cleanup failure");
+  assert.equal(warnings.mock.callCount(), 1);
+  assert.equal(warnings.mock.calls[0].arguments[1].code, "JSON_STORE_TEMP_CLEANUP_FAILED");
+});
+
+test("json store preserves crash snapshots if the committed database cannot be parsed", async (t) => {
+  const fixture = await jsonWriteFixture(t);
+  const old = Date.now() - 2 * 60 * 60 * 1000;
+  const temporary = join(
+    fixture.directory,
+    "store.json." + (process.pid + 100000) + "." + old + "." + randomUUID() + ".tmp"
+  );
+  await fileSystem.writeFile(temporary, fixture.original);
+  await fileSystem.utimes(temporary, new Date(old), new Date(old));
+  await fileSystem.writeFile(fixture.filePath, "{broken");
+  t.mock.method(process, "emitWarning", () => {});
+  await fixture.store.initialize();
+  await assert.rejects(fixture.store.read(), SyntaxError);
+  assert.equal(await fileSystem.readFile(temporary, "utf8"), fixture.original);
+  assert.equal(await fileSystem.readFile(fixture.filePath, "utf8"), "{broken");
+});
+
+async function jsonWriteFixture(t) {
+  const directory = await mkdtemp(join(tmpdir(), "imagora-store-write-"));
+  assert.equal(dirname(directory), resolve(tmpdir()));
+  t.after(async () => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const filePath = join(directory, "store.json");
+  const original = JSON.stringify(createInitialData(), null, 2) + "\n";
+  await fileSystem.writeFile(filePath, original);
+  return { directory, filePath, original, store: new JsonStore(filePath) };
+}
+
+function mockStoreFileSystem(t, method, implementation) {
+  const mocked = t.mock.method(fileSystem, method, implementation);
+  syncBuiltinESMExports();
+  return mocked;
+}
+
+function fileError(code) {
+  return Object.assign(new Error("simulated " + code), { code });
+}
 
 test("production initial data requires explicit bootstrap admin credentials", () => {
   const previous = snapshotEnv([
